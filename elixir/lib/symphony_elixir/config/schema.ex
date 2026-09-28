@@ -244,6 +244,29 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Acp do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+
+    embedded_schema do
+      # No default: the ACP command is runtime configuration of the consumer and
+      # preflight requires it when `executor.kind: acp`.
+      field(:command, :string)
+      # Fail closed: never approve an ACP permission request unless the workflow
+      # says so explicitly.
+      field(:auto_approve_requests, :boolean, default: false)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:command, :auto_approve_requests], empty_values: [])
+    end
+  end
+
   defmodule Hooks do
     @moduledoc false
     use Ecto.Schema
@@ -314,6 +337,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:executor, Executor, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:acp, Acp, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -409,6 +433,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:executor, with: &Executor.changeset/2)
+    |> cast_embed(:acp, with: &Acp.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)

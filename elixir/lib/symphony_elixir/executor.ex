@@ -18,6 +18,7 @@ defmodule SymphonyElixir.Executor do
   alias SymphonyElixir.Config
 
   @executors %{
+    "acp" => SymphonyElixir.Executor.Acp,
     "codex" => SymphonyElixir.Executor.Codex
   }
 
@@ -26,6 +27,19 @@ defmodule SymphonyElixir.Executor do
   @callback start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   @callback run_turn(session(), String.t(), term(), keyword()) :: {:ok, map()} | {:error, term()}
   @callback stop_session(session()) :: :ok
+
+  @doc """
+  Validates its own part of the workflow configuration for dispatch preflight.
+
+  Implementations are optional: a kind without specific configuration (Codex)
+  needs no argument validation beyond `codex.*` schema checks, while a kind with
+  required settings (ACP needs `acp.command`) fails preflight here, before any
+  worker is dispatched. The full settings struct is passed so the implementation
+  can read its own block without `Config` having to know about executors.
+  """
+  @callback validate_config(map()) :: :ok | {:error, term()}
+
+  @optional_callbacks validate_config: 1
 
   @doc """
   Resolves a configured executor kind to its implementation module.
@@ -55,10 +69,17 @@ defmodule SymphonyElixir.Executor do
   Validates the `executor` config block for dispatch preflight.
   """
   @spec validate_config(map()) :: :ok | {:error, term()}
-  def validate_config(%{kind: kind}) do
-    case for_kind(kind) do
-      {:ok, _module} -> :ok
-      {:error, reason} -> {:error, reason}
+  def validate_config(%{executor: %{kind: kind}} = settings) do
+    with {:ok, module} <- for_kind(kind) do
+      validate_implementation_config(module, settings)
+    end
+  end
+
+  defp validate_implementation_config(module, settings) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :validate_config, 1) do
+      module.validate_config(settings)
+    else
+      :ok
     end
   end
 end

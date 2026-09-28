@@ -120,7 +120,13 @@ defmodule SymphonyElixir.ClineAcpE2ETest do
     assert String.trim(output) == "42"
     refute File.read!(Path.join(context.workspace, "answer.sh")) == @answer_script
 
-    assert "answer.sh" in git_changed_paths(context.workspace)
+    # Only the file the prompt asked for may change in the disposable project. An
+    # empty worktree is accepted as well: committing inside the throwaway repo is
+    # harmless and still leaves no change outside `answer.sh`.
+    changed = git_changed_paths(context.workspace)
+
+    assert changed in [[], ["answer.sh"]],
+           "only answer.sh may change in the disposable project, got: #{inspect(changed)}"
 
     # Nothing outside the disposable workspace of this test was involved.
     assert String.starts_with?(context.workspace, context.test_root)

@@ -1,13 +1,17 @@
 # Análise Codex App Server ↔ ACP (fase documental do fork)
 
-- **Status:** análise documental concluída; implementação **não** iniciada
-- **Data:** 2026-09-27
+- **Status:** análise concluída e **decisões humanas Q1–Q10 incorporadas**;
+  implementação **não** iniciada
+- **Data:** 2026-09-27 (revisão com as decisões humanas)
 - **Base do código analisado:** `origin/main` = `90d9372cdeb2123e4a5f53a7217461d9d579ace1`
   (`Merge pull request #1 from rbcorrea26/docs/fork-charter`)
 - **Base upstream registrada:** `upstream/main` = `be10a1b79df723d6d7612b5651c8522704dafb2e`
   (o fork estava `ahead 3 / behind 0` em relação a `upstream/main` na data desta análise)
-- **ADRs derivados:** [adr/0001-executor-abstraction.md](adr/0001-executor-abstraction.md),
+- **ADRs derivados:** [adr/0001-executor-abstraction.md](adr/0001-executor-abstraction.md)
+  (aceito, implementação pendente) e
   [adr/0002-acp-protocol-mapping.md](adr/0002-acp-protocol-mapping.md)
+  (aceito, implementação pendente) — **eles são a fonte normativa das decisões**;
+  este documento é a evidência
 - **Escopo:** nenhuma linha de código foi alterada por esta análise; o caminho
   Codex app-server permanece intacto.
 
@@ -219,7 +223,7 @@ no ACP). Linhas numeradas (`D1`…`D33`) para citação em
 
 | # | Dimensão | Symphony/Codex hoje | ACP | Equivalência | Gap | Adaptação necessária |
 |---|---|---|---|---|---|---|
-| D1 | Criação do processo | `Port.open` → `bash -lc <codex.command>` com `cd` no workspace, `env` saneado (segredos do tracker removidos), `line: 1 MiB`, `:stderr_to_stdout`; remoto via `SSH.start_port` | Cliente lança o agente como subprocesso; `stdio` com JSON-RPC delimitado por `\n`; `stderr` livre para log | adaptável | A spec não define a linha de comando nem o `cwd` do processo (só `session/new.cwd`); não define separação de `stderr` | Reusar o mesmo lançamento (`executor.command` + `Port`/`SSH`) e manter o saneamento de env; manter parser tolerante porque `:stderr_to_stdout` mistura log do agente no `stdout` (a spec proíbe isso do lado do agente) |
+| D1 | Criação do processo | `Port.open` → `bash -lc <codex.command>` com `cd` no workspace, `env` saneado (segredos do tracker removidos), `line: 1 MiB`, `:stderr_to_stdout`; remoto via `SSH.start_port` | Cliente lança o agente como subprocesso; `stdio` com JSON-RPC delimitado por `\n`; `stderr` livre para log | adaptável | A spec não define a linha de comando nem o `cwd` do processo (só `session/new.cwd`); não define separação de `stderr` | Reusar o mesmo lançamento (`Port`/`SSH` + comando configurado do executor) e manter o saneamento de env; manter parser tolerante porque `:stderr_to_stdout` mistura log do agente no `stdout` (a spec proíbe isso do lado do agente) |
 | D2 | Handshake / initialize | `initialize` (`capabilities.experimentalApi` + `clientInfo`) e notificação `initialized`; ids fixos 1/2/3 | `initialize` com `protocolVersion`, `clientCapabilities`, `clientInfo` → `protocolVersion` escolhido, `agentCapabilities`, `agentInfo`, `authMethods`; sem notificação `initialized` | adaptável | Negociação de versão (o cliente MUST usar a maior que suporta; incompatível ⇒ fechar) e capacidades omitidas = UNSUPPORTED | Novo handshake no executor ACP: enviar `protocolVersion: 1`, anunciar somente capacidades implementadas, validar a versão devolvida e falhar cedo (`{:error, {:acp_version_unsupported, v}}`) |
 | D3 | Capabilities | Cliente anuncia `experimentalApi: true`; ferramentas do cliente entram em `thread/start.dynamicTools` | `clientCapabilities` opt-in (`fs`, `terminal`, `elicitation`, `auth.terminal`, `session.configOptions`) + `agentCapabilities` do agente | adaptável | Semântica oposta: no Codex o cliente **oferece** ferramentas; no ACP o cliente **executa** operações pedidas pelo agente | Anunciar o mínimo (proposta inicial: **nenhuma** capacidade de cliente) e registrar cada capacidade anunciada como decisão explícita de privilégio |
 | D4 | Autenticação | Nenhuma no protocolo (Codex usa credencial própria no host) | `authenticate` + `authMethods` (incl. tipo `terminal`), capability `auth.logout` | ACP-specific | Symphony não tem caminho para autenticação interativa | Não automatizar (`cline auth` é manual, ADR-0003 da plataforma); `auth_required` deve virar bloqueio/erro registrado, nunca prompt interativo |
@@ -241,7 +245,7 @@ no ACP). Linhas numeradas (`D1`…`D33`) para citação em
 | D10 | Tool calls (relato) | Notificações `item/*` e pedidos de aprovação; ferramentas do cliente resolvidas no Symphony | `tool_call` / `tool_call_update` (nome, título, `kind`, `status`, `content`, `locations`, `rawInput`/`rawOutput`) | adaptável | O agente ACP executa as ferramentas; o Symphony só observa (salvo `fs.*`/`terminal`, que não serão anunciados) | Mapear para eventos de observabilidade; **não** tentar executar nem bloquear ferramenta do agente, exceto via `session/request_permission` (D13) |
 | D11 | Client-side tools | O cliente (Symphony) expõe `dynamicTools`; `item/tool/call` executa no host com auth do tracker e devolve resultado | Não existe registro de ferramenta do cliente; o cliente executa apenas `fs/*` e `terminal/*`, quando anunciados | sem equivalente direto | Ferramentas do tracker (`linear_graphql`, `github_api`, …) não têm canal ACP equivalente | Gap registrado. Caminho futuro possível: expor as ferramentas do tracker como **servidor MCP local** em `session/new.mcpServers` (fase 4+, exige ADR). **Não** anunciar `fs`/`terminal` para contornar isso |
 | D12 | Dynamic tools | `thread/start.dynamicTools` + `DynamicTool.bind/execute` (adapter do tracker, com `secret_environment_names`) | Sem equivalente | sem equivalente direto | Mesmo gap de D11, visto pelo lado do Symphony: nenhuma forma de injetar ferramenta própria | Manter `DynamicTool` intacto para Codex; para ACP registrar indisponibilidade (o agente usa as ferramentas que ele já tem) |
-| D13 | Approval requests | `approval_policy` (config) + métodos `*/requestApproval`, `execCommandApproval`, `applyPatchApproval`; auto-resposta quando `approval_policy == "never"`; caso contrário `:approval_required` → issue bloqueada | `session/request_permission` com `options[].kind` (`allow_once`, `allow_always`, `reject_once`, `reject_always`) e resposta `outcome` (`selected`/`cancelled`) | adaptável | Não existe política global de aprovação no ACP; a decisão é por chamada; e a spec exige **resposta** ao request | Nova política de executor (`executor.acp.auto_approve_requests`, default **false**): auto-aprovar ⇒ escolher a opção `allow_*`; não auto-aprovar ⇒ manter a semântica atual (emitir `:approval_required`, bloquear a issue e encerrar a sessão) |
+| D13 | Approval requests | `approval_policy` (config) + métodos `*/requestApproval`, `execCommandApproval`, `applyPatchApproval`; auto-resposta quando `approval_policy == "never"`; caso contrário `:approval_required` → issue bloqueada | `session/request_permission` com `options[].kind` (`allow_once`, `allow_always`, `reject_once`, `reject_always`) e resposta `outcome` (`selected`/`cancelled`) | adaptável | Não existe política global de aprovação no ACP; a decisão é por chamada; e a spec exige **resposta** ao request | **Decisão Q2:** `acp.auto_approve_requests` com default **`false`** (fail closed) — o cliente responde recusando/bloqueando (`:approval_required` + issue bloqueada), nunca aprova automaticamente; autoaprovação futura é configuração explícita e testada |
 | D14 | User input requests | `item/tool/requestUserInput` (+ heurística `mcp_tool_call_approval_*`), `mcpServer/elicitation/request` e `turn/*input_required*` → `:turn_input_required` → issue bloqueada | `elicitation/create` (modos `form` e `url`), capability de cliente opt-in; o agente MUST NOT pedir modo não anunciado | sem equivalente direto | Formato/semântica diferentes (questions/options vs. JSON Schema de formulário e URL out-of-band) | Fase 3: **não** anunciar elicitation; pedidos de input do agente não são atendidos (o agente encerra o turno e o orquestrador trata como conclusão/erro). Adotar `elicitation` é decisão futura com ADR |
 
 | D15 | Sandbox / policy | `thread_sandbox` (`read-only`, `workspace-write`, `danger-full-access`) e `turn_sandbox_policy` (`workspaceWrite`, `writableRoots`, `readOnlyAccess`, `networkAccess`) aplicados pelo Codex | **Sem equivalente**: nenhuma política de sandbox, filesystem ou rede | sem equivalente direto | O ACP não oferece nenhum controle equivalente; o que o agente pode ler/escrever/rede é decisão do agente e do SO | Gap registrado e explícito: para ACP o Symphony **não** promete sandbox. Mitigações são do projeto/plataforma (workspace dedicado, ausência de segredos no env do filho, sem privilégio, Draft PR, gates). Ver §8 |
@@ -254,15 +258,15 @@ no ACP). Linhas numeradas (`D1`…`D33`) para citação em
 | D21 | Process crash | `{:exit_status, status}` → `{:error, {:port_exit, status}}` → runner falha → orquestrador agenda retry com backoff | Mesmo modelo: o agente é subprocesso do cliente; a morte é detectada pelo cliente | 1:1 | Nenhum | Nenhuma: o tratamento de saída do port é reusável |
 | D22 | Malformed messages | Linha não-JSON é logada; se parece JSON (`{`), emite `:malformed`; JSON sem `method` vira `:other_message`; o waiter de resposta ignora mensagens que não são dela | O agente **MUST NOT** escrever não-ACP em `stdout`; `stderr` é livre | adaptável | A spec é mais estrita que a implementação atual; e `:stderr_to_stdout` viola o framing na prática | Manter o parser tolerante (paridade de comportamento e robustez contra log do agente no `stdout`), logando `:malformed` para diagnóstico; não transformar tolerância em contrato |
 | D23 | Retry | Symphony-specific: backoff com `agent.max_retry_backoff_ms`, `delay_type: :continuation` para retomada normal, tentativa preservando `worker_host`/`workspace_path` | Protocolo-agnóstico (nova tentativa ⇒ novo processo e nova `session/new`) | Symphony-specific | Nenhum | Nenhuma mudança: a nova tentativa abre nova sessão ACP, do mesmo modo que hoje abre nova thread |
-| D24 | Continuation após retry | Prompt de continuação textual gerado pelo runner, com menção explícita a "Codex" (linhas 144–154 de `agent_runner.ex`); `attempt` interpolado pelo template do `WORKFLOW.md` | Mesma semântica (novo `session/prompt` na mesma sessão, ou sessão nova após retry) | adaptável | Texto de continuação é específico de Codex e viaja para o modelo; com ACP continua tecnicamente válido, mas desatualizado | Fase 3 aceita o texto atual (é orientação ao modelo, não protocolo) e registra a dívida; neutralizar a redação é mudança mínima opcional, dependente de decisão |
-| D25 | Session / thread identity | `session_id = "<thread_id>-<turn_id>"` (`SPEC.md` §4.2, §10.2), consumido por logs, dashboard, `turn_count` e bloqueio | Apenas `sessionId`; **não existe** identificador de turno | adaptável | ACP não fornece `turn_id`, e o orquestrador só incrementa `turn_count` quando chega `:session_started` com `session_id` novo (1552–1568) | Compor `session_id = "<sessionId>-<n>"` com `n` = contador local de turno (1-based) e emitir `:session_started` por turno, preservando o comportamento do dashboard e do accounting |
+| D24 | Continuation após retry | Prompt de continuação textual gerado pelo runner, com menção explícita a "Codex" (linhas 144–154 de `agent_runner.ex`); `attempt` interpolado pelo template do `WORKFLOW.md` | Mesma semântica (novo `session/prompt` na mesma sessão, ou sessão nova após retry) | adaptável | Texto de continuação é específico de Codex e viaja para o modelo; com ACP continua tecnicamente válido, mas desatualizado | **Decisão Q9:** neutralizar o texto hardcoded quando a abstração de executor entrar (fase 3, no mesmo PR que troca as 3 chamadas); **não** alterar o prompt nesta PR documental |
+| D25 | Session identity | `session_id = "<thread_id>-<turn_id>"` (`SPEC.md` §4.2, §10.2), consumido por logs, dashboard, `turn_count` e bloqueio | Apenas `sessionId`; **não existe** identificador de turno | adaptável | ACP não fornece `turn_id`, e o orquestrador só incrementa `turn_count` quando chega `:session_started` com `session_id` novo (1552–1568) | Compor `session_id = "<sessionId>-<n>"` com `n` = contador local de turno (1-based) e emitir `:session_started` por turno: identificador **interno/sintético do Symphony**, apenas para contadores/logs/dashboard — **não** é turn id do ACP e **nunca** é enviado ao agente |
 | D26 | Completion | `turn/completed` ⇒ sucesso; `turn/failed` ⇒ erro; `turn/cancelled` ⇒ erro | Resposta única do `session/prompt` com `stopReason` ∈ {`end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`} | adaptável | Mapear 5 valores de `stopReason` para a taxonomia de erro do Symphony | `end_turn` ⇒ `{:ok, result}`; `cancelled` ⇒ `{:error, {:turn_cancelled, ...}}`; `max_tokens`/`max_turn_requests`/`refusal` ⇒ `{:error, {:turn_failed, %{stop_reason: reason}}}` (paridade: turno não concluído é falha) |
-| D27 | Token / accounting / usage | `thread/tokenUsage/updated` e `usage` de `turn/completed`; o orquestrador lê caminhos absolutos e só aplica deltas inteiros | `usage_update` (uso da janela de contexto e custo acumulado) na família `session/update` | adaptável | ACP não expõe o breakdown input/output por turno que o accounting atual espera; o campo pode trazer custo, não tokens | Não inventar números: mapear `usage_update` para o payload de `usage` quando os campos forem compatíveis; caso contrário os contadores permanecem em 0 (degradação já suportada). Gap registrado para a fase 4 (exige o `schema.json` v1 fixado) |
+| D27 | Token / accounting / usage | `thread/tokenUsage/updated` e `usage` de `turn/completed`; o orquestrador lê caminhos absolutos e só aplica deltas inteiros | `usage_update` (uso da janela de contexto e custo acumulado) na família `session/update` | adaptável | ACP não expõe o breakdown input/output por turno que o accounting atual espera; o campo pode trazer custo, não tokens | **Não fabricar métrica:** ausência de dado aparece como **indisponível**, nunca como zero "real" (Q6); mapear `usage_update` apenas se os campos forem realmente compatíveis; se o dashboard não souber expressar ausência sem ambiguidade, é dívida a resolver antes da integração real do Cline |
 | D28 | Rate limits | `codex_rate_limits` alimentado por `rate_limits` nos payloads | Sem notificação equivalente | sem equivalente direto | Não há rate limit no protocolo | Aceitar ausência: campo fica vazio; nenhuma mudança no orquestrador |
 
 | D29 | Logging / telemetry | `session_id` obrigatório, `last_codex_event`, `last_codex_message`, `codex_app_server_pid`, contadores `codex_*`; dashboard humaniza mensagens; `docs/logging.md` define os campos | Protocolo não define logging; o cliente mantém seus próprios campos | adaptável | Nomes internos são `codex_*`; ACP não fornece pid no protocolo (o cliente conhece o pid do port) | Manter os nomes internos na fase 3 (renomear é refactor amplo e proibido pela política de diff mínimo) e registrar a dívida de nomenclatura; continuar expondo o pid obtido do port |
-| D30 | Graceful shutdown | `stop_session/1` = `Port.close` (sem despedida de protocolo) | Não há método de shutdown global; `session/close` encerra uma sessão liberando recursos | adaptável | Não existe sequência de encerramento acordada | Fase 3: paridade (`Port.close`); `session/close` é refinamento futuro, útil para liberar recursos no agente |
-| D31 | Executor-specific configuration | Bloco `codex.*` (command, approval_policy, thread_sandbox, turn_sandbox_policy, turn/read/stall timeout), normativo em `SPEC.md` §5.3.6/§6.4 | Não há configuração de protocolo; o cliente decide e o agente oferece modos/config options | adaptável | Preflight exige `codex.command` não vazio; nenhum seletor de executor existe | Adicionar `executor.kind` (default `codex`) + `executor.command`, sem renomear/remover `codex.*`; preflight passa a validar o comando do executor selecionado. Proposta detalhada em §7 |
+| D30 | Graceful shutdown | `stop_session/1` = `Port.close` (sem despedida de protocolo) | Não há método de shutdown global; `session/close` encerra uma sessão liberando recursos | adaptável | Não existe sequência de encerramento acordada | **Decisão Q7:** fase 3 usa `Port.close` como **encerramento de processo/transporte** (paridade), explicitamente **não** equivalente a `session/cancel`/`session/close`; cancelamento gracioso fica para a fase de integração real, que deve distinguir lifecycle do processo do lifecycle da sessão ACP |
+| D31 | Executor-specific configuration | Bloco `codex.*` (command, approval_policy, thread_sandbox, turn_sandbox_policy, turn/read/stall timeout), normativo em `SPEC.md` §5.3.6/§6.4 | Não há configuração de protocolo; o cliente decide e o agente oferece modos/config options | adaptável | Preflight exige `codex.command` não vazio; nenhum seletor de executor existe | **Decisão Q1:** adicionar `executor.kind` (default `codex`), preservar `codex.*` sem breaking change e criar `acp.*` só para configuração específica do ACP; **não** migrar timeouts genéricos para `executor.*` agora (reuso pelo ACP = dívida registrada). Proposta detalhada em §7 |
 | D32 | MCP servers / ferramentas externas | Não há no caminho Codex (ferramentas entram como `dynamicTools`) | `session/new.mcpServers` (stdio/HTTP/SSE) com `mcpCapabilities` do agente | ACP-specific | Symphony não monta nem supervisiona MCP servers hoje | Não implementar nesta fase; registrar como caminho possível para D11/D12 (ferramentas do tracker via MCP local) |
 | D33 | Session modes / config options | Sem equivalente (Codex não expõe modos) | `modes` em `session/new`, `session/set_mode`, `current_mode_update`; `session/set_config_option`, `config_option_update` (capability `session.configOptions`) | ACP-specific | Symphony não tem conceito de modo de agente; perfis `read`/`dev`/`privileged` são da plataforma, não do protocolo | Não implementar nesta fase; registrar como possível alavanca futura para aprovação/seleção de perfil (mapear perfil da plataforma → modo do agente), sempre como decisão explícita |
 
@@ -300,13 +304,17 @@ reais são de **capacidade**: sandbox/política (D15), ferramentas do cliente
    `elicitation/create` só é legítimo se o cliente anunciar o modo; a decisão
    inicial (não anunciar) simplifica e é a mais segura, mas muda a semântica de
    "bloqueado por falta de informação".
-4. **Token accounting (D27)** — o ACP expõe `usage_update` sem o breakdown por
-   turno do Codex. Sem mapeamento exato do schema, os contadores ficam em 0 (a
-   degradação já é suportada pelo orquestrador), mas o dashboard passa a mentir
-   por omissão. Precisa de mapeamento explícito e honesto na fase 4.
-5. **Cancelamento gracioso (D18)** — hoje é kill da Task; o ACP prevê
+4. **Token accounting (D27, Q6)** — o ACP expõe `usage_update` sem o breakdown por
+   turno do Codex. **Decisão:** ausência de dado **não** pode virar zero "real";
+   representa-se como **indisponível/ausente** e **nunca** se fabrica métrica. Se
+   o estado/dashboard atuais não souberem expressar ausência sem ambiguidade, é
+   **dívida a resolver antes da integração real do Cline** (fase 4).
+5. **Cancelamento gracioso (D18, Q7)** — hoje é kill da Task; o ACP prevê
    `session/cancel`/`session/close`. Gap de arquitetura (não de protocolo): o
-   runner não tem canal de cancelamento. Fora do escopo da fase 3.
+   runner não tem canal de cancelamento. **Decisão:** adiado para a fase de
+   integração real (≥ 4); a fase 3 mantém o encerramento simples compatível com o
+   lifecycle da Task/processo e **não** afirma que `Port.close` equivale a
+   `session/cancel` ou a `session/close`.
 6. **Dívida de nomenclatura e de configuração (D20/D29/D31)** — `codex.*` e os
    campos internos `codex_*` passariam a governar execução ACP. Manter na fase 3
    (diff mínimo) e registrar como dívida explícita; renomear é refactor amplo.
@@ -381,7 +389,7 @@ Duplicar o runner/turnos para ACP e escolher no orquestrador.
 |---|---|---|
 | **D1**: indireção por módulo selecionado (padrão `Tracker`) | Espelhar `Tracker.@adapters`/`adapter_for_kind/1`: mapa `kind -> módulo` e chamadas diretas, sem `@callback` formal (`lib/symphony_elixir/tracker.ex` linhas 13–27, 93–104) | É o precedente real do repositório; menor diff que A (nenhum contrato formal), mas sem checagem de forma. A diferença para A é só a existência do behaviour — recomenda-se A (behaviour + seleção), porque o custo do `@callback` é pequeno e o ganho é `@impl`/dialyzer |
 | **D2**: processo por sessão (`GenServer`/`DynamicSupervisor` do executor) | Introduzir um processo dedicado por sessão para encapsular o cliente ACP | Rejeitada: adiciona supervisão, ciclo de vida e pontos de falha novos sem necessidade — a sessão já vive dentro da Task do worker, que é o dono natural do `try/after` |
-| **D3**: shim externo traduzindo ACP ↔ Codex app-server (`executor.command` = shim) | Zero diff no Elixir: o Symphony continuaria falando Codex e um binário intermediário falaria ACP | Descartada **apesar de ser a de menor diff**: exigiria reimplementar o protocolo Codex app-server (incluindo approvals, dynamic tools e `thread/tokenUsage/updated`) fora do repositório, criando uma segunda superfície de protocolo sem testes no fork; esconderia o mapeamento ACP justamente do lugar onde ele precisa ser visível e auditável; e não permitiria usar recursos sem forma Codex (`session/request_permission` com opções, `session/cancel` de protocolo). Também conflita com o objetivo declarado do fork (abstração de executor **no** Symphony) |
+| **D3**: shim externo traduzindo ACP ↔ Codex app-server (comando configurado = shim) | Zero diff no Elixir: o Symphony continuaria falando Codex e um binário intermediário falaria ACP | Descartada **apesar de ser a de menor diff**: exigiria reimplementar o protocolo Codex app-server (incluindo approvals, dynamic tools e `thread/tokenUsage/updated`) fora do repositório, criando uma segunda superfície de protocolo sem testes no fork; esconderia o mapeamento ACP justamente do lugar onde ele precisa ser visível e auditável; e não permitiria usar recursos sem forma Codex (`session/request_permission` com opções, `session/cancel` de protocolo). Também conflita com o objetivo declarado do fork (abstração de executor **no** Symphony) |
 
 ### Decisão
 
@@ -389,7 +397,7 @@ Duplicar o runner/turnos para ACP e escolher no orquestrador.
 repositório). Detalhamento, consequências e implementação planejada em
 [ADR-0001](adr/0001-executor-abstraction.md).
 
-## 7. Configuração: menor evolução proposta
+## 7. Configuração: evolução decidida (Q1)
 
 Restrições: manter workflows atuais válidos; preservar o default upstream;
 permitir selecionar executor; permitir ACP sem obrigar Cline; permitir comando
@@ -397,16 +405,26 @@ externo; continuar compatível com reload do `WORKFLOW.md`; não misturar
 configuração de modelo (DeepSeek) na arquitetura do Symphony; não colocar segredo
 em YAML versionado.
 
-Proposta mínima (nomes **a confirmar** na implementação da fase 3; nada disto
-existe no código hoje):
+Decisão humana (Q1), que a fase 3 implementa:
+
+- **`executor.kind`** seleciona o executor, com default **`codex`**;
+- **`codex.*` é preservado sem breaking change** — nada é renomeado, movido ou
+  removido;
+- **`acp.*`** existe apenas para configuração **específica** do executor ACP
+  (espelhando o estilo do bloco `codex.*`);
+- timeouts genéricos **não** migram agora para `executor.*`;
+- reuso temporário, pelo caminho ACP, de algum valor que hoje vive em `codex.*`
+  é permitido **somente** se registrado explicitamente como **dívida de
+  compatibilidade/nomeação** (não como desenho ideal permanente).
+
+Forma conceitual (nomes exatos e shape do schema são confirmados no PR da fase 3;
+**nada disto existe no código hoje**):
 
 ```yaml
 executor:
-  kind: codex                 # "codex" (default) | "acp"
-  command: "codex app-server" # opcional; default por kind
-  acp:                        # só usado quando kind: acp
-    auto_approve_requests: false
-codex:                        # bloco existente, SEM renomear e SEM remover
+  kind: codex            # default; "codex" | "acp"
+codex:                   # bloco existente, SEM renomear, mover ou remover
+  command: codex app-server
   approval_policy: never
   thread_sandbox: workspace-write
   turn_sandbox_policy:
@@ -415,32 +433,33 @@ codex:                        # bloco existente, SEM renomear e SEM remover
   turn_timeout_ms: 3600000
   read_timeout_ms: 5000
   stall_timeout_ms: 300000
+acp:                     # só relevante quando executor.kind: acp
+  command: <comando do cliente ACP>      # comando externo; sem default no fork
+  auto_approve_requests: false           # Q2: fail closed
 ```
 
-Regras da proposta:
+Regras da decisão:
 
 1. `executor` ausente ⇒ comportamento **idêntico** ao atual (`kind: codex`,
-   comando `codex app-server`), inclusive preflight e defaults.
-2. `codex.command` continua válido e continua sendo o default do `kind: codex`;
-   `executor.command`, quando presente, tem precedência (é o "comando externo").
-3. `executor.acp` só é lido quando `kind: acp`; `auto_approve_requests` default
-   **false** (fail-safe: sem auto-aprovação, o comportamento observável é bloquear
-   a issue como hoje acontece quando o Codex pede aprovação).
+   preflight e defaults preservados). Workflows upstream existentes continuam
+   válidos, byte a byte, sem edição.
+2. `codex.command` continua sendo o comando do executor Codex; o comando do
+   executor ACP vive em `acp.*` (config específica daquele executor), não em uma
+   chave genérica nova.
+3. `acp.*` só é lido quando `kind: acp`; `auto_approve_requests` default
+   **`false`** (Q2 — fail closed; nenhuma aprovação automática na fase 3).
 4. Modelo (DeepSeek), credenciais e data-dir do agente **não** entram no
    `WORKFLOW.md`: pertencem ao runtime do executor (`~/automation/tools/cline`,
    `~/automation/state/cline`, `~/.config/agentic-dev-environment/env`). O
    Symphony só passa o comando e o env já saneado.
 5. Segredo **nunca** literal no YAML: apenas `$VAR` (mecanismo já existente em
    `Config.Schema.resolve_secret_setting/2`) e referências de env.
-
-Dívida registrada (decisão humana pendente, §10): os três timeouts
-(`turn_timeout_ms`, `read_timeout_ms`, `stall_timeout_ms`) vivem hoje em
-`codex.*`. Reaproveitá-los para o executor ACP evita duas fontes do mesmo
-número, mas mantém nome de fornecedor governando política genérica. A
-alternativa é duplicá-los em `executor.*` com default herdado — mais chaves, sem
-duplicação de valor. Nenhuma das duas é decidida nesta fase; a implementação
-deve seguir a decisão humana registrada aqui antes do código.
-
+6. Se a fase 3 reutilizar `codex.turn_timeout_ms`/`read_timeout_ms`/
+   `stall_timeout_ms` no caminho ACP (evitando duas fontes do mesmo número), isso
+   é **dívida de compatibilidade/nomeação** registrada em
+   [ADR-0001](adr/0001-executor-abstraction.md) §Dívidas — não é o desenho ideal e
+   deve ser resolvido em mudança própria, com aliases de compatibilidade, quando
+   houver mais de um executor em uso real.
 
 ## 8. Segurança e isolamento no caminho ACP
 
@@ -470,9 +489,9 @@ ou do projeto consumidor. Ela existe para impedir promessa falsa de sandbox.
 - **Execução de comandos**: o agente executa comandos com suas próprias
   ferramentas; o Symphony só veria isso se tivesse anunciado `terminal` (não
   anuncia).
-- **Permissões**: com `auto_approve_requests: false` o Symphony não aprova nada
-  automaticamente, mas a decisão de pedir permissão é do agente — um agente que
-  não pede não é bloqueado por isso.
+- **Permissões**: com `acp.auto_approve_requests: false` (default) o Symphony não
+  aprova nada automaticamente, mas a decisão de pedir permissão é do agente — um
+  agente que não pede não é bloqueado por isso.
 - **Credenciais do modelo**: vivem na configuração do próprio agente (ex.:
   data-dir do Cline em `~/automation/state/cline`); o Symphony não as lê, não as
   copia e não as loga.
@@ -513,26 +532,38 @@ Explícito, para evitar que a análise seja lida como plano de implementação:
 - alterar o schema executável (`config/schema.ex`) ou o `WORKFLOW.md` do fork;
 - conectar Cline, DeepSeek ou qualquer modelo;
 - implementar MCP local, cancelamento gracioso, `session/load`,
-  modos/config options, elicitation ou `session/close`;
+  modos/config options, elicitation ou `session/close` (fases ≥ 4);
+- alterar o prompt de continuação hardcoded (Q9 — muda na fase 3, junto com a
+  abstração);
+- corrigir o flake de timing do gate (`core_test.exs:1062`), que tem issue
+  própria ([#2](https://github.com/rbcorrea26/symphony-acp/issues/2)) e PR
+  separado;
 - abrir PR de implementação ou iniciar `feat/acp-agent-runner`.
 
-## 10. Questões que precisam de decisão humana antes da fase 3
+## 10. Decisões humanas registradas (Q1–Q10)
 
-| # | Questão | Opções (com trade-off) |
+Decididas em **2026-09-27** e incorporadas aos ADRs. A coluna "Registrado em"
+aponta onde a decisão é normativa.
+
+| # | Decisão | Registrado em |
 |---|---|---|
-| Q1 | Nomes/estrutura da configuração | (a) `executor.kind` + reuso dos timeouts `codex.*` (menos chaves, nome de fornecedor governando política genérica) · (b) `executor.kind` + `executor.*` para timeouts, com `codex.*` mantido por compatibilidade (mais chaves, sem dívida de nome) |
-| Q2 | Default de `auto_approve_requests` no ACP | (a) `false` (fail-safe; run não supervisionado pode parar em "bloqueado") · (b) `true` (paridade com o `WORKFLOW.md` de exemplo do upstream, que usa `approval_policy: never`) |
-| Q3 | Capacidades de cliente anunciadas | (a) nenhuma (menor privilégio; agente usa as ferramentas dele) · (b) `fs.readTextFile`/`fs.writeTextFile` (permite edição pelo Symphony, mas amplia a superfície) · (c) `terminal` (não recomendado nesta fase) |
-| Q4 | Ferramentas do tracker no caminho ACP | (a) indisponíveis (gap aceito) · (b) expor como MCP local (fase 4+, novo ADR) · (c) manter apenas no caminho Codex |
-| Q5 | Comportamento em `auth_required` | (a) bloquear a issue com erro visível · (b) falhar o run e deixar o retry · (c) tratar como falha permanente (sem retry) |
-| Q6 | Token accounting no ACP | (a) aceitar contadores zerados até mapear `usage_update` · (b) mapear `usage_update` já na fase 3 se o `schema.json` v1 fixado permitir |
-| Q7 | Cancelamento gracioso (`session/cancel`/`session/close`) | (a) fase 3 mantém kill da Task (paridade) · (b) canal de cancelamento novo (mudança de arquitetura, ADR próprio) |
-| Q8 | Nomenclatura interna `codex_*` (estado/dashboard/payload do HTTP) | (a) manter (diff mínimo) · (b) renomear com compatibilidade (refactor amplo, risco de conflito com upstream) |
-| Q9 | Redação do prompt de continuação ("previous Codex turn") | (a) manter (é orientação ao modelo) · (b) neutralizar a palavra "Codex" (mudança mínima, sensível a conflito) |
-| Q10 | Executor ACP inicial para validar a fase 3 | (a) agente ACP **falso** de teste (recomendado para a fase 3 da plataforma) · (b) Cline real (fase 4) |
+| Q1 | Configuração: `executor.kind` com default `codex`; `codex.*` preservado sem breaking change; `acp.*` apenas para configuração específica do ACP; timeouts genéricos **não** migram agora para `executor.*`; reuso temporário de valor de `codex.*` pelo ACP só como dívida explícita de compatibilidade/nomeação | §7 acima e [ADR-0001](adr/0001-executor-abstraction.md) §Decisões humanas incorporadas / §Dívidas |
+| Q2 | `session/request_permission`: default **`false`** (fail closed); nada de autoaprovação; autoaprovação futura é configuração explícita e testada; **não** assumir equivalência semântica com `approval_policy: never` do Codex | [ADR-0002](adr/0002-acp-protocol-mapping.md) §2.5 |
+| Q3 | Capabilities do cliente: anunciar o mínimo necessário; **sem `fs`**; **sem `terminal`**; capacidade não anunciada é *unsupported*; ampliar só em fase posterior, com necessidade e teste concretos | [ADR-0002](adr/0002-acp-protocol-mapping.md) §2.2 |
+| Q4 | Ferramentas do tracker: **indisponíveis** no primeiro executor ACP (fake); **não** implementar MCP local nesta fase; MCP pode ser analisado depois como caminho para client-side/dynamic tools | [ADR-0002](adr/0002-acp-protocol-mapping.md) §2.7 |
+| Q5 | `auth_required`: execução **bloqueia com erro explícito** e exige ação humana (handoff); autenticação continua manual; **não** automatizar credenciais; **nenhum segredo** no Symphony | [ADR-0002](adr/0002-acp-protocol-mapping.md) §2.2 e §2.8 |
+| Q6 | Token accounting: ausência de dado ACP **não** vira zero "real"; representar como **indisponível/ausente**; **nunca** fabricar métricas; se o dashboard atual não suportar ausência sem ambiguidade, é dívida a resolver **antes da integração real do Cline** | [ADR-0002](adr/0002-acp-protocol-mapping.md) §2.8 |
+| Q7 | Cancelamento: a fase 3 mantém cancelamento/encerramento simples compatível com o lifecycle atual da Task/processo; cancelamento gracioso ACP fica para a fase de integração real; limitação explícita; **não** afirmar que `Port.close` equivale a `session/cancel` | [ADR-0002](adr/0002-acp-protocol-mapping.md) §2.3 e §2.6 |
+| Q8 | Nomes `codex_*`: manter inicialmente (diff mínimo) e registrar dívida de naming/telemetria; **não** refatorar nomes agora | [ADR-0001](adr/0001-executor-abstraction.md) §Dívidas e [ADR-0002](adr/0002-acp-protocol-mapping.md) §2.4 |
+| Q9 | Prompt de continuação: texto hardcoded que menciona "Codex" deve ser **neutralizado quando a abstração entrar** (fase 3); **não** alterar o prompt nesta PR documental | [ADR-0001](adr/0001-executor-abstraction.md) §Decisões humanas incorporadas |
+| Q10 | Executor inicial: fase 3 usa **executor ACP fake determinístico**; Cline real só na fase 4; DeepSeek só depois da integração do Cline; coerente com o roadmap da plataforma | [ADR-0001](adr/0001-executor-abstraction.md) §Implementação |
 
-Enquanto Q1–Q3 não forem respondidas, a implementação **não** deve começar: são
-exatamente as decisões que definem a superfície de configuração e de privilégio.
+Consequência: **não há decisão humana aberta que bloqueie a fase 3.** O que resta
+são dívidas registradas (item acima, Q1/Q6/Q8) e capacidades deliberadamente
+adiadas para fases ≥ 4 (MCP local, cancelamento gracioso, `session/load`,
+elicitation interativo, modos/config options, protocolo ACP v2). O próximo passo
+concreto é o **fake ACP determinístico**, partindo da `main` integrada com estes
+ADRs.
 
 ## 11. Referências
 
@@ -556,3 +587,7 @@ exatamente as decisões que definem a superfície de configuração e de privil�
 - Plataforma (decisões já aceitas, não duplicadas aqui):
   `rbcorrea26/agentic-dev-environment` → `docs/architecture/adr/0001..0006`,
   `docs/architecture/pipeline.md`, `docs/security/permissions.md`.
+- Flake de gate conhecido (pré-existente, não causado por documentação):
+  `core_test.exs:1062` falha ocasionalmente por timing e tem issue própria —
+  [issue #2](https://github.com/rbcorrea26/symphony-acp/issues/2). Evidência de
+  execução (verde/vermelho, tempos) é transitória e vive no CI/PR, não aqui.

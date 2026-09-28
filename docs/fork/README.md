@@ -18,12 +18,15 @@ ser o **executor/control plane do pipeline agêntico** da plataforma
 Neste momento o fork contém **apenas documentação**: nenhuma linha de código foi
 alterada em relação ao upstream. A análise arquitetural do caminho Codex App
 Server ↔ ACP está **concluída** em [acp-analysis.md](acp-analysis.md) (matriz
-`D1`–`D33`, fontes oficiais, opções de abstração, segurança e questões abertas) e
-as decisões derivadas estão propostas em [adr/0001](adr/0001-executor-abstraction.md)
-(abstração de executor) e [adr/0002](adr/0002-acp-protocol-mapping.md)
-(mapeamento de protocolo). A **implementação não foi iniciada**: nenhum executor
-ACP, adapter, fake ou dependência existe no repositório, e o caminho Codex
-app-server permanece intacto.
+`D1`–`D33`, fontes oficiais, opções de abstração, segurança e decisões Q1–Q10) e
+as decisões derivadas estão **aceitas** em
+[adr/0001](adr/0001-executor-abstraction.md) (abstração de executor) e
+[adr/0002](adr/0002-acp-protocol-mapping.md) (mapeamento de protocolo). **Não há
+decisão humana aberta bloqueando a fase 3**, e a **implementação não foi
+iniciada**: nenhum executor ACP, adapter, fake ou dependência existe no
+repositório, e o caminho Codex app-server permanece intacto. O próximo passo é o
+executor ACP **fake determinístico**; Cline entra só na fase 4 e DeepSeek depois
+dele.
 
 ## 2. Relação `origin` / `upstream`
 

@@ -1,11 +1,12 @@
 # ADR-0001 — abstração de executor (menor mudança para adicionar ACP)
 
-- **Status:** proposto
-- **Data:** 2026-09-27
+- **Status:** aceito (implementação pendente)
+- **Data:** 2026-09-27 — decisões humanas Q1–Q10 incorporadas nesta revisão
 - **Decisores:** arquitetura do fork (rbcorrea26)
 - **Relacionado a:** [0002-acp-protocol-mapping.md](0002-acp-protocol-mapping.md),
-  [../acp-analysis.md](../acp-analysis.md), [../divergences.md](../divergences.md),
-  `SPEC.md` §10.7, e (plataforma) `agentic-dev-environment/docs/architecture/adr/0002-acp-como-contrato-de-executor.md`
+  [../acp-analysis.md](../acp-analysis.md) §10 (decisões Q1–Q10),
+  [../divergences.md](../divergences.md), `SPEC.md` §10.7, e (plataforma)
+  `agentic-dev-environment/docs/architecture/adr/0002-acp-como-contrato-de-executor.md`
 
 ## Contexto
 
@@ -50,9 +51,10 @@ mesmo padrão, por consistência e por ser o menor caminho.
 4. nenhuma decisão de plataforma (executor inicial, modelo, gates) é tomada aqui;
 5. toda alteração em arquivo upstream entra em
    [../divergences.md](../divergences.md);
-6. a implementação só começa depois das decisões humanas registradas em
-   [../acp-analysis.md](../acp-analysis.md) §10 (configuração, aprovação e
-   capacidades anunciadas).
+6. a implementação só começa com este ADR integrado em `main` e com o
+   **executor ACP falso determinístico** como primeiro alvo (Q10);
+7. nenhuma migração oportunista de `codex.*`: chaves existentes não são
+   renomeadas, movidas nem removidas nesta fase (Q1).
 
 ## Decisão
 
@@ -94,9 +96,35 @@ Pontos da decisão:
    atravessa a fronteira do behaviour.
 5. A política de turnos, continuação, retry, stall, workspace e hooks **não**
    muda e **não** é duplicada: continua em `AgentRunner`/`Orchestrator`.
-6. Nenhuma capacidade ACP é anunciada por padrão; anunciar capacidade de cliente
-   (`fs`, `terminal`, `elicitation`) é decisão de privilégio separada
-   (Q3 da análise).
+6. Capacidades de cliente (Q3): na fase 3 anuncia-se o **mínimo necessário** —
+   nada de `fs` e nada de `terminal`. Capacidade não anunciada é tratada como
+   *unsupported*; ampliar capacidades só em fase posterior, com necessidade e
+   teste concretos.
+
+### Decisões humanas incorporadas (Q1–Q10)
+
+As questões abertas da análise foram decididas pelo humano em 2026-09-27
+(detalhe em [../acp-analysis.md](../acp-analysis.md) §10). As que governam esta
+abstração:
+
+| # | Decisão | Efeito concreto nesta fase |
+|---|---|---|
+| Q1 | Configuração: `executor.kind` com default `codex`; `codex.*` preservado **sem breaking change**; bloco `acp.*` apenas para configuração específica do executor ACP; timeouts genéricos **não** migram agora para `executor.*` | o schema ganha seletor, não renomeação; qualquer valor de `codex.*` reutilizado temporariamente pelo caminho ACP fica registrado como **dívida de compatibilidade/nomeação** (§Dívidas) |
+| Q3 | Capabilities: mínimo necessário; sem `fs`; sem `terminal` | cliente ACP anuncia quase nada; nada de canal alternativo de escrita/execução |
+| Q8 | Nomes internos `codex_*` (estado/telemetria/dashboard) mantidos inicialmente | zero refactor de nomes; dívida registrada (§Dívidas) |
+| Q9 | Texto hardcoded que mencione "Codex" deve ser neutralizado **quando a abstração entrar** | muda na fase 3, em `agent_runner.ex`, junto com as 3 chamadas; **não** muda nesta PR documental |
+| Q10 | Executor inicial: **fake ACP determinístico** na fase 3; Cline real só na fase 4; DeepSeek depois | a abstração precisa ser provada sem Cline, sem modelo e sem credencial |
+
+Q2, Q4, Q5, Q6 e Q7 são de protocolo/comportamento ACP e estão registradas em
+[ADR-0002](0002-acp-protocol-mapping.md) §2.2, §2.5, §2.6, §2.7 e §2.8.
+
+### Dívidas explicitamente registradas (não são desenho ideal)
+
+| Dívida | Origem | Quando resolver |
+|---|---|---|
+| Reuso temporário de chaves `codex.*` (timeouts/stall) pelo caminho ACP | Q1 (não migrar agora) | junto com a consolidação de configuração por executor, em mudança própria com aliases de compatibilidade |
+| Nomes internos `codex_*` em estado, telemetria e payload do dashboard | Q8 (não refatorar agora) | quando houver mais de um executor em uso real |
+| `codex.command` como única noção de comando | Q1 | resolvido na fase 3 com o comando específico do executor ACP (`acp.*`) |
 
 ### Por que é a menor mudança
 
@@ -121,6 +149,9 @@ A escolha é a menor mudança que **não** reescreve arquivo upstream de execuç
   `codex.turn_sandbox_policy`, timeouts e stall permanecem exatamente como estão.
 - `WORKFLOW.md` existentes continuam válidos: `executor` ausente ⇒
   `kind: codex`.
+- Nenhum workflow existente precisa ser editado: `codex.*` continua sendo o
+  bloco que define o executor Codex e `executor.kind` é **opcional** com default
+  `codex` (Q1). Não há migração, renomeação nem remoção de chave.
 - Nenhum teste existente precisa mudar: os testes de `AppServer` chamam o módulo
   diretamente (`app_server_test.exs`, `core_test.exs`) e continuam válidos.
 - O comportamento observável (eventos, logs, dashboard, retry, bloqueio) é
@@ -135,10 +166,10 @@ A escolha é a menor mudança que **não** reescreve arquivo upstream de execuç
 | `elixir/lib/symphony_elixir/executor.ex` | novo | behaviour (`@callback` × 3) + seleção por configuração (`for_kind/1`, `module!/0`) + `@spec` em todo `def` |
 | `elixir/lib/symphony_elixir/executor/codex.ex` | novo | delegação pura para `Codex.AppServer` |
 | `elixir/lib/symphony_elixir/executor/acp.ex` | novo | cliente ACP por stdio (handshake, `session/new`, `session/prompt`, stream `session/update`, permissão, timeouts), conforme [ADR-0002](0002-acp-protocol-mapping.md) |
-| `elixir/lib/symphony_elixir/agent_runner.ex` | **upstream alterado** | trocar `alias SymphonyElixir.Codex.AppServer` por `SymphonyElixir.Executor` e as 3 chamadas; nenhuma alteração de política |
-| `elixir/lib/symphony_elixir/config/schema.ex` | **upstream alterado (aditivo)** | `embeds_one(:executor, Executor, ...)` com `kind` (default `"codex"`) e `command`; validação de kind suportado; nenhum campo de `codex.*` removido ou renomeado |
-| `elixir/WORKFLOW.md` | upstream (só se Q1/Q2 exigirem) | acrescentar o bloco `executor` comentado; default preservado |
-| `elixir/README.md` | upstream (só se a config mudar) | documentar `executor.kind`/`executor.command` e o que ACP não garante |
+| `elixir/lib/symphony_elixir/agent_runner.ex` | **upstream alterado** | trocar `alias SymphonyElixir.Codex.AppServer` por `SymphonyElixir.Executor` e as 3 chamadas; neutralizar texto hardcoded que mencione "Codex" (Q9); nenhuma alteração de política |
+| `elixir/lib/symphony_elixir/config/schema.ex` | **upstream alterado (aditivo)** | `executor.kind` (default `"codex"`) e bloco `acp.*` para configuração específica do ACP; validação de kind suportado; **nenhum** campo de `codex.*` removido, renomeado ou movido (Q1) |
+| `elixir/WORKFLOW.md` | upstream | **não** precisa mudar: o default `codex` mantém o exemplo válido; só muda se o exemplo ficar incorreto |
+| `elixir/README.md` | upstream | obrigatório quando a chave existir (política de docs do upstream): documentar `executor.kind`/`acp.*` e o que o ACP **não** garante |
 | `docs/fork/divergences.md` | fork | registrar cada arquivo upstream alterado, com motivo |
 | `elixir/lib/mix/tasks/specs.check.ex` | **não** alterado | continua cobrindo `@spec` de todo `def` público |
 
@@ -161,6 +192,12 @@ A escolha é a menor mudança que **não** reescreve arquivo upstream de execuç
 - **Gates:** `make -C elixir all` (`fmt-check`, `lint` = `specs.check` + `credo
   --strict`, `coverage`, `dialyzer`) e `mix specs.check` valem para os módulos
   novos.
+- **Flake pré-existente (não é desta mudança):** `core_test.exs:1062`
+  ("abnormal worker exit increments retry attempt progressively") falha
+  ocasionalmente por timing sob carga do suite com cobertura, passa isolado e em
+  rerun. Registrado em
+  [issue #2](https://github.com/rbcorrea26/symphony-acp/issues/2); a correção
+  entra em PR próprio, sem enfraquecer a asserção.
 
 ### Compatibilidade upstream
 
@@ -191,9 +228,9 @@ A escolha é a menor mudança que **não** reescreve arquivo upstream de execuç
 - **Obrigações:** todo arquivo upstream alterado registrado em
   [../divergences.md](../divergences.md) no mesmo PR; `mix specs.check` e
   `make -C elixir all` verdes; nada de credencial, modelo ou regra de negócio
-  dentro da abstração; a implementação não começa antes de Q1–Q3
-  ([../acp-analysis.md](../acp-analysis.md) §10); cancelamento gracioso, MCP
-  local, elicitation e modos ficam fora da fase 3 (exigem ADR próprio).
+  dentro da abstração; cancelamento gracioso, MCP local, elicitation e modos
+  ficam fora da fase 3 (exigem ADR próprio); as dívidas da tabela acima ficam
+  registradas aqui e **não** podem virar decisão silenciosa na implementação.
 
 ## Alternativas descartadas
 
@@ -201,7 +238,7 @@ A escolha é a menor mudança que **não** reescreve arquivo upstream de execuç
 |---|---|
 | ACP escondido atrás da interface atual do Codex (reescrever `Codex.AppServer`) | reescreve o arquivo upstream mais volátil do caminho de execução; risco alto de regressão no Codex; obriga a espremer semântica ACP em forma Codex; conflito permanente na sincronização |
 | `AgentRunner` paralelo para ACP | duplica política de turnos/continuação/hooks/worker host; dois donos da mesma regra; orquestrador precisaria de um ramo novo no dispatch; dobra a superfície de teste |
-| Shim externo (`executor.command` apontando para um tradutor ACP ↔ Codex app-server) | menor diff no Elixir, mas exige reimplementar o protocolo Codex app-server **fora** do repositório (approvals, dynamic tools, token usage), sem teste no fork; esconde o mapeamento ACP do lugar onde precisa ser auditável; não permite usar recursos sem forma Codex (`session/request_permission` com opções, `session/cancel`) |
+| Shim externo (comando configurado apontando para um tradutor ACP ↔ Codex app-server) | menor diff no Elixir, mas exige reimplementar o protocolo Codex app-server **fora** do repositório (approvals, dynamic tools, token usage), sem teste no fork; esconde o mapeamento ACP do lugar onde precisa ser auditável; não permite usar recursos sem forma Codex (`session/request_permission` com opções, `session/cancel`) |
 | Processo dedicado por sessão (`GenServer`/`DynamicSupervisor` de executor) | adiciona supervisão e ciclo de vida sem necessidade: a Task do worker já é a dona do `try/after` da sessão |
 | Indireção por módulo sem behaviour (só mapa `kind -> módulo`, como `Tracker` sem `@callback`) | é aceitável e ainda menor, mas perde `@impl`, checagem de forma e dialyzer; o custo do behaviour é uma dúzia de linhas — adotada como **forma** da Opção A, não como alternativa |
 | Deixar a escolha de executor fora da configuração (flag de ambiente) | configuração de workflow pertence ao `WORKFLOW.md` (`SPEC.md` §5–6) e precisa sobreviver ao reload dinâmico; ambiente não é contrato versionado |
@@ -211,26 +248,35 @@ A escolha é a menor mudança que **não** reescreve arquivo upstream de execuç
 
 Estado: **pendente** (nada implementado). Este ADR só existe porque a análise do
 código foi concluída ([../acp-analysis.md](../acp-analysis.md)); nenhum arquivo
-`.ex`/`.exs` foi criado ou alterado por este PR, e o caminho Codex segue intacto.
+`.ex`/`.exs` foi criado ou alterado, e o caminho Codex segue intacto.
+As decisões humanas Q1–Q10 já estão registradas (§Decisões humanas incorporadas e
+[ADR-0002](0002-acp-protocol-mapping.md)), então **não há questão aberta
+bloqueando a fase 3**.
 
 Ordem planejada da fase 3 (plataforma: "runner ACP com fake"), **ainda não
 iniciada**:
 
-1. responder Q1–Q3 da análise (configuração, aprovação, capacidades anunciadas) e
-   registrar a resposta aqui ou em ADR novo;
+1. integrar este ADR em `main` (a implementação parte da `main` integrada, não
+   desta branch);
 2. criar `SymphonyElixir.Executor` (behaviour + seleção) e
    `SymphonyElixir.Executor.Codex` (delegação), trocar as 3 chamadas em
-   `agent_runner.ex`, com testes provando paridade do caminho Codex;
+   `agent_runner.ex` e neutralizar o texto hardcoded que menciona "Codex" (Q9),
+   com testes provando paridade do caminho Codex e **nenhum** workflow existente
+   invalidado;
 3. criar `SymphonyElixir.Executor.Acp` implementando
-   [ADR-0002](0002-acp-protocol-mapping.md), validado por um agente ACP **falso**
-   (sem Cline, sem modelo, sem credencial);
-4. adicionar `executor.kind`/`executor.command` ao schema, preservando defaults e
-   reload, com teste de workflow antigo (sem `executor`) continuando válido;
-5. registrar as divergências e atualizar `elixir/README.md`/`WORKFLOW.md` apenas
-   no que mudou de fato.
+   [ADR-0002](0002-acp-protocol-mapping.md), validado por um **agente ACP falso
+   determinístico** (Q10) — sem Cline, sem modelo, sem credencial;
+4. adicionar `executor.kind` (default `"codex"`) e o bloco `acp.*` ao schema,
+   preservando defaults e reload, com teste de workflow antigo (sem `executor`)
+   continuando válido e sem migrar nenhuma chave de `codex.*` (Q1);
+5. registrar as divergências e atualizar `elixir/README.md` no que mudou de fato.
+
+Coerência com o roadmap da plataforma (`agentic-dev-environment/docs/architecture/roadmap.md`):
+fase 3 = runner ACP com fake (este ADR + [ADR-0002](0002-acp-protocol-mapping.md));
+fase 4 = Cline como cliente ACP real; fase 5 = DeepSeek. **Cline não entra na
+fase 3** e nada nesta PR depende dele.
 
 Entradas para a fase 4 (não decididas aqui): MCP local para ferramentas do
 tracker, cancelamento gracioso, `session/load`, elicitation, modos/config options
-e mapeamento fino de `usage_update`.
-
-A implementação ACP **não** deve começar antes da revisão e do merge deste ADR.
+e representação de métricas ausentes (dívida Q6 registrada em
+[ADR-0002](0002-acp-protocol-mapping.md) §2.8).

@@ -155,6 +155,11 @@ Notes:
 - `tracker.required_labels` is optional. When set, an issue must have every
   configured label to dispatch or continue running. Label matching ignores
   case and surrounding whitespace. A blank configured label matches no issue.
+- `executor.kind` selects the executor implementation used by the agent runner. Default: `codex`
+  (`SymphonyElixir.Executor.Codex`), a pure delegation to the Codex app-server client, which keeps
+  using the `codex.*` block unchanged. An unsupported value fails dispatch preflight with
+  `{:unsupported_executor_kind, kind}`. Workflows without an `executor` block need no change and keep
+  running Codex. The ACP executor path is documented in `../docs/fork/` and is not selectable yet.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`

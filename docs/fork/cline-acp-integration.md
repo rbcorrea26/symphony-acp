@@ -159,9 +159,11 @@ Consequências registradas:
   tratada como notificação genérica; nenhum evento foi perdido e nenhum método não
   suportado foi requisitado.
 - **Hub daemon:** o Cline deixa um processo destacado (`--cline-hub-daemon`) vivo após o
-  fim do turno. O processo do agente lançado por `acp.command` é encerrado (asserido pelo
-  teste); o daemon é comportamento do agente e fica registrado como observação para a
-  plataforma (limpeza/gestão de daemon) — não é vazamento do Symphony.
+  fim do turno — medido em execuções consecutivas, um por execução, com `--cwd` apontando
+  para o workspace descartável já removido. O processo do agente lançado por `acp.command`
+  é encerrado (asserido pelo teste); o daemon é comportamento do agente e fica registrado
+  como observação para a plataforma (limpeza/gestão de daemon) — não é vazamento do
+  Symphony.
 - **Dívida herdada da fase 3 (Q6), ainda aberta:** com o executor ACP não há métrica de
   uso e o dashboard hoje renderiza ausência como **zeros**; transformar ausência em zero
   é justamente o que Q6 proíbe representar como real. Não foi resolvida nesta PR (escopo:

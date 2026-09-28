@@ -383,6 +383,35 @@ is pending at that moment). Its `stderr` is inherited by the test node, so those
 appear in the test output while never reaching the parser — which is exactly what the
 separation tests assert.
 
+The ACP path also has an opt-in integration test against a **real** ACP agent — the
+Cline CLI of the platform's isolated runtime. It is never part of `make all` and never
+runs in CI, because it needs an authenticated agent and a model:
+
+```bash
+cd elixir
+make cline-acp-e2e
+```
+
+It launches the agent through `acp.command` using the production path
+(`AgentRunner -> Executor.Acp -> ACP.Client -> stdio/JSON-RPC`), runs a real turn in a
+disposable git project created under the system temp directory, and passes only when the
+agent changes that project and the deterministic check passes (`bash answer.sh` printing
+exactly `42`, with `answer.sh` reported as the changed file); it also asserts the agent
+process is gone after teardown. Optional environment variables:
+
+- `SYMPHONY_CLINE_ACP_COMMAND` overrides `acp.command`. The default is the platform
+  wrapper `$HOME/automation/bin/cline --acp`, which injects the isolated data-dir; a
+  personal Cline installation is never used;
+- `SYMPHONY_RUN_CLINE_ACP_E2E=1` is the gate the target sets (without it the file is
+  skipped).
+
+The isolated runtime is authenticated out of band (`~/automation/bin/cline auth`):
+Symphony stores no agent credential. Without authentication the run blocks with
+`{:acp_auth_required, methods}` and the test fails with that human step in the message —
+it never fabricates a pass. The file configures `acp.auto_approve_requests: true` **only**
+in its own disposable workflow (the global default stays fail-closed). Measured state and
+the phase status: `../docs/fork/cline-acp-integration.md`.
+
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
 resources and launch a real `codex app-server` session:
 

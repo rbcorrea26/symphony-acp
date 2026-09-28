@@ -34,6 +34,21 @@ app-server permanece intacto e continua sendo o default (`Executor.Codex` é del
 pura). Cline entra só na fase 4 e DeepSeek depois dele; cancelamento gracioso ACP,
 `session/load`, elicitation, MCP local e métrica de uso ACP continuam fora de escopo.
 
+**Fase 4 — Cline como agente ACP real: pendente.** O Cline `3.0.65` do runtime
+isolado já foi verificado contra este cliente, sem patch e sem adaptador:
+`initialize` é negociado em `protocolVersion: 1` (`agentInfo.name == "cline"`), os
+frames que `ACP.Client` envia são aceitos, o `stderr` do agente fica fora do parser e
+`session/new` responde o erro ACP de autenticação (`-32000`, que o cliente já mapeia
+para `{:acp_auth_required, _}`) porque o data-dir isolado
+(`~/automation/state/cline`) não está autenticado. **Nenhuma incompatibilidade de
+protocolo foi demonstrada e nenhuma capability nova foi necessária** — o que falta é
+autenticação humana do runtime (`~/automation/bin/cline auth`), decisão da plataforma
+e não do Symphony. O teste opt-in que prova o turno real
+(`make cline-acp-e2e`: `AgentRunner → Executor.Acp → ACP.Client → Cline --acp` em
+workspace descartável, com validação determinística) existe e falha com mensagem
+explícita enquanto o runtime não estiver autenticado. Detalhes, medições e o que
+segue não medido: [cline-acp-integration.md](cline-acp-integration.md).
+
 ## 2. Relação `origin` / `upstream`
 
 | Remote | URL | Papel |

@@ -282,6 +282,11 @@ defmodule SymphonyElixir.Orchestrator do
 
         state
 
+      {:error, {:unsupported_executor_kind, kind}} ->
+        Logger.error("Unsupported executor kind in WORKFLOW.md: #{inspect(kind)}")
+
+        state
+
       {:error, {:invalid_workflow_config, message}} ->
         Logger.error("Invalid WORKFLOW.md config: #{message}")
         state

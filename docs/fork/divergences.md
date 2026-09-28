@@ -9,9 +9,12 @@ Base do registro: `upstream/main` = `be10a1b79df723d6d7612b5651c8522704dafb2e`
 (posterior à tag v0.0.3, que aponta para `1c0fb6c8e8ef9031a2c861e62af5f9e66cee39cb`).
 As divergências da carta do fork foram introduzidas pela
 [PR #1](https://github.com/rbcorrea26/symphony-acp/pull/1); as da análise
-arquitetural e dos ADRs entram pela PR documental que trouxe
-[acp-analysis.md](acp-analysis.md) e
+arquitetural e dos ADRs entraram pela [PR #3](https://github.com/rbcorrea26/symphony-acp/pull/3),
+que trouxe [acp-analysis.md](acp-analysis.md) e
 [adr/0001](adr/0001-executor-abstraction.md)/[adr/0002](adr/0002-acp-protocol-mapping.md).
+As de **implementação** da fase 3 (abstração de executor, `executor.kind` e executor
+fake determinístico de teste) entram pela PR da branch `feat/acp-agent-runner`, que
+também trouxe [adr/0003](adr/0003-phase3-executor-abstraction-scope.md).
 Arquivos **não** listados abaixo são idênticos à base registrada e
 seguem a documentação upstream como autoridade.
 
@@ -28,10 +31,31 @@ seguem a documentação upstream como autoridade.
 | `docs/fork/acp-analysis.md` | novo | análise Codex App Server ↔ ACP: estado do código, especificação oficial do ACP, matriz de mapeamento, gaps, opções de abstração e decisões humanas Q1–Q10 | não |
 | `AGENTS.md` (raiz) | novo | contrato de agentes no fork; regras de código continuam em `elixir/AGENTS.md` | não |
 | `README.md` | alterado (ponteiro) | indicar que este repositório é um fork e onde está sua documentação | não |
+| `elixir/lib/symphony_elixir/executor.ex` | novo | behaviour do executor + seleção por `executor.kind` (ADR-0001; ver ADR-0003 para o escopo do incremento) | não |
+| `elixir/lib/symphony_elixir/executor/codex.ex` | novo | delegação pura para `SymphonyElixir.Codex.AppServer`, preservando o comportamento Codex | não |
+| `elixir/test/symphony_elixir/executor_test.exs` | novo | seleção, preflight do kind e paridade da delegação Codex | não |
+| `elixir/test/symphony_elixir/executor_fake_test.exs` | novo | executor fake determinístico (só teste, não registrado) e ciclo do `AgentRunner` pela abstração | não |
+| `elixir/lib/symphony_elixir/agent_runner.ex` | alterado | as três chamadas do executor passam pela abstração; texto do prompt de continuação neutralizado (Q9); `opts[:executor]` injetável em teste | **sim, mínimo**: mesma política de turnos/hooks/retry e mesmo comportamento observável no caminho Codex |
+| `elixir/lib/symphony_elixir/config/schema.ex` | alterado (aditivo) | bloco `executor` com `kind` (default `codex`); nenhuma chave de `codex.*` removida, renomeada ou movida | não |
+| `elixir/lib/symphony_elixir/config.ex` | alterado | preflight valida `executor.kind` (`{:unsupported_executor_kind, kind}`) | **sim**: configuração com kind inválido bloqueia dispatch (a chave não existia antes) |
+| `elixir/lib/symphony_elixir/orchestrator.ex` | alterado | ramo de log próprio para `{:unsupported_executor_kind, kind}`, em vez de mensagem enganosa de falha de tracker | não (só mensagem de operador) |
+| `elixir/README.md` | alterado | documenta `executor.kind` (política de docs de `elixir/AGENTS.md`) | não |
+| `elixir/test/support/test_support.exs` | alterado (aditivo) | `executor_kind` opcional no harness (default `nil` ⇒ sem bloco `executor`, mantendo os workflows de teste atuais) | não |
+| `docs/fork/adr/0003-phase3-executor-abstraction-scope.md` | novo | escopo do incremento de fase 3, divergências de superfície e o que segue pendente | não |
+| `docs/fork/adr/README.md` | alterado | índice com o ADR-0003 | não |
+| `docs/fork/README.md` | alterado | status da fase 3 (incremento implementado; cliente ACP pendente) | não |
+| `docs/fork/divergences.md` | alterado | este registro | não |
 
-Nenhum arquivo de `elixir/**` foi alterado. A análise é documental: ela **não**
-cria executor ACP, adapter, fake, dependência, chave de configuração executável
-nem qualquer alteração de comportamento.
+Arquivos de `elixir/**` alterados pelo incremento de fase 3: `agent_runner.ex`
+(indireção do executor), `config/schema.ex` e `config.ex` (chave `executor.kind` +
+preflight), `orchestrator.ex` (log do erro de executor),
+`test/support/test_support.exs` (harness) e `README.md` (documentação da chave).
+`codex/app_server.ex` permanece idêntico ao upstream, nenhum teste existente foi
+alterado e nenhuma dependência nova entrou. O que o incremento **não** faz: cliente
+ACP, Cline, DeepSeek, MCP, capabilities `fs`/`terminal`, sandbox ACP, autenticação
+ACP, ferramentas de tracker via ACP, token accounting ACP e cancelamento gracioso de
+protocolo — registrado em
+[adr/0003](adr/0003-phase3-executor-abstraction-scope.md) §Implementação.
 
 ## Regras do registro
 

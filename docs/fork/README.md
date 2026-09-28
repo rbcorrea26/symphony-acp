@@ -15,17 +15,19 @@ ser o **executor/control plane do pipeline agêntico** da plataforma
 - implementar o **mapeamento Codex App Server ↔ ACP** (Agent Client Protocol);
 - permanecer compatível com o upstream, com **diff mínimo** e explicado.
 
-Neste momento o fork contém **apenas documentação**: nenhuma linha de código foi
-alterada em relação ao upstream. A análise arquitetural do caminho Codex App
-Server ↔ ACP está **concluída** em [acp-analysis.md](acp-analysis.md) (matriz
-`D1`–`D33`, fontes oficiais, opções de abstração, segurança e decisões Q1–Q10) e
-as decisões derivadas estão **aceitas** em
+Neste momento o fork contém a **primeira extensão de código** em relação ao
+upstream: o **incremento 1 da fase 3** (abstração de executor + `executor.kind` +
+executor fake determinístico de teste), registrado em
+[adr/0003](adr/0003-phase3-executor-abstraction-scope.md). A análise arquitetural do
+caminho Codex App Server ↔ ACP está **concluída** em
+[acp-analysis.md](acp-analysis.md) (matriz `D1`–`D33`, fontes oficiais, opções de
+abstração, segurança e decisões Q1–Q10) e as decisões derivadas estão **aceitas** em
 [adr/0001](adr/0001-executor-abstraction.md) (abstração de executor) e
 [adr/0002](adr/0002-acp-protocol-mapping.md) (mapeamento de protocolo). **Não há
-decisão humana aberta bloqueando a fase 3**, e a **implementação não foi
-iniciada**: nenhum executor ACP, adapter, fake ou dependência existe no
-repositório, e o caminho Codex app-server permanece intacto. O próximo passo é o
-executor ACP **fake determinístico**; Cline entra só na fase 4 e DeepSeek depois
+decisão humana aberta bloqueando a fase 3**, mas o **cliente ACP real não existe
+ainda**: `SymphonyElixir.Executor.Acp`, o agente ACP falso por stdio, `acp.*`, Cline
+e DeepSeek seguem pendentes, e o caminho Codex app-server permanece intacto
+(`Executor.Codex` é delegação pura). Cline entra só na fase 4 e DeepSeek depois
 dele.
 
 ## 2. Relação `origin` / `upstream`

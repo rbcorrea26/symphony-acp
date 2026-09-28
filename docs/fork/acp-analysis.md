@@ -1,7 +1,10 @@
 # Análise Codex App Server ↔ ACP (fase documental do fork)
 
 - **Status:** análise concluída e **decisões humanas Q1–Q10 incorporadas**;
-  implementação **não** iniciada
+  implementação da fase 3 **concluída** (incremento 1 em
+  [adr/0003](adr/0003-phase3-executor-abstraction-scope.md) e incremento 2 em
+  [adr/0004](adr/0004-acp-client-implementation.md)) — este documento continua sendo a
+  evidência da análise, não o registro da implementação
 - **Data:** 2026-09-27 (revisão com as decisões humanas)
 - **Base do código analisado:** `origin/main` = `90d9372cdeb2123e4a5f53a7217461d9d579ace1`
   (`Merge pull request #1 from rbcorrea26/docs/fork-charter`)

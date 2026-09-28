@@ -115,6 +115,8 @@ defmodule SymphonyElixir.TestSupport do
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
           executor_kind: nil,
+          acp_command: nil,
+          acp_auto_approve_requests: false,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -154,6 +156,8 @@ defmodule SymphonyElixir.TestSupport do
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
     executor_kind = Keyword.get(config, :executor_kind)
+    acp_command = Keyword.get(config, :acp_command)
+    acp_auto_approve_requests = Keyword.get(config, :acp_auto_approve_requests)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -197,6 +201,7 @@ defmodule SymphonyElixir.TestSupport do
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         executor_yaml(executor_kind),
+        acp_yaml(acp_command, acp_auto_approve_requests),
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
@@ -211,6 +216,17 @@ defmodule SymphonyElixir.TestSupport do
   defp executor_yaml(nil), do: nil
 
   defp executor_yaml(kind) when is_binary(kind), do: "executor:\n  kind: #{yaml_value(kind)}"
+
+  defp acp_yaml(nil, _auto_approve_requests), do: nil
+
+  defp acp_yaml(command, auto_approve_requests) when is_binary(command) do
+    [
+      "acp:",
+      "  command: #{yaml_value(command)}",
+      "  auto_approve_requests: #{yaml_value(auto_approve_requests)}"
+    ]
+    |> Enum.join("\n")
+  end
 
   defp yaml_value(value) when is_binary(value) do
     "\"" <> String.replace(value, "\"", "\\\"") <> "\""

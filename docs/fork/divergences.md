@@ -57,6 +57,8 @@ seguem a documentação upstream como autoridade.
 | `elixir/lib/symphony_elixir/config/schema.ex` | alterado (aditivo) | bloco `acp` com `command` (sem default) e `auto_approve_requests` (default `false`); nada de `codex.*` ou `executor.*` foi removido, renomeado ou movido | não |
 | `elixir/lib/symphony_elixir/config.ex` | alterado | preflight passa o settings completo para `Executor.validate_config/1` (necessário para validar `acp.command` sem acoplar `Config` ao ACP) | não (mesmo ponto do preflight já existente) |
 | `elixir/test/symphony_elixir/executor_test.exs` | fork alterado | superfície do behaviour (3 callbacks + `validate_config/1` opcional) e nova assinatura do preflight; `for_kind("acp")` agora resolve | não |
+| `elixir/lib/symphony_elixir/ssh.ex` | alterado (aditivo) | `start_port/3` aceita `stderr_to_stdout: false`, usado pelo cliente ACP para **não** fundir o `stderr` remoto no canal de protocolo; o default continua `:stderr_to_stdout` (caminho Codex app-server inalterado) | não no default; **sim, deliberado** para quem passa `stderr_to_stdout: false` (hoje só `ACP.Client`) |
+| `elixir/test/symphony_elixir/ssh_test.exs` | alterado (aditivo) | dois testes do parâmetro novo: `stderr` remoto fora do port quando solicitado e merge preservado no default | não |
 | `elixir/test/support/test_support.exs` | alterado (aditivo) | `acp_command`/`acp_auto_approve_requests` opcionais no harness (default: sem bloco `acp`) | não |
 | `elixir/README.md` | alterado | configuração ACP real (`executor.kind: acp`, `acp.command`, `acp.auto_approve_requests`), limites declarados (sem sandbox/capability/cancelamento gracioso) e dependência de teste (`jq`) | não |
 | `docs/fork/adr/0001-executor-abstraction.md` | alterado | status: implementado (incrementos 1 e 2) | não |
@@ -79,13 +81,24 @@ protocolo — registrado em
 
 Arquivos de `elixir/**` alterados pelo incremento 2: `executor.ex` (kind `acp` +
 callback opcional de preflight), `config/schema.ex` (bloco `acp`), `config.ex`
-(preflight com settings completo), `test/support/test_support.exs` (harness) e
-`README.md` (configuração e teste). `codex/app_server.ex`, `codex/dynamic_tool.ex`,
-`agent_runner.ex`, `orchestrator.ex`, `workspace.ex` e `status_dashboard.ex` **não**
-foram tocados; nenhum teste upstream foi removido ou enfraquecido (o único teste
-existente ajustado é `executor_test.exs`, do fork); nenhuma dependência nova de
-runtime entrou — o agente ACP fake de teste usa `bash` e `jq` (já exigido pelo
-workflow de lint de PR do próprio repositório).
+(preflight com settings completo), `ssh.ex` (parâmetro aditivo
+`stderr_to_stdout: false` de `start_port/3`, exigido pela separação de streams do ACP),
+`test/support/test_support.exs` (harness) e `README.md` (configuração e teste).
+`codex/app_server.ex`, `codex/dynamic_tool.ex`, `agent_runner.ex`, `orchestrator.ex`,
+`workspace.ex` e `status_dashboard.ex` **não** foram tocados; nenhum teste upstream foi
+removido ou enfraquecido (os únicos testes existentes ajustados são
+`executor_test.exs`, do fork, e a adição — sem reescrita — de dois casos em
+`ssh_test.exs`, exigidos pelo parâmetro novo); nenhuma dependência nova de runtime
+entrou — o agente ACP fake de teste usa `bash` e `jq` (já exigido pelo workflow de lint
+de PR do próprio repositório).
+
+A separação de `stdout`/`stderr` do caminho ACP (correção registrada em
+[adr/0004](adr/0004-acp-client-implementation.md) §4.10) é a razão da divergência em
+`ssh.ex`: `stdout` é o único canal de protocolo, então o lançamento ACP não usa
+`:stderr_to_stdout` (local) e passa `stderr_to_stdout: false` no `SSH.start_port/3`
+(remoto). O `stderr` do agente é herdado pelo nó e permanece observável no sink de
+diagnóstico do serviço, sem nunca chegar ao parser JSON-RPC. O caminho Codex mantém o
+merge, porque depende dele desde o upstream.
 
 ## Regras do registro
 

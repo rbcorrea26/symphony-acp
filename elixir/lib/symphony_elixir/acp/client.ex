@@ -21,6 +21,14 @@ defmodule SymphonyElixir.ACP.Client do
   `docs/fork/adr/0004-acp-client-implementation.md`; this module implements them
   and keeps every ACP structure away from `SymphonyElixir.AgentRunner` and the
   orchestrator.
+
+  The two output streams are kept apart, as the protocol requires: **`stdout` is
+  the only channel that carries ACP frames** and the only one the parser reads,
+  while `stderr` is the agent's own diagnostic channel. The client never asks the
+  port to merge them (`:stderr_to_stdout` is not used), so an agent log line —
+  even one shaped like a valid JSON-RPC response — can never satisfy a pending
+  request, fabricate a `sessionId` or a `stopReason`, or become a
+  `session/update`, a `:notification` or a `:malformed` event.
   """
 
   require Logger
@@ -276,7 +284,7 @@ defmodule SymphonyElixir.ACP.Client do
         await_response(session, request_id, "")
 
       {:error, _reason} ->
-        log_non_json_stream_line(line, "response stream")
+        log_non_json_stream_line(line, "stdout")
         await_response(session, request_id, "")
     end
   end
@@ -318,7 +326,7 @@ defmodule SymphonyElixir.ACP.Client do
         await_turn(session, request_id, on_event, "")
 
       {:error, _reason} ->
-        log_non_json_stream_line(line, "turn stream")
+        log_non_json_stream_line(line, "stdout")
 
         if protocol_message_candidate?(line) do
           emit(on_event, %{type: :malformed, payload: line, raw: line})
@@ -487,13 +495,17 @@ defmodule SymphonyElixir.ACP.Client do
         {:error, :bash_not_found}
 
       executable ->
+        # No `:stderr_to_stdout`: `stdout` is the protocol channel, and merging the
+        # agent's log into it would let `stderr` content be parsed as JSON-RPC. The
+        # child inherits this node's stderr instead, so agent diagnostics stay
+        # observable (console/journald) without ever crossing the framing
+        # (ADR-0004 §4.10).
         port =
           Port.open(
             {:spawn_executable, String.to_charlist(executable)},
             [
               :binary,
               :exit_status,
-              :stderr_to_stdout,
               args: [~c"-lc", String.to_charlist(local_launch_command(command, secret_names))],
               cd: String.to_charlist(workspace),
               env: secret_port_env(secret_names),
@@ -508,7 +520,10 @@ defmodule SymphonyElixir.ACP.Client do
   defp open_port(workspace, worker_host, command, line_bytes) when is_binary(worker_host) do
     remote_command = remote_launch_command(workspace, command, tracker_secret_environment_names())
 
-    SSH.start_port(worker_host, remote_command, line: line_bytes)
+    # `stderr_to_stdout: false` keeps the same separation over ssh: `ssh` forwards
+    # the remote command's stderr to its own stderr, which this node inherits, so
+    # remote diagnostics never enter the protocol stream.
+    SSH.start_port(worker_host, remote_command, line: line_bytes, stderr_to_stdout: false)
   end
 
   defp local_launch_command(command, secret_names) do

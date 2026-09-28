@@ -191,6 +191,14 @@ Notes:
   `codex.read_timeout_ms` bounds `initialize`/`session/new` responses and
   `codex.turn_timeout_ms` bounds silence between messages while `session/prompt` is pending
   (each received frame restarts it; a prompt is never capped by a response timeout).
+- Streams stay separated, as the protocol requires: **`stdout` is the only channel Symphony parses**
+  (ACP/JSON-RPC frames) and `stderr` is the agent's diagnostic channel. Symphony never merges them
+  (`:stderr_to_stdout` is not used, locally or over `ssh`), so an agent log line — even one shaped
+  like a valid JSON-RPC response — can never answer a request, fabricate a `sessionId`/`stopReason`
+  or become a notification/malformed frame. Agent `stderr` is inherited by the node, so it shows up
+  in Symphony's own diagnostic sink (console/journald) instead of being truncated or classified by
+  the client; the client only logs/truncates non-JSON lines that arrive on `stdout`
+  (`../docs/fork/adr/0004-acp-client-implementation.md` §4.10).
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
@@ -368,6 +376,12 @@ deterministic fake ACP agent — a separate process that speaks the Agent Client
 Protocol over stdio — so they need `bash` and `jq` on `PATH` (both are already
 required by this repository: `jq` is used by the PR-description workflow). The fake
 never touches the network, a model or a credential.
+
+The fake writes its protocol frames to `stdout` and its diagnostics to `stderr`
+(including, when the plan asks for it, a full JSON-RPC response for the request that
+is pending at that moment). Its `stderr` is inherited by the test node, so those lines
+appear in the test output while never reaching the parser — which is exactly what the
+separation tests assert.
 
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
 resources and launch a real `codex app-server` session:

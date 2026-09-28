@@ -50,12 +50,16 @@ decisão é "não fazer".
 ### 2.1 Lançamento do processo e transporte (`D1`, `D16`)
 
 - Reutilizar o mesmo mecanismo do caminho Codex: `Port.open` de `bash -lc` com o
-  comando do executor configurado, `cd` no workspace validado,
-  `:stderr_to_stdout`, `line: 1_048_576` e env saneado (remoção de
-  `secret_environment_names`); remoto via `SSH.start_port`.
-- Transporte `stdio` do ACP: JSON-RPC delimitado por `\n`. O parser **permanece
-  tolerante** a linhas não-JSON (a spec proíbe o agente de escrever não-ACP em
-  `stdout`, mas `:stderr_to_stdout` mistura o log do agente no mesmo canal).
+  comando do executor configurado, `cd` no workspace validado, `line: 1_048_576` e
+  env saneado (remoção de `secret_environment_names`); remoto via `SSH.start_port`.
+- Transporte `stdio` do ACP: JSON-RPC delimitado por `\n`, e **`stdout` é o único
+  canal de protocolo**. O lançamento ACP **não** usa `:stderr_to_stdout` (nem no
+  local, nem no remoto): o log do agente permanece em `stderr`, herdado pelo nó como
+  diagnóstico, e nunca chega ao parser — conteúdo de `stderr` não pode virar
+  resposta de request, `session/update`, `:notification` nem `:malformed` (correção
+  registrada em [0004](0004-acp-client-implementation.md) §4.10). O parser
+  **permanece tolerante** apenas para linha não-JSON em `stdout`, que a spec proíbe
+  ao agente (D22).
 - O comando é configuração específica do executor ACP (`acp.command`), conforme
   [../acp-analysis.md](../acp-analysis.md) §7 e Q1; nada de modelo/credencial no
   YAML.

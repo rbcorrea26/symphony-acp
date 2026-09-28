@@ -348,6 +348,122 @@ defmodule SymphonyElixir.AcpTest do
     end
   end
 
+  describe "acp stderr separation" do
+    test "agent diagnostics on stderr never reach the parser during initialize" do
+      context = acp_setup!(plan: "initialize stderr_probe")
+      client = start_client!(context)
+
+      # The frame the agent wrote to stderr carries this request id and an
+      # unsupported protocol version: if stderr were merged into the protocol
+      # stream, `initialize` would answer with it instead of the stdout response.
+      assert {:ok, %{protocol_version: 1}} = Client.initialize(client)
+
+      assert_trace_line!(context.workspace, "stderr_probe initialize")
+      assert :ok = Client.close(client)
+    end
+
+    test "a stderr frame cannot answer a pending initialize" do
+      context = acp_setup!(plan: "initialize stderr_silent")
+      client = start_client!(context, read_timeout_ms: 150)
+
+      assert {:error, :response_timeout} = Client.initialize(client)
+      assert_trace_line!(context.workspace, "stderr_probe initialize")
+      assert :ok = Client.close(client)
+    end
+
+    test "a stderr frame cannot fabricate a session id" do
+      context = acp_setup!(plan: "session/new stderr_probe")
+      {client, session_id} = handshake!(context)
+
+      assert session_id == @acp_session_id
+      refute session_id == "sess-from-stderr"
+      assert_trace_line!(context.workspace, "stderr_probe session_new")
+      assert :ok = Client.close(client)
+    end
+
+    test "stderr content cannot satisfy a pending prompt or change its stop reason" do
+      context = acp_setup!(plan: "turn 1 stderr_probe")
+      {client, session_id} = handshake!(context)
+
+      assert {:ok, turn} =
+               Client.prompt(client, session_id, "prompt", on_event: forward_acp_events())
+
+      assert turn.result == %{"stopReason" => "end_turn"}
+
+      # The first event is the real stdout `session/update`; a notification built
+      # from the stderr probe would fail these assertions.
+      assert_receive {:acp_event, %{type: :notification, payload: payload, raw: raw}}
+      assert payload["sessionId"] == @acp_session_id
+      assert payload["update"]["sessionUpdate"] == "agent_message_chunk"
+      refute raw =~ "stderr"
+
+      refute_receive {:acp_event, %{type: :malformed}}, 50
+      refute_receive {:acp_event, _event}, 50
+
+      assert_trace_line!(context.workspace, "stderr_probe turn 1")
+      assert :ok = Client.close(client)
+    end
+
+    test "a stderr frame cannot answer a pending prompt" do
+      context = acp_setup!(plan: "turn 1 stderr_silent")
+      {client, session_id} = handshake!(context, turn_timeout_ms: 150)
+
+      assert {:error, :turn_timeout} = Client.prompt(client, session_id, "prompt")
+      assert_trace_line!(context.workspace, "stderr_probe turn 1")
+      assert :ok = Client.close(client)
+    end
+
+    test "non-JSON on stdout is still tolerated and still logged" do
+      context = acp_setup!(plan: "initialize noise")
+      client = start_client!(context)
+
+      log = capture_log(fn -> assert {:ok, %{protocol_version: 1}} = Client.initialize(client) end)
+
+      assert log =~ "ACP stdout output: fake-acp: warning: this line is not JSON"
+      assert_trace_line!(context.workspace, "initialize noise")
+      assert :ok = Client.close(client)
+    end
+
+    test "the remote worker command keeps stderr out of the protocol stream" do
+      previous_path = System.get_env("PATH")
+      on_exit(fn -> restore_env("PATH", previous_path) end)
+
+      context =
+        acp_setup!(plan: "initialize stderr_probe\nsession/new stderr_probe\nturn 1 stderr_probe")
+
+      ssh_trace = Path.join(context.test_root, "ssh.trace")
+      install_fake_ssh!(context.test_root, ssh_trace)
+
+      {client, session_id} = handshake!(context, worker_host: "acp-worker")
+
+      # `ssh` forwards the remote stderr to its own stderr, so the same separation
+      # has to hold for the remote path: the probe answers a spoofed session id and
+      # a spoofed stop reason, and neither may win.
+      assert session_id == @acp_session_id
+      assert client.metadata.worker_host == "acp-worker"
+
+      assert {:ok, turn} =
+               Client.prompt(client, session_id, "prompt", on_event: forward_acp_events())
+
+      assert turn.result == %{"stopReason" => "end_turn"}
+
+      # Only the stdout stream produces events: the stderr probe (a spoofed
+      # `session/update` and a spoofed response) produces none.
+      assert_receive {:acp_event, %{type: :notification, payload: payload}}
+      assert payload["update"]["sessionUpdate"] == "agent_message_chunk"
+
+      refute_receive {:acp_event, %{type: :malformed}}, 50
+      refute_receive {:acp_event, _event}, 50
+
+      ssh_argv = File.read!(ssh_trace)
+      assert ssh_argv =~ "-T acp-worker bash -lc"
+      assert ssh_argv =~ client.workspace
+
+      assert_trace_line!(context.workspace, "stderr_probe turn 1")
+      assert :ok = Client.close(client)
+    end
+  end
+
   describe "acp permission requests" do
     test "the default policy rejects with the lowest scope option" do
       context = acp_setup!(plan: "turn 1 permission allow_always reject_always reject_once")
@@ -888,6 +1004,48 @@ defmodule SymphonyElixir.AcpTest do
       assert_trace_line!(context.workspace, "turn_response cancelled")
       assert_trace_line!(context.workspace, "stdin_eof")
     end
+
+    test "the agent runner completes both turns while the agent logs stderr frames" do
+      context =
+        acp_setup!(plan: "initialize stderr_probe\nsession/new stderr_probe\nturn 1 stderr_probe\nturn 2 stderr_probe")
+
+      issue = acp_issue()
+      test_pid = self()
+
+      # Every phase of the real path runs with agent log frames on stderr,
+      # including one shaped like the response of the request that is pending.
+      assert :ok = AgentRunner.run(issue, test_pid, issue_state_fetcher: &active_then_done/1)
+
+      assert_receive {:codex_worker_update, @acp_issue_id,
+                      %{
+                        event: :session_started,
+                        session_id: "sess-fake-acp-1",
+                        acp_session_id: "sess-fake-acp",
+                        turn_id: 1
+                      }}
+
+      assert_receive {:codex_worker_update, @acp_issue_id,
+                      %{
+                        event: :notification,
+                        payload: %{"update" => %{"sessionUpdate" => "agent_message_chunk"}}
+                      }}
+
+      assert_receive {:codex_worker_update, @acp_issue_id, %{event: :turn_completed, session_id: "sess-fake-acp-1"}}
+
+      assert_receive {:codex_worker_update, @acp_issue_id, %{event: :session_started, session_id: "sess-fake-acp-2", turn_id: 2}}
+
+      assert_receive {:codex_worker_update, @acp_issue_id, %{event: :turn_completed, session_id: "sess-fake-acp-2"}}
+
+      refute_receive {:codex_worker_update, @acp_issue_id, %{event: :malformed}}, 50
+      refute_receive {:codex_worker_update, @acp_issue_id, %{event: :turn_failed}}, 50
+      refute_receive {:codex_worker_update, @acp_issue_id, %{event: :turn_ended_with_error}}, 50
+
+      assert_trace_line!(context.workspace, "stderr_probe initialize")
+      assert_trace_line!(context.workspace, "stderr_probe session_new")
+      assert_trace_line!(context.workspace, "stderr_probe turn 1")
+      assert_trace_line!(context.workspace, "stderr_probe turn 2")
+      assert_trace_line!(context.workspace, "stdin_eof")
+    end
   end
 
   defp acp_setup!(overrides \\ []) do
@@ -896,6 +1054,11 @@ defmodule SymphonyElixir.AcpTest do
     workspace = Path.join(workspace_root, @acp_identifier)
     agent = Path.join(test_root, "fake-acp-agent")
 
+    # The path is unique only inside one VM: a suite killed with SIGKILL can leave a
+    # `symphony-acp-<n>` behind, and the next run hands that same number out again.
+    # Wipe the root, otherwise a stale `fake-acp.plan`/`fake-acp.trace` of an
+    # interrupted run leaks into a new test and breaks its assertions.
+    File.rm_rf!(test_root)
     File.mkdir_p!(workspace)
     write_fake_acp_agent!(agent)
 
@@ -1029,10 +1192,18 @@ defmodule SymphonyElixir.AcpTest do
     # wire is recorded in ./fake-acp.trace.
     #
     # Plan directives:
-    #   initialize ok | notice | version <n> | auth_required | auth_required_bare | bare | noisejson | unsupported | error | invalid | silent | crash
-    #   session/new ok | error | invalid
+    #   initialize ok | notice | version <n> | auth_required | auth_required_bare | bare | noisejson |
+    #              noise | unsupported | error | invalid | silent | stderr_probe | stderr_silent | crash
+    #   session/new ok | error | invalid | stderr_probe | stderr_silent
     #   turn <n> ok | messages <k> | fail <stopReason> | cancel | silent | crash | permission <kinds...> |
-    #            permission_noparams | unsupported | notice | malformed | noise | noisejson | invalid | error | usage <used> <size>
+    #            permission_noparams | unsupported | notice | malformed | noise | noisejson | invalid |
+    #            error | usage <used> <size> | stderr_probe | stderr_silent
+    #
+    # `stderr_probe` writes agent log lines to `stderr` — plain text, a bare JSON
+    # object and a complete JSON-RPC response for the request that is pending right
+    # then — and then answers normally on `stdout`. `stderr_silent` writes the same
+    # lines to `stderr` and never answers on `stdout`. Neither may be read by the
+    # client: an ACP client parses `stdout` only.
 
     trace_file="fake-acp.trace"
     plan_file="fake-acp.plan"
@@ -1084,6 +1255,29 @@ defmodule SymphonyElixir.AcpTest do
       trace "turn_response $2"
     }
 
+    # Diagnostic channel of the agent: everything here is log, never protocol. The
+    # last line is a complete JSON-RPC response for the request that is pending at
+    # this instant, so if `stderr` were ever merged into `stdout` the pending
+    # request would be answered by this log line. The trace line proves the writes
+    # happened, so the assertions that follow cannot pass vacuously.
+    stderr_probe() {
+      probe_id="$1"
+      probe_result="$2"
+      probe_phase="$3"
+      printf '%s\n' 'fake-acp: stderr diagnostic: provider unavailable' >&2
+      printf '%s\n' '{"level":"error","message":"provider unavailable"}' >&2
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$session_id\",\"update\":{\"sessionUpdate\":\"stderr_leak\",\"content\":{\"type\":\"text\",\"text\":\"stderr content\"}}}}" >&2
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$probe_id,\"result\":$probe_result}" >&2
+      trace "stderr_probe $probe_phase id=$probe_id"
+    }
+
+    probe_stderr_if_planned() {
+      case "$1" in
+        stderr_probe | stderr_silent) stderr_probe "$2" "$3" "$4" ;;
+        *) : ;;
+      esac
+    }
+
     emit_messages() {
       i=1
       while [ "$i" -le "$1" ]; do
@@ -1097,9 +1291,14 @@ defmodule SymphonyElixir.AcpTest do
       n="$2"
       directive="$3"
 
+      probe_stderr_if_planned "$directive" "$prompt_id" '{"stopReason":"refusal"}' "turn $n"
+
       case "$directive" in
         silent)
           trace "turn silent $n"
+          ;;
+        stderr_silent)
+          trace "turn stderr_silent $n"
           ;;
         crash)
           trace "turn crash $n"
@@ -1203,7 +1402,6 @@ defmodule SymphonyElixir.AcpTest do
     trace "env_linear_api_key=${LINEAR_API_KEY:-unset}"
 
     while IFS= read -r line; do
-      printf 'fake-acp: received a frame\n' >&2
       id=$(json_field "$line" '.id // empty')
       method=$(json_field "$line" '.method // empty')
 
@@ -1211,9 +1409,13 @@ defmodule SymphonyElixir.AcpTest do
         initialize)
           directive=$(plan_rest initialize)
           trace "initialize_request protocolVersion=$(json_field "$line" '.params.protocolVersion') capabilities=$(json_field "$line" '.params.clientCapabilities | tostring') client=$(json_field "$line" '.params.clientInfo.name')"
+          probe_stderr_if_planned "$directive" "$id" '{"protocolVersion":2,"agentCapabilities":{},"agentInfo":{"name":"stderr-spoof"},"authMethods":[]}' "initialize"
           case "$directive" in
             silent)
               trace "initialize silent"
+              ;;
+            stderr_silent)
+              trace "initialize stderr_silent"
               ;;
             crash)
               trace "initialize crash"
@@ -1223,6 +1425,11 @@ defmodule SymphonyElixir.AcpTest do
               emit_unknown_notification
               initialize_result "$id" 1
               trace "initialize notice"
+              ;;
+            noise)
+              printf '%s\n' 'fake-acp: warning: this line is not JSON'
+              initialize_result "$id" 1
+              trace "initialize noise"
               ;;
             auth_required)
               printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32000,\"message\":\"Authentication required\",\"data\":{\"authMethods\":[{\"id\":\"fake-login\",\"name\":\"Fake login\"}]}}}"
@@ -1272,7 +1479,11 @@ defmodule SymphonyElixir.AcpTest do
         session/new)
           directive=$(plan_rest "session/new")
           trace "session_new_request cwd=$(json_field "$line" '.params.cwd') mcpServers=$(json_field "$line" '.params.mcpServers | tostring')"
+          probe_stderr_if_planned "$directive" "$id" '{"sessionId":"sess-from-stderr"}' "session_new"
           case "$directive" in
+            stderr_silent)
+              trace "session_new stderr_silent"
+              ;;
             error)
               printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32603,\"message\":\"fake session failure\"}}"
               trace "session_new error"

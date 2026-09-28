@@ -32,8 +32,8 @@ Cline, sem modelo, sem rede e sem credencial.
 Detalhes verificados no schema e usados pelo código: `NewSessionRequest` exige `cwd`
 e `mcpServers`; `InitializeRequest` exige apenas `protocolVersion` e trata
 capability omitida como *unsupported*; o transporte stdio é JSON-RPC delimitado por
-`\n`, sem *embedded newlines*, e o agente pode escrever log em `stderr` (que o
-Symphony mistura em `stdout` via `:stderr_to_stdout`).
+`\n`, sem *embedded newlines*, e `stderr` é o canal **livre** para log do agente —
+que o cliente ACP mantém fora do canal de protocolo (§4.10).
 
 ### O que o incremento 1 não tinha
 
@@ -65,16 +65,20 @@ Symphony mistura em `stdout` via `:stderr_to_stdout`).
 
 ### 4.2 Transporte e parser
 
-- Lançamento idêntico ao caminho Codex (`Port.open` de `bash -lc`, `cd` no workspace
-  validado, `:stderr_to_stdout`, env saneado removendo `secret_environment_names`);
-  remoto via `SSH.start_port` com `cd '<workspace>' && unset SECRETS && exec <command>`.
+- Lançamento no mesmo formato do caminho Codex (`Port.open` de `bash -lc`, `cd` no
+  workspace validado, env saneado removendo `secret_environment_names`), com **uma
+  diferença deliberada**: o lançamento ACP **não** usa `:stderr_to_stdout` (§4.10);
+  remoto via `SSH.start_port` com `stderr_to_stdout: false` e o comando
+  `cd '<workspace>' && unset SECRETS && exec <command>`.
 - *Framing* por linha com reassemblagem: `line_bytes` é o tamanho máximo de chunk que
   o port entrega; frames maiores chegam em `{:noeol, ...}` e são remontados (o valor
   é injetável só em teste, para exercitar o caminho sem depender de sorte de I/O).
-- Parser **tolerante** (decisão D22 do ADR-0002): linha não-JSON vira log
-  (`debug`, ou `warning` quando contém termo de erro) e não interrompe o turno; JSON
-  inválido que *parece* frame vira evento `:malformed`; JSON sem `id` nem `method`
-  vira `:notification` (payload íntegro) e mantém a conexão viva.
+- Parser **tolerante** (decisão D22 do ADR-0002) **apenas para o `stdout`**, o único
+  canal que o cliente lê: linha não-JSON vira log (`debug`, ou `warning` quando
+  contém termo de erro) e não interrompe o turno; JSON inválido que *parece* frame
+  vira evento `:malformed`; JSON sem `id` nem `method` vira `:notification` (payload
+  íntegro) e mantém a conexão viva. Nada disso pode ser originado em `stderr`
+  (§4.10).
 - Erros de protocolo expostos com a taxonomia do ADR-0002
   (`{:acp_response_error, error}`, `{:acp_version_unsupported, version}`,
   `{:acp_auth_required, methods}`, `:response_timeout`, `:turn_timeout`,
@@ -172,7 +176,10 @@ Symphony mistura em `stdout` via `:stderr_to_stdout`).
 
 - O agente fake é um **processo externo** de teste (`bash` + `jq`), escrito pelo
   próprio teste, que fala o transporte ACP real. Ele é programado por
-  `fake-acp.plan` no workspace e grava o que cruzou o fio em `fake-acp.trace`.
+  `fake-acp.plan` no workspace e grava o que cruzou o fio em `fake-acp.trace`, e o
+  harness apaga o `test_root` antes de usá-lo (o número do diretório é único apenas
+  dentro de uma VM, então um run interrompido não pode vazar trace antigo para o
+  run seguinte).
 - Ele não usa internet, Cline, DeepSeek, credenciais, MCP, capability de filesystem
   nem terminal, e vive só na suíte de testes: o Symphony o seleciona pelo
   `acp.command` configurado no teste, nunca por `executor.kind: fake`.
@@ -183,23 +190,68 @@ Symphony mistura em `stdout` via `:stderr_to_stdout`).
   silêncio, crash, permissão, permissão sem allow, permissão sem params, request não
   suportado, notificação desconhecida, frame malformado, ruído não-JSON, JSON solto,
   resultado inválido, erro do agente, `usage_update`), múltiplos turnos na mesma
-  sessão, env sem segredo do tracker, execução por `ssh` (worker remoto) e teardown.
+  sessão, env sem segredo do tracker, execução por `ssh` (worker remoto), separação
+  de `stdout`/`stderr` (`stderr_probe`/`stderr_silent` em `initialize`,
+  `session/new` e turnos) e teardown.
 - O teste de ponta a ponta é `AgentRunner → Executor.Acp (por executor.kind) →
   stdio/JSON-RPC → agente fake → eventos → continuação → teardown`.
+
+### 4.10 Separação de `stdout` e `stderr` (correção registrada nesta PR)
+
+- **Causa raiz.** O lançamento usava `:stderr_to_stdout` (paridade mecânica com o
+  caminho Codex), então o `stderr` do agente entrava no **mesmo canal** do protocolo.
+  Com os dois streams fundidos a origem do conteúdo se perdia, e a única defesa era o
+  parser tolerante (D22) — insuficiente: um log de `stderr` com forma de frame
+  (`{"jsonrpc":"2.0","id":N,"result":...}`, um `{"level":"error",...}` ou um
+  `session/update` fabricado) seria indistinguível de mensagem ACP e podia satisfazer
+  uma resposta pendente ou virar `:notification`/`:malformed`.
+- **Correção.** `stdout` é o **único** canal consumido pelo *framing*/parser; o
+  lançamento ACP deixa de pedir o merge:
+  - **local**: `Port.open` do `bash -lc` sem `:stderr_to_stdout` — o processo filho
+    herda o `stderr` do nó, então o log do agente continua observável no sink de
+    diagnóstico do Symphony (console/journald do serviço) sem cruzar o protocolo;
+  - **remoto**: `SSH.start_port/3` recebe `stderr_to_stdout: false` (parâmetro
+    **aditivo** do módulo, default inalterado). O `ssh` já encaminha o `stderr` do
+    comando remoto para o seu próprio `stderr`, que o nó herda — a separação vale
+    igualmente com `worker_host`.
+- **Consequência declarada.** O conteúdo de `stderr` não passa mais pelo caminho de
+  log do cliente: não há classificação `debug`/`warning` nem truncamento por linha
+  feito pelo Symphony para esse canal (o sink é do serviço/SO). O limite existente
+  `@max_stream_log_bytes` continua valendo para o único caso em que o cliente
+  registra linha bruta — não-JSON em **`stdout`** (violação da spec pelo agente, que
+  o parser tolera por decisão D22). Segredos não entram por aqui: o ambiente do filho
+  já vai sem `secret_environment_names`.
+- **Provas (testes determinísticos, sem `sleep` arbitrário).** O agente fake ganhou
+  as diretivas `stderr_probe` e `stderr_silent`, que escrevem em `stderr` texto
+  comum, JSON válido (`{"level":"error",...}`), uma notificação `session/update` e
+  uma **resposta JSON-RPC completa para o id da request pendente naquele instante**
+  — registrando um trace para que a asserção não passe em vazio. Os testes então
+  provam que `initialize` continua negociando a versão do `stdout` (não a `2` do
+  `stderr`), `session/new` não aceita `sess-from-stderr`, o turno mantém
+  `stopReason: end_turn` (não o `refusal` do `stderr`) e que os únicos eventos são os
+  do `stdout` (nenhum `:notification`/`:malformed` de origem `stderr`). Duas provas
+  por silêncio fecham o caso: `stderr_silent` faz o `initialize` terminar em
+  `:response_timeout` e o turno em `:turn_timeout`, ou seja, a resposta escrita em
+  `stderr` **não** satisfaz a request pendente. O caminho remoto é exercitado pelo
+  mesmo fake através do `ssh` falso, e `ssh_test.exs` fixa as duas metades do
+  parâmetro (`stderr` fora do port quando solicitado; merge preservado no default).
 
 ## Consequências
 
 - **Positivas:** a fase 3 fica verificável no repositório: o ciclo de turnos do
   Symphony roda por ACP de verdade, com agente externo, sem Cline/modelo/rede/segredo;
   o caminho Codex continua sendo o default e não foi tocado; protocolo e orquestração
-  ficam em módulos separados; os limites (sem sandbox ACP, sem capability de cliente,
-  sem elicitation, sem cancelamento gracioso, sem métrica de token) estão declarados e
-  testados em vez de escondidos atrás de tradução otimista.
+  ficam em módulos separados; o canal de protocolo é **único** (`stdout`), com o
+  `stderr` do agente fora do parser e ainda observável como diagnóstico (§4.10); os
+  limites (sem sandbox ACP, sem capability de cliente, sem elicitation, sem
+  cancelamento gracioso, sem métrica de token) estão declarados e testados em vez de
+  escondidos atrás de tradução otimista.
 - **Negativas / custos:** o fork agora mantém **dois** clientes de protocolo sob teste
   (Codex app-server e ACP) e um agente fake a mais na suíte; o caminho ACP observa menos
   que o Codex (sem pid de protocolo, sem tokens, sem ferramentas do tracker); a
   nomenclatura interna `codex_*` continua (dívida Q8); timeouts ainda moram em
-  `codex.*` (dívida Q1).
+  `codex.*` (dívida Q1); o `stderr` do agente não é classificado nem truncado pelo
+  cliente, porque não passa pelo caminho de log do Symphony (§4.10).
 - **Obrigações:** manter a paridade do caminho Codex sob qualquer mudança futura;
   registrar divergências de arquivo upstream em [../divergences.md](../divergences.md);
   nunca converter ausência de métrica em zero (Q6) nem afirmar que `Port.close` é
@@ -227,15 +279,17 @@ Estado: **implementado** (incremento 2 da fase 3). Arquivos:
 
 | Arquivo | Tipo | Mudança |
 |---|---|---|
-| `elixir/lib/symphony_elixir/acp/client.ex` | novo | cliente ACP mínimo por stdio: lançamento, *framing*, `initialize`, `session/new`, `session/prompt`, permissão, erros de protocolo, teardown |
+| `elixir/lib/symphony_elixir/acp/client.ex` | novo | cliente ACP mínimo por stdio: lançamento (**sem** merge de `stderr`), *framing*, `initialize`, `session/new`, `session/prompt`, permissão, erros de protocolo, teardown |
 | `elixir/lib/symphony_elixir/executor/acp.ex` | novo | executor ACP: config, validação, eventos, identidade sintética de turno, mapeamento de `stopReason` |
 | `elixir/lib/symphony_elixir/executor.ex` | upstream alterado | `"acp"` no mapa, callback opcional `validate_config/1`, `validate_config/1` recebendo o `%Schema{}` |
 | `elixir/lib/symphony_elixir/config/schema.ex` | upstream alterado (aditivo) | bloco `acp` (`command`, `auto_approve_requests` default `false`) |
 | `elixir/lib/symphony_elixir/config.ex` | upstream alterado | preflight chama `Executor.validate_config(settings)` |
-| `elixir/test/symphony_elixir/acp_test.exs` | novo | agente ACP fake por stdio + config, cliente, executor e o teste de ponta a ponta do `AgentRunner` |
+| `elixir/lib/symphony_elixir/ssh.ex` | upstream alterado (aditivo) | `start_port/3` aceita `stderr_to_stdout: false` para o caminho ACP manter o `stderr` remoto fora do port; o default (`:stderr_to_stdout`) preserva o comportamento do Codex app-server |
+| `elixir/test/symphony_elixir/acp_test.exs` | novo | agente ACP fake por stdio + config, cliente, executor, separação de `stdout`/`stderr` e o teste de ponta a ponta do `AgentRunner` |
 | `elixir/test/symphony_elixir/executor_test.exs` | fork alterado | superfície do behaviour (3 callbacks + `validate_config` opcional) e nova assinatura do preflight |
+| `elixir/test/symphony_elixir/ssh_test.exs` | upstream alterado (aditivo) | os dois comportamentos do novo parâmetro de `start_port/3` (`stderr` separado quando pedido; merge no default) |
 | `elixir/test/support/test_support.exs` | upstream alterado (aditivo) | `acp_command`/`acp_auto_approve_requests` no harness |
-| `elixir/README.md` | upstream alterado | configuração ACP real, limites declarados e dependência de teste (`jq`) |
+| `elixir/README.md` | upstream alterado | configuração ACP real, limites declarados, separação de streams e dependência de teste (`jq`) |
 
 ### O que continua igual no upstream
 
@@ -266,5 +320,8 @@ Estado: **implementado** (incremento 2 da fase 3). Arquivos:
   antes da integração real do Cline;
 - o fake ACP depende de `bash` e `jq` no ambiente de teste (declarado em
   `elixir/README.md` §Testing);
+- o `stderr` do agente é encaminhado ao sink de diagnóstico do nó e **não** passa pela
+  classificação/truncamento que o cliente aplica a linha não-JSON em `stdout`: reter,
+  rotacionar ou limitar esse canal é responsabilidade do serviço/SO (§4.10);
 - atualizar o roadmap/manifests da plataforma (status da fase 3 e SHA do fork) é PR no
   `agentic-dev-environment`, não neste repositório.

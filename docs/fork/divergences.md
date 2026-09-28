@@ -23,8 +23,8 @@ seguem a documentação upstream como autoridade.
 | `docs/fork/upstream-sync.md` | novo | procedimento de sincronização com o upstream | não |
 | `docs/fork/divergences.md` | novo | este registro | não |
 | `docs/fork/adr/README.md` | novo | namespace de ADR do fork e índice dos ADRs | não |
-| `docs/fork/adr/0001-executor-abstraction.md` | novo | decisão proposta da abstração de executor (ADR-0001 do fork) | não |
-| `docs/fork/adr/0002-acp-protocol-mapping.md` | novo | decisão proposta do mapeamento ACP (ADR-0002 do fork) | não |
+| `docs/fork/adr/0001-executor-abstraction.md` | novo | decisão **aceita (implementação pendente)** da abstração de executor (ADR-0001 do fork) | não |
+| `docs/fork/adr/0002-acp-protocol-mapping.md` | novo | decisão **aceita (implementação pendente)** do mapeamento ACP (ADR-0002 do fork) | não |
 | `docs/fork/acp-analysis.md` | novo | análise Codex App Server ↔ ACP: estado do código, especificação oficial do ACP, matriz de mapeamento, gaps, opções de abstração e decisões humanas Q1–Q10 | não |
 | `AGENTS.md` (raiz) | novo | contrato de agentes no fork; regras de código continuam em `elixir/AGENTS.md` | não |
 | `README.md` | alterado (ponteiro) | indicar que este repositório é um fork e onde está sua documentação | não |

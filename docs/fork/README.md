@@ -16,8 +16,17 @@ ser o **executor/control plane do pipeline agêntico** da plataforma
 - permanecer compatível com o upstream, com **diff mínimo** e explicado.
 
 Neste momento o fork contém **apenas documentação**: nenhuma linha de código foi
-alterada em relação ao upstream e nenhuma decisão de mapeamento de protocolo foi
-tomada (ver [adr/README.md](adr/README.md)).
+alterada em relação ao upstream. A análise arquitetural do caminho Codex App
+Server ↔ ACP está **concluída** em [acp-analysis.md](acp-analysis.md) (matriz
+`D1`–`D33`, fontes oficiais, opções de abstração, segurança e decisões Q1–Q10) e
+as decisões derivadas estão **aceitas** em
+[adr/0001](adr/0001-executor-abstraction.md) (abstração de executor) e
+[adr/0002](adr/0002-acp-protocol-mapping.md) (mapeamento de protocolo). **Não há
+decisão humana aberta bloqueando a fase 3**, e a **implementação não foi
+iniciada**: nenhum executor ACP, adapter, fake ou dependência existe no
+repositório, e o caminho Codex app-server permanece intacto. O próximo passo é o
+executor ACP **fake determinístico**; Cline entra só na fase 4 e DeepSeek depois
+dele.
 
 ## 2. Relação `origin` / `upstream`
 
@@ -79,14 +88,44 @@ Registro das divergências atuais: [divergences.md](divergences.md).
 | comportamento upstream não alterado (orquestração, workspace, tracker, logging, token accounting) | upstream: `SPEC.md`, `elixir/README.md`, `elixir/AGENTS.md`, `elixir/docs/*` |
 | arquitetura e fluxo do pipeline (issue → `ready-for-human`), ADRs da plataforma, roadmap, ambiente/runtime/segurança | `rbcorrea26/agentic-dev-environment` (`docs/architecture/*`) |
 | contrato de projeto consumidor (`AGENTS.md`, `WORKFLOW.md`, templates, preflight) | `rbcorrea26/agentic-project-template` |
-| extensões do fork: abstração de executor, mapeamento Codex ↔ ACP, divergências | **este diretório** |
+| extensões do fork: abstração de executor, mapeamento Codex ↔ ACP, análise técnica, divergências | **este diretório** (`acp-analysis.md`, `adr/0001`, `adr/0002`, `divergences.md`) |
 
 **Decisões da plataforma não pertencem a este repositório.** Se uma decisão
 (qual executor, qual modelo, quais gates, isolamento de runtime) precisar mudar,
 ela muda no `agentic-dev-environment` com ADR novo; aqui só vive o que é
 específico do Symphony e do protocolo.
 
-## 5. ADRs do fork
+## 5. Rastreamento de trabalho do fork (GitHub Issues)
+
+O fork `rbcorrea26/symphony-acp` tem **GitHub Issues habilitadas
+deliberadamente** (o upstream `openai/symphony` mantém Issues desabilitadas — a
+configuração foi herdada quando o fork foi criado). O escopo dessas Issues é
+**apenas o que é específico deste repositório**:
+
+- bugs e flakes do próprio Symphony/fork (por exemplo, gates instáveis);
+- dívidas técnicas registradas nos ADRs desta pasta (nomes internos `codex_*`,
+  reuso temporário de `codex.*`, representação de métricas ausentes);
+- trabalho de extensão do fork (abstração de executor, caminho ACP,
+  sincronização com o upstream).
+
+Limites explícitos:
+
+- **não altera o upstream**: habilitar Issues aqui é configuração local do fork;
+  nada é criado, alterado ou enviado em `openai/symphony` (push segue
+  `DISABLED`);
+- **não substituem as GitHub Issues dos projetos consumidores**: cada projeto
+  consumidor mantém o próprio repositório, quadro e Issues;
+- **o control plane do pipeline continua sendo as Issues do projeto consumidor**
+  (entrada do fluxo aprovado `GitHub Issues → Symphony → …`): Issues do fork
+  nunca são fonte de trabalho para o pipeline, não viram dispatch nem workspace;
+- Issues do fork **não** são fonte de verdade de decisão durável — decisão
+  durável vive em ADR/documento versionado (ver [../../AGENTS.md](../../AGENTS.md)
+  §2 e [divergences.md](divergences.md)).
+
+Primeira issue técnica registrada (com teste afetado, evidência e critério de
+aceite): [#2 — gate intermitente em `core_test.exs:1062`](https://github.com/rbcorrea26/symphony-acp/issues/2).
+
+## 6. ADRs do fork
 
 O fork tem namespace de ADR próprio: [adr/README.md](adr/README.md) (numerados
 `docs/fork/adr/NNNN-*`). O ADR `0002` **daqui** não é o `0002` da plataforma.

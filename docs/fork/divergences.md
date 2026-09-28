@@ -7,7 +7,11 @@ Registro obrigatório de **todo** arquivo alterado em relação a
 
 Base do registro: `upstream/main` = `be10a1b79df723d6d7612b5651c8522704dafb2e`
 (posterior à tag v0.0.3, que aponta para `1c0fb6c8e8ef9031a2c861e62af5f9e66cee39cb`).
-As divergências deste marco são introduzidas pela [PR #1](https://github.com/rbcorrea26/symphony-acp/pull/1).
+As divergências da carta do fork foram introduzidas pela
+[PR #1](https://github.com/rbcorrea26/symphony-acp/pull/1); as da análise
+arquitetural e dos ADRs entram pela PR documental que trouxe
+[acp-analysis.md](acp-analysis.md) e
+[adr/0001](adr/0001-executor-abstraction.md)/[adr/0002](adr/0002-acp-protocol-mapping.md).
 Arquivos **não** listados abaixo são idênticos à base registrada e
 seguem a documentação upstream como autoridade.
 

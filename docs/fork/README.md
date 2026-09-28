@@ -1,6 +1,7 @@
 # Documentação do fork (`symphony-acp`)
 
-Este diretório é a **única documentação que este fork adiciona** ao upstream.
+Este diretório concentra a **documentação específica do fork**, acompanhada
+pelo contrato `AGENTS.md` na raiz e pelo aviso no `README.md` principal.
 Tudo que não foi modificado pelo fork continua sendo documentado — e
 autoritativamente — pelo upstream `openai/symphony`.
 
@@ -28,11 +29,16 @@ tomada (ver [adr/README.md](adr/README.md)).
 Regras:
 
 - **nunca** empurrar para `upstream` (nem branches, nem tags, nem `main`);
-- `main` do fork acompanha `upstream/main` (fast-forward), sem commits nossos:
-  o trabalho do fork vive em branches dedicadas;
+- `main` é a versão integrada do fork: upstream mais alterações próprias
+  revisadas por PR. `upstream/main` permanece a referência original;
+- trabalho e sincronização usam branches dedicadas a partir de `origin/main`;
+  atualizações upstream entram por merge e PR, preservando a ancestralidade
+  e os commits do fork, sem rebase de histórico publicado nem force-push;
 - base registrada deste marco: `be10a1b79df723d6d7612b5651c8522704dafb2e`
-  (`upstream/main`, release v0.0.3), também registrada em
-  `agentic-dev-environment/manifests/tool-versions.txt` (`symphony-fork`).
+  (`upstream/main` consultado em 2026-09-27), registrada em
+  `agentic-dev-environment/manifests/tool-versions.txt` (`symphony-base`).
+  A tag `v0.0.3` aponta para `1c0fb6c8e8ef9031a2c861e62af5f9e66cee39cb`,
+  anterior à base. `symphony-fork` registra separadamente a revisão integrada do fork.
 
 Configuração segura dos remotes (evita push acidental no upstream):
 
@@ -51,7 +57,8 @@ Registro das divergências atuais: [divergences.md](divergences.md).
 2. **Sem refatoração oportunista.** Não renomeie, reformate nem reorganize código
    upstream por proximidade; cada mudança precisa de motivo ligado ao objetivo do
    fork.
-3. **Sem cópia de documentação upstream.** `README.md`, `SPEC.md`,
+3. **Sem cópia de documentação upstream.** Exceto pelo aviso no `README.md`,
+   os documentos `SPEC.md`,
    `elixir/README.md`, `elixir/WORKFLOW.md`, `elixir/AGENTS.md`,
    `elixir/docs/*` e `.github/*` permanecem como no upstream; quando o fork
    alterar comportamento, a **divergência** é registrada aqui e o documento

@@ -11,10 +11,11 @@ _In this [demo video](https://player.vimeo.com/video/1186371009?h=5626e4b899), S
 > Symphony is a low-key engineering preview for testing in trusted environments.
 
 > [!NOTE]
-> **This repository is a fork.** `rbcorrea26/symphony-acp` extends
+> **This repository is a fork.** `rbcorrea26/symphony-acp` plans to extend
 > [`openai/symphony`](https://github.com/openai/symphony) with an executor
 > abstraction and an ACP (Agent Client Protocol) mapping, while keeping the Codex
-> app-server path supported. Fork documentation, minimal-diff policy, sync
+> app-server path supported. This milestone adds documentation only; no ACP code
+> is implemented yet. Fork documentation, minimal-diff policy, sync
 > procedure and current divergences: [docs/fork/README.md](docs/fork/README.md)
 > — everything else in this documentation describes upstream behavior.
 

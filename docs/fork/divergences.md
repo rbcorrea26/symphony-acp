@@ -6,7 +6,9 @@ Registro obrigatório de **todo** arquivo alterado em relação a
 ([upstream-sync.md](upstream-sync.md) §4).
 
 Base do registro: `upstream/main` = `be10a1b79df723d6d7612b5651c8522704dafb2e`
-(release v0.0.3). Arquivos **não** listados abaixo são idênticos ao upstream e
+(posterior à tag v0.0.3, que aponta para `1c0fb6c8e8ef9031a2c861e62af5f9e66cee39cb`).
+As divergências deste marco são introduzidas pela [PR #1](https://github.com/rbcorrea26/symphony-acp/pull/1).
+Arquivos **não** listados abaixo são idênticos à base registrada e
 seguem a documentação upstream como autoridade.
 
 ## Divergências atuais

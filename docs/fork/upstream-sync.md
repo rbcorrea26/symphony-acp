@@ -1,65 +1,78 @@
 # Sincronização com o upstream (`openai/symphony`)
 
-Objetivo: manter o fork atualizado sem perder as extensões ACP e sem esconder
-divergências. Este procedimento é a fonte da verdade para sincronizar o fork.
+Objetivo: manter o fork atualizado sem perder suas alterações e sem esconder
+divergências. `main` integra upstream e trabalho próprio; `upstream/main` é a
+referência original, somente leitura. ACP ainda não foi implementado.
 
 ## 1. Antes de começar
 
+Confirme que o worktree está limpo e que os remotes apontam para os repositórios
+esperados. Se houver alterações locais, preserve-as antes de continuar.
+
 ```bash
-git remote -v                     # origin = fork, upstream = openai/symphony
-git status --short                # worktree limpo
-git fetch --prune upstream
-git log --oneline HEAD..upstream/main | head   # o que vem
-git diff --stat upstream/main...HEAD           # o que é nosso
+git remote -v
+git status --short
+git fetch origin
+git fetch upstream
+git log --oneline origin/main..upstream/main
+git diff --stat upstream/main...origin/main
 ```
 
 ## 2. Decidir o que entra
 
-- **Fast-forward quando não há divergência:** `main` do fork deve poder avançar
-  para `upstream/main` sem merge commit.
-- **Com trabalho nosso:** rebase (preferido) ou merge explícito, sempre em branch
-  dedicada — nunca reescrevendo commits do upstream.
-- **Tags/releases do upstream:** não são republicadas pelo fork; releases do fork
-  têm versão própria quando existirem.
+- Sincronize em branch dedicada criada a partir de `origin/main`, que já contém
+  as alterações do fork. Integre `upstream/main` por merge, preservando os dois
+  históricos. Não recrie a branch a partir do upstream nem faça rebase publicado.
+- Se o upstream já for ancestral de `origin/main`, não há atualização a integrar.
+- Tags/releases upstream não são republicadas; releases próprias têm versão
+  própria. Um SHA de `main` não é automaticamente o SHA da última release.
 
 ## 3. Sequência recomendada
 
+Substitua `sync/upstream-AAAA-MM-DD` por um nome de branch ainda não usado.
+
 ```bash
-# 1) main do fork em dia com o upstream (sem commits nossos)
-git switch main
-git merge --ff-only upstream/main
+# 1) partir da versão integrada do fork
+git switch -c sync/upstream-AAAA-MM-DD origin/main
+git merge --no-ff upstream/main
+# Em caso de conflito: resolver preservando os comportamentos, revisar e commitar.
+# Para desistir de um merge em conflito: git merge --abort.
 
-# 2) branch de trabalho a partir do novo main
-git switch -c feat/<assunto>
-git rebase main            # reorganiza nossos commits sobre o novo upstream
+# 2) validar e revisar o resultado
+make -C elixir all
+(cd elixir && mix specs.check)
+git diff --check origin/main...HEAD
+git diff --stat upstream/main HEAD
 
-# 3) gates do upstream (valem para o fork)
-cd elixir && make all
-cd .. && git diff --stat upstream/main...HEAD   # confira que o diff continua mínimo
+# 3) atualizar docs/fork/divergences.md e a base registrada em docs/fork/README.md
+#    e commitar esses ajustes separadamente do merge upstream
 
-# 4) registro
-#    - atualizar docs/fork/divergences.md se algo mudou de natureza
-#    - registrar o novo SHA base em
-#      agentic-dev-environment/manifests/tool-versions.txt (chave symphony-fork)
+# 4) publicar somente no fork e abrir PR com o template do repositório
+git push -u origin HEAD
+gh pr create --repo rbcorrea26/symphony-acp --base main
 ```
+
+Antes da integração, valide o corpo com `mix pr_body.check --file /path/to/pr_body.md`
+em `elixir/`, confira CI, diff, conflitos e o registro de divergências. Integre a
+PR por **merge commit**, preservando a ancestralidade upstream, sem bypass de gates.
+Depois, atualize o clone local com `git switch main` e `git pull --ff-only origin main`.
+Na plataforma, registre separadamente `symphony-base` (SHA upstream incorporado) e
+`symphony-fork` (SHA integrado do fork) em `manifests/tool-versions.txt`.
 
 ## 4. Regras
 
-- **Nunca** `git push upstream` (incluindo `--tags`). O remote `upstream` é de
-  leitura.
-- **Nunca** `git push --force` em `main` do fork; force-push só em branch de
-  trabalho, se o PR ainda não tiver revisão.
-- Sincronização não é misturada com trabalho do fork no mesmo commit.
-- Conflito em arquivo upstream: **preserve o comportamento upstream** e registre
-  a decisão — se o comportamento do fork precisar mudar, isso é decisão de
-  arquitetura e vai para ADR (aqui, se for específico de Symphony/ACP; na
-  plataforma, se for decisão do pipeline).
-- Depois da sincronização, `git diff --stat upstream/main...HEAD` deve listar
-  apenas: `docs/fork/**`, o ponteiro do fork em `README.md`, `AGENTS.md` e os
-  arquivos de código das extensões ACP.
+- **Nunca** faça push para `upstream`, incluindo branches e tags; não altere sua
+  configuração durante a sincronização.
+- **Nunca** use force-push ou reescreva o histórico publicado do fork.
+- Não misture sincronização e implementação de extensões no mesmo PR.
+- Em conflitos, preserve o comportamento upstream e registre a resolução.
+  Mudança arquitetural exige ADR no repositório responsável pela decisão.
+- O diff final deve conter somente divergências justificadas no registro:
+  documentação do fork, aviso no README, AGENTS e, quando implementadas,
+  extensões com seus testes e documentação necessários.
 
 ## 5. Sinal de alerta
 
-Se o diff contra o upstream começar a crescer sem que
-[divergences.md](divergences.md) cresça junto, o fork está divergindo por
-acidente — pare, reduza o diff ou justifique cada arquivo antes de continuar.
+Se o diff crescer sem que [divergences.md](divergences.md) cresça junto, pare e
+justifique cada arquivo antes de continuar. O código upstream não alterado
+continua autoritativo; a preservação do caminho Codex é obrigatória.

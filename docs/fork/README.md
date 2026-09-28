@@ -16,8 +16,14 @@ ser o **executor/control plane do pipeline agêntico** da plataforma
 - permanecer compatível com o upstream, com **diff mínimo** e explicado.
 
 Neste momento o fork contém **apenas documentação**: nenhuma linha de código foi
-alterada em relação ao upstream e nenhuma decisão de mapeamento de protocolo foi
-tomada (ver [adr/README.md](adr/README.md)).
+alterada em relação ao upstream. A análise arquitetural do caminho Codex App
+Server ↔ ACP está **concluída** em [acp-analysis.md](acp-analysis.md) (matriz
+`D1`–`D33`, fontes oficiais, opções de abstração, segurança e questões abertas) e
+as decisões derivadas estão propostas em [adr/0001](adr/0001-executor-abstraction.md)
+(abstração de executor) e [adr/0002](adr/0002-acp-protocol-mapping.md)
+(mapeamento de protocolo). A **implementação não foi iniciada**: nenhum executor
+ACP, adapter, fake ou dependência existe no repositório, e o caminho Codex
+app-server permanece intacto.
 
 ## 2. Relação `origin` / `upstream`
 
@@ -79,7 +85,7 @@ Registro das divergências atuais: [divergences.md](divergences.md).
 | comportamento upstream não alterado (orquestração, workspace, tracker, logging, token accounting) | upstream: `SPEC.md`, `elixir/README.md`, `elixir/AGENTS.md`, `elixir/docs/*` |
 | arquitetura e fluxo do pipeline (issue → `ready-for-human`), ADRs da plataforma, roadmap, ambiente/runtime/segurança | `rbcorrea26/agentic-dev-environment` (`docs/architecture/*`) |
 | contrato de projeto consumidor (`AGENTS.md`, `WORKFLOW.md`, templates, preflight) | `rbcorrea26/agentic-project-template` |
-| extensões do fork: abstração de executor, mapeamento Codex ↔ ACP, divergências | **este diretório** |
+| extensões do fork: abstração de executor, mapeamento Codex ↔ ACP, análise técnica, divergências | **este diretório** (`acp-analysis.md`, `adr/0001`, `adr/0002`, `divergences.md`) |
 
 **Decisões da plataforma não pertencem a este repositório.** Se uma decisão
 (qual executor, qual modelo, quais gates, isolamento de runtime) precisar mudar,

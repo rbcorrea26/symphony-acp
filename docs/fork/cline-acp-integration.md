@@ -1,9 +1,9 @@
-# Cline real como agente ACP (fase 4): verificação e estado
+# Cline real como agente ACP (fase 4): verificação, resultado e estado
 
-Este documento registra o **estado medido** do Cline CLI do runtime isolado falando
-ACP com o caminho já implementado no fork (`AgentRunner` → `Executor.Acp` →
-`ACP.Client` → `stdio`/JSON-RPC), o resultado do *spike* feito antes de qualquer
-alteração de código e o **blocker** que mantém a fase 4 pendente.
+Este documento registra o **estado medido** do Cline CLI falando ACP com o caminho já
+implementado no fork (`AgentRunner` → `Executor.Acp` → `ACP.Client` → `stdio`/JSON-RPC):
+o *spike* feito antes de qualquer alteração de código, a autenticação manual que
+desbloqueou a execução e o **turno real** que conclui a fase 4 no fork.
 
 Ele não duplica decisões da plataforma (executor inicial, modelo, gates, runtime:
 `rbcorrea26/agentic-dev-environment`) nem o mapeamento de protocolo
@@ -16,122 +16,166 @@ duplica a análise documental ([acp-analysis.md](acp-analysis.md)).
 | Item | Estado |
 |---|---|
 | Symphony como **cliente ACP** (`SymphonyElixir.ACP.Client`) | implementado (fase 3) |
-| Cline CLI como **agente ACP** (`acp.command`) | **compatível** no handshake; turno real **bloqueado** |
-| Fase 4 (integração Cline) | **pendente** — dependência humana de autenticação |
-| DeepSeek | fora desta fase (fase 5 da plataforma); não configurado aqui |
+| Cline CLI como **agente ACP** (`acp.command`) | **verificado em turno real** |
+| Fase 4 (integração Cline) no fork | **concluída** (turno real, efeito verificado, teardown) |
+| Autenticação do agente | passo humano, feito **fora** do Symphony; dependência do runtime (§5) |
+| DeepSeek | fase 5 da plataforma; **não** configurado nem canonizado aqui |
 
-O que ficou **provado** nesta verificação: o cliente fala com o Cline real
-(`initialize` negociado, frames aceitos, `stderr` fora do parser) e o `session/new`
-real devolve um erro ACP explícito de autenticação, que o cliente já mapeava. Não foi
-encontrada incompatibilidade de protocolo; o que falta é **autenticação do runtime
-isolado**, que a plataforma decidiu ser passo humano.
+Provado nesta verificação: `initialize`, `session/new`, `session/prompt` e
+`session/update` reais; resposta real do modelo; alteração real no workspace descartável
+com validação determinística; `stopReason` final; teardown do processo do agente — tudo
+pelo caminho de produção (`AgentRunner`, com `executor.kind: acp` resolvido por
+configuração). Evidência em §4.
 
-O que **não** ficou provado — e por isso a fase 4 continua pendente: um turno do
-`AgentRunner` com alteração verificável em workspace descartável
-(`session/prompt`, `session/update`, `stopReason`, teardown).
+Continuam fora de escopo: DeepSeek (fase 5), `authenticate` ACP, `session/cancel`/
+`session/close`, `session/load`, elicitation, MCP local e capabilities `fs`/`terminal`.
+Uma dívida herdada da fase 3 (representação de métricas ausentes no dashboard) segue
+aberta e está registrada em §6.
 
 ## 2. Runtime verificado
-
-Ambos medidos no ambiente local, sem exibir segredo:
 
 | Item | Valor medido |
 |---|---|
 | versão executada pelo wrapper | `3.0.65` (`cline --version` pelo wrapper do pipeline) |
-| wrapper | `~/automation/bin/cline` (injeta `--data-dir` do pipeline e o Node do mise) |
-| data-dir isolado | `~/automation/state/cline` — **vazio** (nenhuma credencial persistida) |
+| wrapper | `~/automation/bin/cline` (Node do mise + `--data-dir` do pipeline) |
 | suporte a ACP no `--help` local | sim: `--acp  Run in Agent Client Protocol (ACP) mode for editor integration` |
 | transporte | `stdio`: `stdout` = protocolo, `stderr` = diagnóstico (`[acp] starting ACP mode over stdio…`) |
+| `agentInfo` anunciado | `{"name":"cline","version":"3.0.65"}` |
+| `agentCapabilities` anunciadas | `loadSession`, `promptCapabilities` (image/audio/embeddedContext) |
+| `stopReason` observado no turno real | `end_turn` |
 
-O wrapper é o único Cline usado: ele fixa `--data-dir` no estado do pipeline, de modo
-que a instalação pessoal do usuário (`~/.cline`) fica intocada — e **não** é usada como
-fonte de credencial (ver §5).
+O `--data-dir` do pipeline **não** isolou credencial/estado neste fluxo — fato medido em
+§5. Nenhum segredo foi lido, copiado ou versionado: o Symphony continua sem armazenar
+credencial do agente.
 
-## 3. Handshake real medido (antes de qualquer alteração de código)
+## 3. Spike e desbloqueio da autenticação
 
-Spike mínimo: o processo foi lançado **exatamente como o `acp.command` o lança**
-(`~/automation/bin/cline --acp`, com o `cwd` do workspace de teste) e recebeu os frames
-que `SymphonyElixir.ACP.Client` envia, byte a byte — inclusive sem o campo `jsonrpc`
-(nenhum adaptador, nenhum patch).
+Medido **antes** de qualquer alteração de código, lançando o processo exatamente como o
+`acp.command` o lança (com os frames que `ACP.Client` envia, byte a byte, sem adaptador):
 
-`initialize` (enviado: `protocolVersion: 1`, `clientCapabilities: {}`, `clientInfo` do
-Symphony; resposta do agente, resumida):
+- com o runtime ainda sem autenticação utilizável, `initialize` era negociado em
+  `protocolVersion: 1`, mas `session/new` respondia
+  `{"code":-32000,"message":"Authentication required: Call authenticate before starting a session"}`
+  → o cliente já mapeava para `{:acp_auth_required, []}` e a execução real ficava
+  bloqueada (a fase 4 permaneceu **pendente** nesse momento);
+- a autenticação foi feita **manualmente, fora do Symphony**, pelo dono do ambiente, no
+  fluxo do Cline (`cline auth`); nenhuma credencial foi adicionada ao `WORKFLOW.md`, a
+  logs ou ao Git;
+- depois disso, o mesmo `session/new` passou a devolver um `sessionId` real, e o turno
+  real de §4 aconteceu — sem nenhuma alteração de código de produção entre os dois
+  estados (a única mudança foi a autenticação do runtime).
 
-```json
-{"protocolVersion":1,
- "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":false,"embeddedContext":false}},
- "agentInfo":{"name":"cline","version":"3.0.65"},
- "authMethods":[{"id":"cline","name":"Sign in with Cline"},
-                {"id":"cline-pass","name":"Sign in with ClinePass"},
-                {"id":"openai-codex","name":"Sign in with ChatGPT Subscription"}]}
+## 4. Turno real medido (fase 4)
+
+Reprodução: `cd elixir && make cline-acp-e2e` — dois testes, **2 passed, 0 failures**,
+sem *skips* (`SYMPHONY_RUN_CLINE_ACP_E2E=1`), contra o agente real.
+
+Caminho exercitado (sem injeção de executor em teste: a seleção vem de
+`executor.kind: acp`):
+
+```
+AgentRunner → Executor.Acp → ACP.Client → stdio/JSON-RPC → ~/automation/bin/cline --acp → Cline 3.0.65
 ```
 
-`session/new` (enviado: `cwd` do workspace + `mcpServers: []`):
+Comportamento ACP observado no turno real:
 
-```json
-{"jsonrpc":"2.0","id":2,
- "error":{"code":-32000,"message":"Authentication required: Call authenticate before starting a session"}}
-```
-
-Fatos derivados:
-
-1. o framing do cliente é aceito pelo Cline real (JSON-RPC 2.0 newline-delimited);
-2. a versão negociada é `1`, a mesma que o cliente envia;
-3. o `stderr` do agente traz apenas diagnóstico (`[acp] starting ACP mode over stdio…`)
-   e nunca entrou no parser;
-4. `session/new` é o ponto exato do gate de autenticação, e o erro `-32000` é
-   mapeado pelo cliente para `{:acp_auth_required, methods}` (aqui `methods` vem vazio
-   porque a resposta não traz `data.authMethods`);
-5. nenhuma capability do cliente foi exigida para o handshake (nada de `fs`,
-   `terminal`, `elicitation`, `session/load`, `additionalDirectories` ou MCP).
-
-## 4. Incompatibilidades encontradas
-
-Nenhuma lacuna de protocolo foi demonstrada até o gate de autenticação: `initialize`
-e a interpretação de `session/new` (inclusive o erro de autenticação) já funcionavam
-sem alteração de código. Os eventos posteriores ao gate — `session/prompt`,
-`session/update`, `session/request_permission` e `stopReason` — **não** puderam ser
-medidos, porque dependem de sessão autenticada; não há, portanto, decisão de
-compatibilidade tomada sobre eles. Se o Cline real exigir, na fase 4, uma capability
-ou um método que o cliente não anuncia, isso entra como lacuna demonstrada (com
-evidência, teste fake correspondente e registro), nunca por inferência.
-
-## 5. Blocker humano: autenticação do runtime isolado
-
-Estado sanitizado (presença/ausência, sem valor algum):
-
-| Local | Conteúdo observado |
+| Fase | Observado |
 |---|---|
-| `~/automation/state/cline` (data-dir do pipeline) | vazio — sem autenticação persistida |
-| `~/.cline` (instalação pessoal do usuário) | existe, com estado próprio |
-| `~/.config/agentic-dev-environment/env` | chaves de segredos da plataforma (nenhuma `CLINE_*`) |
+| `initialize` | `protocolVersion: 1`, `agentInfo = {"name":"cline","version":"3.0.65"}` |
+| `session/new` | `sessionId` real devolvido (cwd = workspace descartável, `mcpServers: []`) |
+| `session/prompt` | enviado com o prompt da issue; resposta final `stopReason = end_turn` |
+| `session/update` | `agent_message_chunk` (mensagem do modelo) e `session_info_update` |
+| atualização desconhecida | `session_info_update` **não** é método do cliente: tratada como notificação genérica, sem perder o turno |
+| frame malformado | nenhum |
+| requisição não suportada | nenhuma (`fs/*`, `terminal/*`, elicitation não foram chamados) |
+| `session/request_permission` | **nenhuma** requisição de permissão chegou ao Symphony nos turnos medidos (§6) |
 
-Consequência: nenhuma credencial de Cline existe no runtime isolado. A plataforma
-decidiu que a autenticação do Cline é manual e nunca automatizada
-(`agentic-dev-environment/docs/architecture/adr/0003-cline-deepseek-como-executor-inicial.md`
-§Obrigações; o `install.sh` lista o passo como manual), e a fase 3 decidiu que
-`auth_required` bloqueia o turno
-([adr/0002](adr/0002-acp-protocol-mapping.md) §2.2/§2.8, Q5). Copiar a credencial da
-instalação pessoal para o data-dir do pipeline, ou passar segredo pelo `WORKFLOW.md`,
-seria violar as duas decisões — por isso **não** foi feito, e o Symphony continua sem
-guardar credencial do agente.
+Efeito real no workspace descartável, do ponto de vista do Symphony e confirmado pelo
+registro de sessão do próprio Cline:
 
-Passo humano necessário (executado pelo dono do ambiente, no runtime isolado):
+- ferramentas usadas pelo agente: `read_files` → `run_commands` (inspeção) →
+  `apply_patch` → `run_commands` (verificação);
+- a edição: `answer.sh`, `-echo "1"` → `+echo "42"`;
+- o agente executou `bash answer.sh` e confirmou `42` (bytes `34 32 0a`, só o número e o
+  *newline*);
+- validação determinística do teste: `bash answer.sh` imprime `42`, `answer.sh` difere do
+  original e nenhum outro arquivo aparece como alterado no workspace descartável;
+- workspace: `/tmp/symphony-cline-acp-turn-*`, com `git init`, removido ao fim do teste;
+  nenhum projeto consumidor, clone canônico ou repositório deste projeto foi alvo;
+- mensagem final do agente (resumida): *"Updated .../answer.sh so it prints exactly 42"*.
 
-```bash
-~/automation/bin/cline auth
-```
+Teardown:
 
-Depois disso, a verificação real reproduzível é:
+- o processo lançado por `acp.command` é encerrado após `stop_session/1` e o teste
+  **assere** que o pid do agente não existe mais (`/proc/<pid>` ausente);
+- o Cline, porém, deixa um *hub daemon* destacado (`.cline --cline-hub-daemon`) vivo após
+  o fim do turno — comportamento do agente, não do Symphony; registrado em §6.
 
-```bash
-cd ~/automation/src/symphony-acp/elixir && make cline-acp-e2e
-```
+Provider/modelo efetivamente usados na prova, conforme o registro da própria sessão do
+Cline: `provider=openai-codex`, `model=gpt-5.6-terra`. Isso **não** é decisão da
+plataforma nem deste fork: é a autenticação que já existia no runtime, usada apenas como
+dependência da execução. DeepSeek continua na fase 5 e não foi configurado.
 
-## 6. Verificação reproduzível (opt-in)
+## 5. Autenticação e isolamento do estado (medido)
 
-`elixir/test/symphony_elixir/cline_acp_e2e_test.exs` segue o padrão de teste externo
-já existente no repositório (`@moduletag`/`skip` por variável de ambiente + alvo
-próprio no `Makefile`, como o `make e2e` do upstream):
+Três variantes do mesmo handshake + turno curto, para descobrir de onde vem a credencial e
+onde o estado é gravado (nada de conteúdo sensível foi lido; só presença/ausência):
+
+| Variante | `initialize` + `session/new` | Onde a sessão foi gravada |
+|---|---|---|
+| A) wrapper do pipeline (`~/automation/bin/cline --acp`, `--data-dir ~/automation/state/cline`) | ✅ turno completo (`end_turn`) | `~/.cline/data/sessions` (71 → 72) |
+| B) binário isolado + `--data-dir /tmp/cline-dd-explicit` | ✅ turno completo (`end_turn`) | `~/.cline/data/sessions` (72 → 73); `/tmp/cline-dd-explicit` = 0 arquivos |
+| C) binário isolado + `--config /tmp/…` + `--data-dir /tmp/…` | ❌ `-32000` "Authentication required" | — |
+
+Conclusões medidas (Cline `3.0.65`):
+
+1. a credencial é resolvida pelo **config dir padrão (`~/.cline`)** — mudar `--config`
+   derruba a autenticação, mudar `--data-dir` não;
+2. o `--data-dir` do pipeline **não** isolou credencial nem estado de sessão neste fluxo:
+   `~/automation/state/cline` continua **vazio** e as sessões foram gravadas em
+   `~/.cline/data/sessions`;
+3. portanto o isolamento hoje é do **runtime** (binário/Node do pipeline via wrapper),
+   não da **credencial/estado**: a prova da fase 4 reutilizou a autenticação já existente
+   do dono do ambiente, exatamente como dependência de execução.
+
+Consequências registradas:
+
+- o Symphony continua **sem** armazenar credencial do agente e nenhum segredo entrou no
+  repositório, no `WORKFLOW.md` do teste, em log ou nesta documentação;
+- a promessa de isolamento de credencial/estado do Cline (`agentic-dev-environment`,
+  ADR-0005 / `install.sh` / `doctor.sh` / `manifests/tool-versions.txt`) **não** se
+  confirma com essa versão do Cline — reconciliação é decisão da plataforma e **não**
+  foi feita aqui (este repositório não altera `agentic-dev-environment`).
+
+## 6. Observações, permissões e dívidas
+
+- **Permissões:** nos turnos medidos o Cline **não** enviou
+  `session/request_permission` — ele executou suas próprias ferramentas sem consultar o
+  cliente ACP. Portanto `acp.auto_approve_requests: true` (configurado apenas no
+  `WORKFLOW.md` descartável do teste) não chegou a ser exercitado pelo agente real; o
+  caminho de permissão continua validado pelo **agente ACP fake** determinístico, e o
+  default global segue *fail-closed* (`false`), intocado.
+- **Atualizações desconhecidas:** `session_info_update` chegou como `session/update` e foi
+  tratada como notificação genérica; nenhum evento foi perdido e nenhum método não
+  suportado foi requisitado.
+- **Hub daemon:** o Cline deixa um processo destacado (`--cline-hub-daemon`) vivo após o
+  fim do turno. O processo do agente lançado por `acp.command` é encerrado (asserido pelo
+  teste); o daemon é comportamento do agente e fica registrado como observação para a
+  plataforma (limpeza/gestão de daemon) — não é vazamento do Symphony.
+- **Dívida herdada da fase 3 (Q6), ainda aberta:** com o executor ACP não há métrica de
+  uso e o dashboard hoje renderiza ausência como **zeros**; transformar ausência em zero
+  é justamente o que Q6 proíbe representar como real. Não foi resolvida nesta PR (escopo:
+  integração com o Cline real), e permanece como o próximo item antes de uso com projeto
+  consumidor.
+- Seguem fora de escopo: cancelamento gracioso (`session/cancel`/`session/close`),
+  `session/load`, elicitation, MCP local, capabilities `fs`/`terminal` e `authenticate`
+  ACP.
+
+## 7. Verificação reproduzível (opt-in)
+
+`elixir/test/symphony_elixir/cline_acp_e2e_test.exs` segue o padrão de teste externo já
+existente no repositório (`@tag skip` por variável de ambiente + alvo próprio no
+`Makefile`, como o `make e2e` do upstream):
 
 ```bash
 cd elixir && make cline-acp-e2e
@@ -144,64 +188,25 @@ SYMPHONY_RUN_CLINE_ACP_E2E=1 mix test test/symphony_elixir/cline_acp_e2e_test.ex
 | `SYMPHONY_RUN_CLINE_ACP_E2E=1` | gate: sem ela os dois testes são *skipped* (nunca rodam em `make all`, nunca em CI) |
 | `SYMPHONY_CLINE_ACP_COMMAND` | `acp.command` do teste; default = wrapper do pipeline `$HOME/automation/bin/cline --acp` |
 
-O que os dois testes fazem:
+Os dois testes: (1) handshake real (`initialize` + `session/new`); (2) turno real pelo
+`AgentRunner` em projeto descartável, que só passa se `bash answer.sh` imprimir exatamente
+`42`, se nenhum outro arquivo mudar, se os eventos `:session_started`/`:turn_completed`
+chegarem e se o processo do agente não existir mais. O agente precisa estar autenticado
+fora de banda (o teste nunca autentica em nome do agente nem carrega credencial); sem
+autenticação ele falha com mensagem explícita, nunca passa em silêncio.
 
-1. **handshake** — lança o Cline real, exige `initialize` com `protocolVersion: 1` e
-   `agentInfo.name == "cline"` e exige que `session/new` responda **ou** uma sessão
-   **ou** o bloqueio explícito de autenticação; qualquer outro desfecho (timeout, frame
-   malformado, erro inesperado) falha o teste;
-2. **turno real pelo runner** — cria um workspace **descartável** (diretório temporário
-   com `git init`, um `answer.sh` que imprime `1` e o prompt determinístico), roda
-   `AgentRunner.run/3` com `executor.kind: acp` **sem injeção de executor** (a seleção
-   vem da configuração, como em produção) e só passa se:
-   - o agente alterar o projeto descartável;
-   - `bash answer.sh` imprimir exatamente `42` (validação determinística);
-   - `git status --porcelain` mostrar `answer.sh` como o arquivo alterado;
-   - o agente não sobrar como processo órfão depois do `stop_session/1`.
+## 8. Referências
 
-O workspace é sempre descartável e nunca um projeto consumidor, o clone canônico ou um
-repositório deste repositório. Nenhum projeto consumidor real é tocado, nenhum
-repositório GitHub é criado e o diretório é removido no fim do teste.
-
-Se o Cline não estiver autenticado, o teste **falha com mensagem explícita** (não passa
-em silêncio) e aponta o passo humano de §5 — a fase 4 continua pendente até o turno real
-acontecer.
-
-## 7. Permissões no teste
-
-- O default global continua *fail-closed*: `acp.auto_approve_requests: false`.
-- O teste escreve, **apenas no `WORKFLOW.md` descartável dele**,
-  `acp.auto_approve_requests: true`, para que o Cline possa editar o próprio workspace
-  sem bloquear o turno. É decisão por execução, não política geral, e não vale para
-  projeto consumidor.
-- O `--auto-approve` do próprio Cline **não** foi usado: o caminho de permissão do
-  cliente ACP continua sendo exercitado pelo Symphony.
-- Rejeição continua sendo o comportamento observável do default (coberto pelo agente
-  ACP fake em `test/symphony_elixir/acp_test.exs`).
-
-## 8. O que este documento não decide
-
-- **modelo/provedor**: a fase 4 usa a autenticação que o runtime isolado já tiver; nada
-  aqui canoniza provedor/modelo. DeepSeek é a fase 5 da plataforma e não foi
-  configurado.
-- **capabilities novas**: nenhuma foi anunciada ou implementada; o escopo mínimo da fase
-  3 permanece.
-- **`authenticate` ACP**: não implementado. O fluxo de autenticação continua sendo passo
-  humano, como decidido.
-- **cancelamento gracioso** (`session/cancel`/`session/close`): continua dívida
-  conhecida; teardown de processo não é cancelamento de protocolo.
-
-## 9. Referências
-
-- [adr/0002](adr/0002-acp-protocol-mapping.md) (mapeamento ACP, Q2/Q5/Q7),
+- [adr/0002](adr/0002-acp-protocol-mapping.md) (mapeamento ACP; Q2/Q5/Q6/Q7),
   [adr/0003](adr/0003-phase3-executor-abstraction-scope.md) e
   [adr/0004](adr/0004-acp-client-implementation.md) (cliente e executor ACP);
 - [acp-analysis.md](acp-analysis.md) (análise documental e fontes oficiais do ACP);
 - [divergences.md](divergences.md) (registro do diff em relação ao upstream);
 - código: `elixir/lib/symphony_elixir/acp/client.ex`,
   `elixir/lib/symphony_elixir/executor/acp.ex`, `elixir/lib/symphony_elixir/agent_runner.ex`;
-- teste: `elixir/test/symphony_elixir/cline_acp_e2e_test.exs` (opt-in) e
-  `elixir/test/symphony_elixir/acp_test.exs` (determinístico, agente fake);
+- testes: `elixir/test/symphony_elixir/cline_acp_e2e_test.exs` (opt-in, agente real) e
+  `elixir/test/symphony_elixir/acp_test.exs` (determinístico, agente ACP fake);
 - plataforma: `agentic-dev-environment/docs/architecture/roadmap.md` (fase 4),
   `docs/architecture/adr/0002-*`, `docs/architecture/adr/0003-*`,
+  `docs/architecture/adr/0005-*` (isolamento de runtime),
   `docs/security/permissions.md`.

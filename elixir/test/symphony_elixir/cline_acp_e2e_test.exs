@@ -20,18 +20,21 @@ defmodule SymphonyElixir.ClineAcpE2ETest do
   Environment:
 
     * `SYMPHONY_CLINE_ACP_COMMAND` — the `acp.command` used by the executor.
-      Default: the platform wrapper `$HOME/automation/bin/cline --acp`, which
-      injects the isolated data-dir. A personal Cline installation is never
-      used, and no credential is ever passed by Symphony.
+      Default: the platform wrapper `$HOME/automation/bin/cline --acp`, which is
+      the pipeline's isolated runtime (binary/Node). No credential is ever passed
+      by Symphony, and the agent must already be authenticated out of band:
+      measured with Cline `3.0.65`, the credential/state is resolved by the agent
+      from its own config directory (`~/.cline`), so the pipeline's `--data-dir`
+      does not isolate the credential/state in this flow
+      (`docs/fork/cline-acp-integration.md` §5);
     * `SYMPHONY_RUN_CLINE_ACP_E2E=1` — the gate; without it both tests are
       skipped.
 
   What makes the full-turn test pass is a real turn: the agent must change the
-  disposable project and the deterministic check must then pass. If the isolated
-  runtime is not authenticated, the run blocks with `acp_auth_required` and the
-  failure message names the human step (`~/automation/bin/cline auth`); the test
-  never fabricates a pass, never authenticates on the agent's behalf and never
-  carries a credential.
+  disposable project and the deterministic check must then pass. If the agent is
+  not authenticated, the run blocks with `acp_auth_required` and the failure
+  message names the human step; the test never fabricates a pass, never
+  authenticates on the agent's behalf and never carries a credential.
 
   Permissions: `acp.auto_approve_requests: true` is configured **for this
   disposable workspace only**, as an explicit per-run decision, so the agent can

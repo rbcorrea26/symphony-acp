@@ -55,9 +55,9 @@ decisão é "não fazer".
 - Transporte `stdio` do ACP: JSON-RPC delimitado por `\n`. O parser **permanece
   tolerante** a linhas não-JSON (a spec proíbe o agente de escrever não-ACP em
   `stdout`, mas `:stderr_to_stdout` mistura o log do agente no mesmo canal).
-- O comando é configuração específica do executor ACP (`acp.command`; ver
-  [ADR-0001](0001-executor-abstraction.md) §7 da análise e Q1); nada de
-  modelo/credencial no YAML.
+- O comando é configuração específica do executor ACP (`acp.command`), conforme
+  [../acp-analysis.md](../acp-analysis.md) §7 e Q1; nada de modelo/credencial no
+  YAML.
 
 ### 2.2 Handshake e capacidades (`D2`, `D3`, `D4`, `D5`)
 

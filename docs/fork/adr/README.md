@@ -20,9 +20,10 @@ daqui com os da plataforma (`agentic-dev-environment/docs/architecture/adr/`).
 
 | ADR | Assunto | Status |
 |---|---|---|
-| [`0001`](0001-executor-abstraction.md) | **executor abstraction**: o Symphony passa a acessar o executor por uma indireção (`SymphonyElixir.Executor` com behaviour e seleção por configuração), mantendo o caminho Codex app-server funcional | **aceito** (implementado na fase 3; ver `0003`) |
-| [`0002`](0002-acp-protocol-mapping.md) | **ACP protocol mapping**: tradução entre o protocolo do Codex App Server e o ACP (sessão, turno, streaming, permissão, entrada do usuário, cancelamento, timeouts, ferramentas, sandbox, erros, lifecycle) | **aceito** (implementação pendente: depende do cliente ACP) |
+| [`0001`](0001-executor-abstraction.md) | **executor abstraction**: o Symphony passa a acessar o executor por uma indireção (`SymphonyElixir.Executor` com behaviour e seleção por configuração), mantendo o caminho Codex app-server funcional | **aceito** (implementado na fase 3; ver `0003` e `0004`) |
+| [`0002`](0002-acp-protocol-mapping.md) | **ACP protocol mapping**: tradução entre o protocolo do Codex App Server e o ACP (sessão, turno, streaming, permissão, entrada do usuário, cancelamento, timeouts, ferramentas, sandbox, erros, lifecycle) | **aceito** (implementado no incremento 2 da fase 3; ver `0004`) |
 | [`0003`](0003-phase3-executor-abstraction-scope.md) | **escopo da fase 3**: abstração implementada com executor fake determinístico de teste; sem cliente ACP, sem `acp.*`, preflight do `executor.kind` em `config.ex`/`orchestrator.ex` | **aceito** (implementado) |
+| [`0004`](0004-acp-client-implementation.md) | **cliente ACP e turnos (incremento 2)**: `ACP.Client` + `Executor.Acp`, `acp.command`/`acp.auto_approve_requests`, política de permissão fail-closed, identidade sintética de turno, eventos mapeados e o agente ACP fake por stdio que prova o caminho de ponta a ponta | **aceito** (implementado) |
 
 Evidência que sustenta os dois ADRs: [../acp-analysis.md](../acp-analysis.md)
 (matriz `D1`–`D33`, fontes, opções de abstração, segurança e decisões Q1–Q10).
@@ -42,21 +43,32 @@ A análise cobriu, no mínimo:
   [../acp-analysis.md](../acp-analysis.md) §3 e no ADR-0002 — sem copiar a
   especificação para cá.
 
-## Decisões fechadas; fase 3 iniciada (incremento 1 implementado)
+## Decisões fechadas; fase 3 concluída (incrementos 1 e 2 implementados)
 
 As questões Q1–Q10 foram decididas em 2026-09-27 e incorporadas aos ADRs (Q1/Q3/Q8/
 Q9/Q10 em [0001](0001-executor-abstraction.md); Q2/Q4/Q5/Q6/Q7 em
 [0002](0002-acp-protocol-mapping.md); índice em
-[../acp-analysis.md](../acp-analysis.md) §10). O **primeiro incremento da fase 3**
-(abstração + `executor.kind` + executor fake determinístico) está implementado e
-registrado em [0003](0003-phase3-executor-abstraction-scope.md): `SymphonyElixir.Executor`
-com behaviour e seleção por configuração, `SymphonyElixir.Executor.Codex` como
-delegação pura e o caminho Codex intacto.
+[../acp-analysis.md](../acp-analysis.md) §10).
 
-O que **não** existe ainda: cliente ACP (`SymphonyElixir.Executor.Acp`), agente ACP
-falso por stdio, `acp.*`, Cline (fase 4) e DeepSeek (fase 5). O próximo passo
-técnico é o cliente ACP conforme [0002](0002-acp-protocol-mapping.md), validado pelo
-agente falso por stdio que [../acp-analysis.md](../acp-analysis.md) §2.5 descreve.
+O **incremento 1 da fase 3** (abstração + `executor.kind` + executor fake
+determinístico) está implementado e registrado em
+[0003](0003-phase3-executor-abstraction-scope.md): `SymphonyElixir.Executor` com
+behaviour e seleção por configuração, `SymphonyElixir.Executor.Codex` como delegação
+pura e o caminho Codex intacto.
+
+O **incremento 2** — o entregável da fase 3 — está implementado e registrado em
+[0004](0004-acp-client-implementation.md): `SymphonyElixir.ACP.Client` (cliente ACP
+mínimo por stdio), `SymphonyElixir.Executor.Acp`, as chaves `acp.command`/
+`acp.auto_approve_requests`, a política de permissão fail-closed, a identidade
+sintética de turno e o **agente ACP fake por stdio** que exercita o ciclo completo
+(`AgentRunner → Executor.Acp → stdio/JSON-RPC → agente`) sem Cline, modelo, rede ou
+credencial. Com isso o entregável do roadmap da plataforma ("`Executor.Acp`
+exercitado por agente ACP fake por stdio") existe e está verde no repositório:
+**fase 3 = concluída**.
+
+O que **não** existe ainda: Cline como executor real (fase 4), DeepSeek (fase 5),
+cancelamento gracioso ACP, `session/load`, elicitation, modos/config options, MCP
+local para ferramentas do tracker e representação de métrica ausente no dashboard.
 
 A decisão de plataforma que autoriza o trabalho é
 `agentic-dev-environment/docs/architecture/adr/0002-acp-como-contrato-de-executor.md`

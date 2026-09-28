@@ -11,16 +11,14 @@ defmodule SymphonyElixir.SSH do
   @spec start_port(String.t(), String.t(), keyword()) :: {:ok, port()} | {:error, term()}
   def start_port(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
     with {:ok, executable} <- ssh_executable() do
-      line_bytes = Keyword.get(opts, :line)
-
       port_opts =
         [
           :binary,
           :exit_status,
-          :stderr_to_stdout,
           args: Enum.map(ssh_args(host, command), &String.to_charlist/1)
         ]
-        |> maybe_put_line_option(line_bytes)
+        |> maybe_put_line_option(Keyword.get(opts, :line))
+        |> maybe_put_stderr_to_stdout(Keyword.get(opts, :stderr_to_stdout, true))
 
       {:ok, Port.open({:spawn_executable, String.to_charlist(executable)}, port_opts)}
     end
@@ -50,6 +48,14 @@ defmodule SymphonyElixir.SSH do
 
   defp maybe_put_line_option(port_opts, nil), do: port_opts
   defp maybe_put_line_option(port_opts, line_bytes), do: Keyword.put(port_opts, :line, line_bytes)
+
+  # `:stderr_to_stdout` merges the remote diagnostic stream into the port output.
+  # A caller that speaks a line protocol over stdout opts out with
+  # `stderr_to_stdout: false`, so the remote stderr (which `ssh` forwards to its own
+  # stderr) is inherited by this node instead of being parsed as protocol. The
+  # default keeps the Codex app-server behaviour untouched.
+  defp maybe_put_stderr_to_stdout(port_opts, true), do: port_opts ++ [:stderr_to_stdout]
+  defp maybe_put_stderr_to_stdout(port_opts, _stderr_to_stdout), do: port_opts
 
   defp maybe_put_config(args) do
     case System.get_env("SYMPHONY_SSH_CONFIG") do

@@ -12,9 +12,13 @@ As divergências da carta do fork foram introduzidas pela
 arquitetural e dos ADRs entraram pela [PR #3](https://github.com/rbcorrea26/symphony-acp/pull/3),
 que trouxe [acp-analysis.md](acp-analysis.md) e
 [adr/0001](adr/0001-executor-abstraction.md)/[adr/0002](adr/0002-acp-protocol-mapping.md).
-As de **implementação** da fase 3 (abstração de executor, `executor.kind` e executor
-fake determinístico de teste) entram pela PR da branch `feat/acp-agent-runner`, que
-também trouxe [adr/0003](adr/0003-phase3-executor-abstraction-scope.md).
+As de **implementação** do incremento 1 da fase 3 (abstração de executor,
+`executor.kind` e executor fake determinístico de teste) entraram pela PR da branch
+`feat/acp-agent-runner`, que também trouxe
+[adr/0003](adr/0003-phase3-executor-abstraction-scope.md). As do **incremento 2**
+(cliente ACP, executor ACP, `acp.*` e agente ACP fake por stdio) entram pela PR da
+branch `feat/acp-executor-fake-agent`, que também trouxe
+[adr/0004](adr/0004-acp-client-implementation.md).
 Arquivos **não** listados abaixo são idênticos à base registrada e
 seguem a documentação upstream como autoridade.
 
@@ -45,17 +49,56 @@ seguem a documentação upstream como autoridade.
 | `docs/fork/adr/README.md` | alterado | índice com o ADR-0003 | não |
 | `docs/fork/README.md` | alterado | status da fase 3 (incremento implementado; cliente ACP pendente) | não |
 | `docs/fork/divergences.md` | alterado | este registro | não |
+| `docs/fork/adr/0004-acp-client-implementation.md` | novo | incremento 2: cliente ACP, executor ACP, política de permissão fail-closed, identidade sintética de turno, fake ACP por stdio e dívidas | não |
+| `elixir/lib/symphony_elixir/acp/client.ex` | novo | cliente ACP mínimo por stdio (`initialize`, `session/new`, `session/prompt`, `session/update`, `session/request_permission`, teardown) | não |
+| `elixir/lib/symphony_elixir/executor/acp.ex` | novo | executor ACP atrás do behaviour + preflight de `acp.command` (`{:error, :missing_acp_command}`) | não |
+| `elixir/test/symphony_elixir/acp_test.exs` | novo | config ACP, cliente ACP, executor ACP e o teste de ponta a ponta `AgentRunner → Executor.Acp → agente ACP fake por stdio` | não |
+| `elixir/lib/symphony_elixir/executor.ex` | alterado | registra `"acp"`; callback **opcional** `validate_config/1`; `validate_config/1` passa a receber o `%Config.Schema{}` completo (preflight precisa do bloco `acp`) | **sim, mínimo**: a assinatura interna do preflight mudou (kind + bloco do executor); o caminho Codex segue `:ok` e a superfície de sessão (`start_session/2`, `run_turn/4`, `stop_session/1`) não mudou |
+| `elixir/lib/symphony_elixir/config/schema.ex` | alterado (aditivo) | bloco `acp` com `command` (sem default) e `auto_approve_requests` (default `false`); nada de `codex.*` ou `executor.*` foi removido, renomeado ou movido | não |
+| `elixir/lib/symphony_elixir/config.ex` | alterado | preflight passa o settings completo para `Executor.validate_config/1` (necessário para validar `acp.command` sem acoplar `Config` ao ACP) | não (mesmo ponto do preflight já existente) |
+| `elixir/test/symphony_elixir/executor_test.exs` | fork alterado | superfície do behaviour (3 callbacks + `validate_config/1` opcional) e nova assinatura do preflight; `for_kind("acp")` agora resolve | não |
+| `elixir/lib/symphony_elixir/ssh.ex` | alterado (aditivo) | `start_port/3` aceita `stderr_to_stdout: false`, usado pelo cliente ACP para **não** fundir o `stderr` remoto no canal de protocolo; o default continua `:stderr_to_stdout` (caminho Codex app-server inalterado) | não no default; **sim, deliberado** para quem passa `stderr_to_stdout: false` (hoje só `ACP.Client`) |
+| `elixir/test/symphony_elixir/ssh_test.exs` | alterado (aditivo) | dois testes do parâmetro novo: `stderr` remoto fora do port quando solicitado e merge preservado no default | não |
+| `elixir/test/support/test_support.exs` | alterado (aditivo) | `acp_command`/`acp_auto_approve_requests` opcionais no harness (default: sem bloco `acp`) | não |
+| `elixir/README.md` | alterado | configuração ACP real (`executor.kind: acp`, `acp.command`, `acp.auto_approve_requests`), limites declarados (sem sandbox/capability/cancelamento gracioso) e dependência de teste (`jq`) | não |
+| `docs/fork/adr/0001-executor-abstraction.md` | alterado | status: implementado (incrementos 1 e 2) | não |
+| `docs/fork/adr/0002-acp-protocol-mapping.md` | alterado | status e §Implementação: mapeamento implementado no incremento 2 | não |
+| `docs/fork/acp-analysis.md` | alterado | status: análise concluída e fase 3 implementada (a evidência da análise não foi reescrita) | não |
+| `docs/fork/adr/README.md` | alterado | índice com o ADR-0004 e status da fase 3 concluída | não |
+| `docs/fork/README.md` | alterado | status: caminho ACP implementado; fase 3 concluída; Cline continua fase 4 | não |
+| `docs/fork/divergences.md` | alterado | este registro | não |
 
-Arquivos de `elixir/**` alterados pelo incremento de fase 3: `agent_runner.ex`
+Arquivos de `elixir/**` alterados pelo incremento 1 da fase 3: `agent_runner.ex`
 (indireção do executor), `config/schema.ex` e `config.ex` (chave `executor.kind` +
 preflight), `orchestrator.ex` (log do erro de executor),
 `test/support/test_support.exs` (harness) e `README.md` (documentação da chave).
 `codex/app_server.ex` permanece idêntico ao upstream, nenhum teste existente foi
-alterado e nenhuma dependência nova entrou. O que o incremento **não** faz: cliente
+alterado e nenhuma dependência nova entrou. O que o incremento 1 **não** faz: cliente
 ACP, Cline, DeepSeek, MCP, capabilities `fs`/`terminal`, sandbox ACP, autenticação
 ACP, ferramentas de tracker via ACP, token accounting ACP e cancelamento gracioso de
 protocolo — registrado em
 [adr/0003](adr/0003-phase3-executor-abstraction-scope.md) §Implementação.
+
+Arquivos de `elixir/**` alterados pelo incremento 2: `executor.ex` (kind `acp` +
+callback opcional de preflight), `config/schema.ex` (bloco `acp`), `config.ex`
+(preflight com settings completo), `ssh.ex` (parâmetro aditivo
+`stderr_to_stdout: false` de `start_port/3`, exigido pela separação de streams do ACP),
+`test/support/test_support.exs` (harness) e `README.md` (configuração e teste).
+`codex/app_server.ex`, `codex/dynamic_tool.ex`, `agent_runner.ex`, `orchestrator.ex`,
+`workspace.ex` e `status_dashboard.ex` **não** foram tocados; nenhum teste upstream foi
+removido ou enfraquecido (os únicos testes existentes ajustados são
+`executor_test.exs`, do fork, e a adição — sem reescrita — de dois casos em
+`ssh_test.exs`, exigidos pelo parâmetro novo); nenhuma dependência nova de runtime
+entrou — o agente ACP fake de teste usa `bash` e `jq` (já exigido pelo workflow de lint
+de PR do próprio repositório).
+
+A separação de `stdout`/`stderr` do caminho ACP (correção registrada em
+[adr/0004](adr/0004-acp-client-implementation.md) §4.10) é a razão da divergência em
+`ssh.ex`: `stdout` é o único canal de protocolo, então o lançamento ACP não usa
+`:stderr_to_stdout` (local) e passa `stderr_to_stdout: false` no `SSH.start_port/3`
+(remoto). O `stderr` do agente é herdado pelo nó e permanece observável no sink de
+diagnóstico do serviço, sem nunca chegar ao parser JSON-RPC. O caminho Codex mantém o
+merge, porque depende dele desde o upstream.
 
 ## Regras do registro
 

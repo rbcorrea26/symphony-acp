@@ -157,9 +157,73 @@ defmodule SymphonyElixir.SSHTest do
     assert trace =~ "-T -p 2222 localhost bash -lc"
   end
 
+  test "start_port/3 keeps remote stderr out of the port when asked" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-ssh-stderr-port-test-#{System.unique_integer([:positive])}")
+    trace_file = Path.join(test_root, "ssh.trace")
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf(test_root)
+    end)
+
+    install_fake_ssh!(test_root, trace_file, stderr_frame_script(trace_file))
+
+    assert {:ok, port} =
+             SSH.start_port("localhost", "printf ok", line: 256, stderr_to_stdout: false)
+
+    assert is_port(port)
+
+    # The remote stderr line never reaches the port: it is inherited by this node
+    # (observable as diagnostics) instead of being merged into the port output.
+    assert_receive {^port, {:data, {:eol, data}}}, 2_000
+    assert to_string(data) =~ "ready"
+    refute_receive {^port, {:data, _data}}, 100
+
+    assert File.read!(trace_file) =~ "-T localhost bash -lc"
+    if Port.info(port), do: Port.close(port)
+  end
+
+  test "start_port/3 still merges remote stderr into the port by default" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-ssh-merged-port-test-#{System.unique_integer([:positive])}")
+    trace_file = Path.join(test_root, "ssh.trace")
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf(test_root)
+    end)
+
+    install_fake_ssh!(test_root, trace_file, stderr_frame_script(trace_file))
+
+    assert {:ok, port} = SSH.start_port("localhost", "printf ok", line: 256)
+    assert is_port(port)
+
+    assert_receive {^port, {:data, {:eol, first}}}, 2_000
+    assert_receive {^port, {:data, {:eol, second}}}, 2_000
+
+    # Codex app-server compatibility: the default still merges both streams.
+    assert Enum.sort([to_string(first), to_string(second)]) == [
+             "ready",
+             "{\"jsonrpc\":\"2.0\",\"method\":\"$/remote/stderr\",\"params\":{}}"
+           ]
+
+    if Port.info(port), do: Port.close(port)
+  end
+
   test "remote_shell_command/1 escapes embedded single quotes" do
     assert SSH.remote_shell_command("printf 'hello'") ==
              "bash -lc 'printf '\"'\"'hello'\"'\"''"
+  end
+
+  defp stderr_frame_script(trace_file) do
+    """
+    #!/bin/sh
+    printf 'ARGV:%s\\n' "$*" >> "#{trace_file}"
+    printf '{"jsonrpc":"2.0","method":"$/remote/stderr","params":{}}\\n' >&2
+    printf 'ready\\n'
+    exit 0
+    """
   end
 
   defp install_fake_ssh!(test_root, trace_file, script \\ nil) do

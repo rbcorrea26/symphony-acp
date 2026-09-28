@@ -1,7 +1,10 @@
 # Análise Codex App Server ↔ ACP (fase documental do fork)
 
 - **Status:** análise concluída e **decisões humanas Q1–Q10 incorporadas**;
-  implementação **não** iniciada
+  implementação da fase 3 **concluída** (incremento 1 em
+  [adr/0003](adr/0003-phase3-executor-abstraction-scope.md) e incremento 2 em
+  [adr/0004](adr/0004-acp-client-implementation.md)) — este documento continua sendo a
+  evidência da análise, não o registro da implementação
 - **Data:** 2026-09-27 (revisão com as decisões humanas)
 - **Base do código analisado:** `origin/main` = `90d9372cdeb2123e4a5f53a7217461d9d579ace1`
   (`Merge pull request #1 from rbcorrea26/docs/fork-charter`)
@@ -79,7 +82,7 @@ verificados:
 | Aspecto | Implementação atual |
 |---|---|
 | Ids fixos de request | `@initialize_id 1`, `@thread_start_id 2`, `@turn_start_id 3` |
-| Lançamento local | `Port.open({:spawn_executable, bash}, args: ["-lc", command], cd: workspace, env: <unset de segredos do tracker>, line: 1_048_576)`, com `:stderr_to_stdout` |
+| Lançamento local | `Port.open({:spawn_executable, bash}, args: ["-lc", command], cd: workspace, env: <unset de segredos do tracker>, line: 1_048_576)`, com `:stderr_to_stdout` (comportamento do Codex App Server; o caminho ACP **não** usa esse merge — ver [adr/0004](adr/0004-acp-client-implementation.md) §4.10) |
 | Lançamento remoto | `SSH.start_port(worker_host, "cd <workspace> && unset <segredos> && exec <command>")` |
 | Initialize | `initialize` com `capabilities.experimentalApi` + `clientInfo`, depois a notificação `initialized` (275–297) |
 | Sessão | `thread/start` com `approvalPolicy`, `sandbox`, `cwd`, `dynamicTools` → `thread.id` (314–341) |
@@ -223,7 +226,7 @@ no ACP). Linhas numeradas (`D1`…`D33`) para citação em
 
 | # | Dimensão | Symphony/Codex hoje | ACP | Equivalência | Gap | Adaptação necessária |
 |---|---|---|---|---|---|---|
-| D1 | Criação do processo | `Port.open` → `bash -lc <codex.command>` com `cd` no workspace, `env` saneado (segredos do tracker removidos), `line: 1 MiB`, `:stderr_to_stdout`; remoto via `SSH.start_port` | Cliente lança o agente como subprocesso; `stdio` com JSON-RPC delimitado por `\n`; `stderr` livre para log | adaptável | A spec não define a linha de comando nem o `cwd` do processo (só `session/new.cwd`); não define separação de `stderr` | Reusar o mesmo lançamento (`Port`/`SSH` + comando configurado do executor) e manter o saneamento de env; manter parser tolerante porque `:stderr_to_stdout` mistura log do agente no `stdout` (a spec proíbe isso do lado do agente) |
+| D1 | Criação do processo | `Port.open` → `bash -lc <codex.command>` com `cd` no workspace, `env` saneado (segredos do tracker removidos), `line: 1 MiB`, `:stderr_to_stdout`; remoto via `SSH.start_port` | Cliente lança o agente como subprocesso; `stdio` com JSON-RPC delimitado por `\n`; `stderr` livre para log | adaptável | A spec não define a linha de comando nem o `cwd` do processo (só `session/new.cwd`); não define separação de `stderr` | Reusar o mesmo lançamento (`Port`/`SSH` + comando configurado do executor) e o saneamento de env, mas **sem `:stderr_to_stdout`**: `stdout` carrega só o protocolo e o `stderr` do agente segue observável como diagnóstico do nó; o parser tolerante cobre apenas linha não-JSON em `stdout` (violação da spec pelo agente) — ver [adr/0004](adr/0004-acp-client-implementation.md) §4.10 |
 | D2 | Handshake / initialize | `initialize` (`capabilities.experimentalApi` + `clientInfo`) e notificação `initialized`; ids fixos 1/2/3 | `initialize` com `protocolVersion`, `clientCapabilities`, `clientInfo` → `protocolVersion` escolhido, `agentCapabilities`, `agentInfo`, `authMethods`; sem notificação `initialized` | adaptável | Negociação de versão (o cliente MUST usar a maior que suporta; incompatível ⇒ fechar) e capacidades omitidas = UNSUPPORTED | Novo handshake no executor ACP: enviar `protocolVersion: 1`, anunciar somente capacidades implementadas, validar a versão devolvida e falhar cedo (`{:error, {:acp_version_unsupported, v}}`) |
 | D3 | Capabilities | Cliente anuncia `experimentalApi: true`; ferramentas do cliente entram em `thread/start.dynamicTools` | `clientCapabilities` opt-in (`fs`, `terminal`, `elicitation`, `auth.terminal`, `session.configOptions`) + `agentCapabilities` do agente | adaptável | Semântica oposta: no Codex o cliente **oferece** ferramentas; no ACP o cliente **executa** operações pedidas pelo agente | Anunciar o mínimo (proposta inicial: **nenhuma** capacidade de cliente) e registrar cada capacidade anunciada como decisão explícita de privilégio |
 | D4 | Autenticação | Nenhuma no protocolo (Codex usa credencial própria no host) | `authenticate` + `authMethods` (incl. tipo `terminal`), capability `auth.logout` | ACP-specific | Symphony não tem caminho para autenticação interativa | Não automatizar (`cline auth` é manual, ADR-0003 da plataforma); `auth_required` deve virar bloqueio/erro registrado, nunca prompt interativo |
@@ -256,7 +259,7 @@ no ACP). Linhas numeradas (`D1`…`D33`) para citação em
 | D20 | Stall detection | `codex.stall_timeout_ms` sobre `last_codex_timestamp`; input-required bloqueia em vez de reiniciar | Sem conceito de stall; se o agente fizer silêncio, nada chega ao cliente | Symphony-specific | Um agente ACP que pensa muito tempo é indistinguível de travado até o timeout (mesmo problema do Codex) | Nenhuma mudança de mecanismo: o campo é lido pelo orquestrador. Registra-se a dívida de nome (`codex.*` governando execução ACP) e a possibilidade de `agent_thought_chunk` servir de heartbeat para reduzir falso positivo |
 
 | D21 | Process crash | `{:exit_status, status}` → `{:error, {:port_exit, status}}` → runner falha → orquestrador agenda retry com backoff | Mesmo modelo: o agente é subprocesso do cliente; a morte é detectada pelo cliente | 1:1 | Nenhum | Nenhuma: o tratamento de saída do port é reusável |
-| D22 | Malformed messages | Linha não-JSON é logada; se parece JSON (`{`), emite `:malformed`; JSON sem `method` vira `:other_message`; o waiter de resposta ignora mensagens que não são dela | O agente **MUST NOT** escrever não-ACP em `stdout`; `stderr` é livre | adaptável | A spec é mais estrita que a implementação atual; e `:stderr_to_stdout` viola o framing na prática | Manter o parser tolerante (paridade de comportamento e robustez contra log do agente no `stdout`), logando `:malformed` para diagnóstico; não transformar tolerância em contrato |
+| D22 | Malformed messages | Linha não-JSON é logada; se parece JSON (`{`), emite `:malformed`; JSON sem `method` vira `:other_message`; o waiter de resposta ignora mensagens que não são dela | O agente **MUST NOT** escrever não-ACP em `stdout`; `stderr` é livre | adaptável | A spec é mais estrita que a implementação atual; e nenhum merge de `stderr` deve existir no caminho ACP | Manter o parser tolerante **apenas** para linha não-JSON em `stdout` (violação da spec pelo agente), logando `:malformed` para diagnóstico e sem transformar tolerância em contrato; `stderr` não é misturado no canal (o lançamento ACP não usa `:stderr_to_stdout`), então nada de `stderr` pode virar resposta ou evento — ver [adr/0004](adr/0004-acp-client-implementation.md) §4.10 |
 | D23 | Retry | Symphony-specific: backoff com `agent.max_retry_backoff_ms`, `delay_type: :continuation` para retomada normal, tentativa preservando `worker_host`/`workspace_path` | Protocolo-agnóstico (nova tentativa ⇒ novo processo e nova `session/new`) | Symphony-specific | Nenhum | Nenhuma mudança: a nova tentativa abre nova sessão ACP, do mesmo modo que hoje abre nova thread |
 | D24 | Continuation após retry | Prompt de continuação textual gerado pelo runner, com menção explícita a "Codex" (linhas 144–154 de `agent_runner.ex`); `attempt` interpolado pelo template do `WORKFLOW.md` | Mesma semântica (novo `session/prompt` na mesma sessão, ou sessão nova após retry) | adaptável | Texto de continuação é específico de Codex e viaja para o modelo; com ACP continua tecnicamente válido, mas desatualizado | **Decisão Q9:** neutralizar o texto hardcoded quando a abstração de executor entrar (fase 3, no mesmo PR que troca as 3 chamadas); **não** alterar o prompt nesta PR documental |
 | D25 | Session identity | `session_id = "<thread_id>-<turn_id>"` (`SPEC.md` §4.2, §10.2), consumido por logs, dashboard, `turn_count` e bloqueio | Apenas `sessionId`; **não existe** identificador de turno | adaptável | ACP não fornece `turn_id`, e o orquestrador só incrementa `turn_count` quando chega `:session_started` com `session_id` novo (1552–1568) | Compor `session_id = "<sessionId>-<n>"` com `n` = contador local de turno (1-based) e emitir `:session_started` por turno: identificador **interno/sintético do Symphony**, apenas para contadores/logs/dashboard — **não** é turn id do ACP e **nunca** é enviado ao agente |
@@ -513,8 +516,11 @@ ou do projeto consumidor. Ela existe para impedir promessa falsa de sandbox.
 2. Não há como o Symphony limitar recursos (CPU/RAM/tempo total) do processo do
    agente: só o timeout de silêncio do turno e o kill pelo orquestrador.
 3. Não há verificação de que o agente escreveu apenas dentro do workspace.
-4. `:stderr_to_stdout` no launch mistura log do agente com o protocolo; a defesa
-   é o parser tolerante (D22), não uma garantia de framing.
+4. `stdout` é o único canal de protocolo: o lançamento ACP **não** usa
+   `:stderr_to_stdout`, então log do agente em `stderr` não entra no parser (a defesa
+   do parser tolerante, D22, fica restrita a linha não-JSON em `stdout`). O que
+   continua sem garantia é o conteúdo de `stdout` em si: um agente que escreva lixo
+   nele é tolerado e logado, não rejeitado.
 
 Se o projeto exigir garantias de sandbox equivalentes às do Codex, a mitigação
 tem de vir de fora do ACP (ex.: isolamento do processo por SO, container, ou

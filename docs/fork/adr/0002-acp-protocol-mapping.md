@@ -1,6 +1,7 @@
 # ADR-0002 — mapeamento do protocolo ACP no Symphony
 
-- **Status:** aceito (implementação pendente)
+- **Status:** aceito (implementado no incremento 2 da fase 3; ver
+  [0004](0004-acp-client-implementation.md))
 - **Data:** 2026-09-27 — decisões humanas Q2, Q4, Q5, Q6 e Q7 incorporadas nesta revisão
 - **Decisores:** arquitetura do fork (rbcorrea26)
 - **Relacionado a:** [0001-executor-abstraction.md](0001-executor-abstraction.md),
@@ -49,12 +50,16 @@ decisão é "não fazer".
 ### 2.1 Lançamento do processo e transporte (`D1`, `D16`)
 
 - Reutilizar o mesmo mecanismo do caminho Codex: `Port.open` de `bash -lc` com o
-  comando do executor configurado, `cd` no workspace validado,
-  `:stderr_to_stdout`, `line: 1_048_576` e env saneado (remoção de
-  `secret_environment_names`); remoto via `SSH.start_port`.
-- Transporte `stdio` do ACP: JSON-RPC delimitado por `\n`. O parser **permanece
-  tolerante** a linhas não-JSON (a spec proíbe o agente de escrever não-ACP em
-  `stdout`, mas `:stderr_to_stdout` mistura o log do agente no mesmo canal).
+  comando do executor configurado, `cd` no workspace validado, `line: 1_048_576` e
+  env saneado (remoção de `secret_environment_names`); remoto via `SSH.start_port`.
+- Transporte `stdio` do ACP: JSON-RPC delimitado por `\n`, e **`stdout` é o único
+  canal de protocolo**. O lançamento ACP **não** usa `:stderr_to_stdout` (nem no
+  local, nem no remoto): o log do agente permanece em `stderr`, herdado pelo nó como
+  diagnóstico, e nunca chega ao parser — conteúdo de `stderr` não pode virar
+  resposta de request, `session/update`, `:notification` nem `:malformed` (correção
+  registrada em [0004](0004-acp-client-implementation.md) §4.10). O parser
+  **permanece tolerante** apenas para linha não-JSON em `stdout`, que a spec proíbe
+  ao agente (D22).
 - O comando é configuração específica do executor ACP (`acp.command`), conforme
   [../acp-analysis.md](../acp-analysis.md) §7 e Q1; nada de modelo/credencial no
   YAML.
@@ -324,24 +329,26 @@ descrito em §2.3 (não é identidade do protocolo).
 
 ## Implementação
 
-Estado: **pendente** (nada implementado). Este ADR descreve o mapeamento a ser
-implementado em `SymphonyElixir.Executor.Acp`, validado por um **agente ACP falso
-determinístico**, depois do merge deste ADR. As decisões humanas de Q1–Q10 já
-estão incorporadas (§2.2 a §2.8 e
-[ADR-0001](0001-executor-abstraction.md) §Decisões humanas incorporadas): **não há
-questão aberta bloqueando a fase 3**.
+Estado: **implementado** no incremento 2 da fase 3
+([0004](0004-acp-client-implementation.md)): `SymphonyElixir.ACP.Client` (cliente ACP
+mínimo por stdio) + `SymphonyElixir.Executor.Acp`, validados pelo **agente ACP falso
+determinístico** por stdio. As decisões humanas de Q1–Q10 já estão incorporadas (§2.2
+a §2.8 e [ADR-0001](0001-executor-abstraction.md) §Decisões humanas incorporadas); as
+divergências e os limites da implementação estão registrados em
+[0004](0004-acp-client-implementation.md) e em [../divergences.md](../divergences.md).
 
-Sequência prevista para a fase 3 (plataforma: "runner ACP com fake"):
+Sequência da fase 3 (plataforma: "runner ACP com fake") — concluída:
 
 1. abstração e delegação Codex ([ADR-0001](0001-executor-abstraction.md)) com
    testes de paridade, partindo da `main` integrada;
 2. implementar o cliente ACP conforme §2.1–§2.8, com `@spec` em todo `def`
    público (`mix specs.check`), anunciando o mínimo de capacidades (Q3) e sem
    autoaprovação (Q2);
-3. escrever o agente ACP falso (script executável que fala JSON-RPC por linha) e
+3. escrever o agente ACP falso (processo externo que fala JSON-RPC por linha) e
    os testes de: handshake/negociação de versão, `session/new`, turno completo,
    silêncio, morte do processo, frame malformado, `session/request_permission`
-   (recusa/bloqueio), `stopReason: cancelled` e `stopReason` de falha;
+   (recusa/bloqueio), `stopReason: cancelled`, `stopReason` de falha, autenticação
+   (`auth_required`) e teardown;
 4. registrar divergências, atualizar `elixir/README.md` no que mudou e rodar
    `make -C elixir all`.
 

@@ -157,9 +157,48 @@ Notes:
   case and surrounding whitespace. A blank configured label matches no issue.
 - `executor.kind` selects the executor implementation used by the agent runner. Default: `codex`
   (`SymphonyElixir.Executor.Codex`), a pure delegation to the Codex app-server client, which keeps
-  using the `codex.*` block unchanged. An unsupported value fails dispatch preflight with
-  `{:unsupported_executor_kind, kind}`. Workflows without an `executor` block need no change and keep
-  running Codex. The ACP executor path is documented in `../docs/fork/` and is not selectable yet.
+  using the `codex.*` block unchanged. `acp` selects `SymphonyElixir.Executor.Acp`, an Agent Client
+  Protocol executor that launches `acp.command` as a subprocess and talks JSON-RPC over stdio.
+  An unsupported value fails dispatch preflight with `{:unsupported_executor_kind, kind}`.
+  Workflows without an `executor` block need no change and keep running Codex.
+- ACP also needs a command, and only when it is selected: `executor.kind: acp` without a non-blank
+  `acp.command` fails dispatch preflight with `{:error, :missing_acp_command}` (`codex.*` is never
+  read in that case, and `acp.*` is ignored while `executor.kind` stays `codex`).
+- `acp.auto_approve_requests` (default `false`) controls `session/request_permission`. The default is
+  fail closed: the permission request is answered with the lowest-scope rejection available
+  (`reject_once`, else `reject_always`, else `cancelled`) and the turn ends blocked, reporting
+  `:approval_required`. Setting it to `true` (explicit configuration) answers `allow_once`, else
+  `allow_always`, and lets the turn continue; if the agent offers no approval option, the turn is
+  still cancelled and blocked. It is a per-call decision, not a global policy, and it is **not**
+  equivalent to `codex.approval_policy: never`.
+- What the ACP path does **not** do (declared limits, see `../docs/fork/adr/0004-acp-client-implementation.md`):
+  - it announces **no client capability**: no `fs`, no `terminal`, no `elicitation` and no
+    `additionalDirectories`, so the agent can neither read/write files through Symphony nor run
+    commands through it, and a request for one of those methods gets an explicit JSON-RPC error
+    and fails the turn;
+  - there is **no ACP sandbox**: `codex.thread_sandbox`, `codex.turn_sandbox_policy` and
+    `codex.approval_policy` are not sent to the agent (the protocol has no such fields);
+  - `auth_required` (JSON-RPC error `-32000`) blocks the run with `{:acp_auth_required, methods}`
+    and expects human authentication of the agent; Symphony stores no credential;
+  - tool calls are reported as notifications but never executed or blocked by Symphony, and there
+    are no tracker tools (`linear_graphql`, `github_api`, ...) in this path;
+  - `stop_session/1` closes the process and the transport. That is **not** `session/cancel` or
+    `session/close`: no cancellation notification is sent and the agent gets no chance to stop
+    gracefully;
+  - `usage_update` is passed through as a notification; Symphony does not turn it into token
+    counters (absence of usage data is not reported as zero usage).
+- ACP response timeouts reuse the Codex keys while there is a single executor in real use:
+  `codex.read_timeout_ms` bounds `initialize`/`session/new` responses and
+  `codex.turn_timeout_ms` bounds silence between messages while `session/prompt` is pending
+  (each received frame restarts it; a prompt is never capped by a response timeout).
+- Streams stay separated, as the protocol requires: **`stdout` is the only channel Symphony parses**
+  (ACP/JSON-RPC frames) and `stderr` is the agent's diagnostic channel. Symphony never merges them
+  (`:stderr_to_stdout` is not used, locally or over `ssh`), so an agent log line — even one shaped
+  like a valid JSON-RPC response — can never answer a request, fabricate a `sessionId`/`stopReason`
+  or become a notification/malformed frame. Agent `stderr` is inherited by the node, so it shows up
+  in Symphony's own diagnostic sink (console/journald) instead of being truncated or classified by
+  the client; the client only logs/truncates non-JSON lines that arrive on `stdout`
+  (`../docs/fork/adr/0004-acp-client-implementation.md` §4.10).
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
@@ -203,6 +242,17 @@ hooks:
     git clone --depth 1 "$SOURCE_REPO_URL" .
 codex:
   command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
+```
+
+Selecting the ACP executor instead (any ACP-speaking agent command; no Cline or model
+is implied by Symphony):
+
+```yaml
+executor:
+  kind: acp
+acp:
+  command: "/path/to/acp-agent --stdio"
+  auto_approve_requests: false
 ```
 
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
@@ -320,6 +370,18 @@ The observability UI now runs on a minimal Phoenix stack:
 ```bash
 make all
 ```
+
+The suite is offline. The ACP tests (`test/symphony_elixir/acp_test.exs`) spawn a
+deterministic fake ACP agent — a separate process that speaks the Agent Client
+Protocol over stdio — so they need `bash` and `jq` on `PATH` (both are already
+required by this repository: `jq` is used by the PR-description workflow). The fake
+never touches the network, a model or a credential.
+
+The fake writes its protocol frames to `stdout` and its diagnostics to `stderr`
+(including, when the plan asks for it, a full JSON-RPC response for the request that
+is pending at that moment). Its `stderr` is inherited by the test node, so those lines
+appear in the test output while never reaching the parser — which is exactly what the
+separation tests assert.
 
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
 resources and launch a real `codex app-server` session:

@@ -120,7 +120,7 @@ defmodule SymphonyElixir.Config do
       {:error, :missing_tracker_kind}
     else
       with :ok <- Tracker.validate_config(settings.tracker) do
-        Executor.validate_config(settings.executor)
+        Executor.validate_config(settings)
       end
     end
   end

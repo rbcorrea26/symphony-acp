@@ -4,9 +4,13 @@ defmodule SymphonyElixir.ExecutorTest do
   alias SymphonyElixir.Executor
 
   @executor_callbacks [start_session: 2, run_turn: 4, stop_session: 1]
+  @optional_executor_callbacks [validate_config: 1]
 
-  test "executor behaviour exposes exactly the surface the agent runner uses" do
-    assert Enum.sort(Executor.behaviour_info(:callbacks)) == Enum.sort(@executor_callbacks)
+  test "executor behaviour requires the surface the agent runner uses" do
+    assert Enum.sort(Executor.behaviour_info(:callbacks)) ==
+             Enum.sort(@executor_callbacks ++ @optional_executor_callbacks)
+
+    assert Executor.behaviour_info(:optional_callbacks) == @optional_executor_callbacks
   end
 
   test "codex executor declares the executor behaviour" do
@@ -25,21 +29,23 @@ defmodule SymphonyElixir.ExecutorTest do
     write_workflow_file!(Workflow.workflow_file_path(), executor_kind: "codex")
 
     assert Executor.module!() == Executor.Codex
-    assert :ok = Executor.validate_config(Config.settings!().executor)
+    assert :ok = Executor.validate_config(Config.settings!())
   end
 
   test "for_kind resolves codex and rejects every other kind" do
     assert {:ok, Executor.Codex} = Executor.for_kind("codex")
-    assert {:error, {:unsupported_executor_kind, "acp"}} = Executor.for_kind("acp")
+    assert {:ok, Executor.Acp} = Executor.for_kind("acp")
     assert {:error, {:unsupported_executor_kind, ""}} = Executor.for_kind("")
     assert {:error, {:unsupported_executor_kind, nil}} = Executor.for_kind(nil)
   end
 
   test "unsupported executor kind fails dispatch preflight like an unsupported tracker kind" do
-    write_workflow_file!(Workflow.workflow_file_path(), executor_kind: "acp")
+    write_workflow_file!(Workflow.workflow_file_path(), executor_kind: "acp-not-real")
 
-    assert {:error, {:unsupported_executor_kind, "acp"}} = Config.validate!()
-    assert {:error, {:unsupported_executor_kind, "acp"}} = Executor.validate_config(%{kind: "acp"})
+    assert {:error, {:unsupported_executor_kind, "acp-not-real"}} = Config.validate!()
+
+    assert {:error, {:unsupported_executor_kind, "acp-not-real"}} =
+             Executor.validate_config(%{executor: %{kind: "acp-not-real"}, acp: %{command: nil}})
   end
 
   test "blank executor kind fails dispatch preflight" do

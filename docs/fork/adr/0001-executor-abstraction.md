@@ -1,6 +1,8 @@
 # ADR-0001 — abstração de executor (menor mudança para adicionar ACP)
 
-- **Status:** aceito (implementação pendente)
+- **Status:** aceito (implementado na fase 3: abstração no incremento 1 —
+  [0003](0003-phase3-executor-abstraction-scope.md) — e caminho ACP no incremento 2 —
+  [0004](0004-acp-client-implementation.md))
 - **Data:** 2026-09-27 — decisões humanas Q1–Q10 incorporadas nesta revisão
 - **Decisores:** arquitetura do fork (rbcorrea26)
 - **Relacionado a:** [0002-acp-protocol-mapping.md](0002-acp-protocol-mapping.md),

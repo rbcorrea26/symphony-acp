@@ -383,6 +383,40 @@ is pending at that moment). Its `stderr` is inherited by the test node, so those
 appear in the test output while never reaching the parser — which is exactly what the
 separation tests assert.
 
+The ACP path also has an opt-in integration test against a **real** ACP agent — the
+Cline CLI of the platform's isolated runtime. It is never part of `make all` and never
+runs in CI, because it needs an authenticated agent and a model:
+
+```bash
+cd elixir
+make cline-acp-e2e
+```
+
+It launches the agent through `acp.command` using the production path
+(`AgentRunner -> Executor.Acp -> ACP.Client -> stdio/JSON-RPC`), runs a real turn in a
+disposable git project created under the system temp directory, and passes only when the
+agent changes that project and the deterministic check passes (`bash answer.sh` printing
+exactly `42`, with `answer.sh` reported as the changed file); it also asserts the agent
+process is gone after teardown. Optional environment variables:
+
+- `SYMPHONY_CLINE_ACP_COMMAND` overrides `acp.command`. The default is the platform
+  wrapper `$HOME/automation/bin/cline --acp` — the pipeline's isolated runtime
+  (binary/Node), never the user's personal installation;
+- `SYMPHONY_RUN_CLINE_ACP_E2E=1` is the gate the target sets (without it the file is
+  skipped).
+
+Symphony stores no agent credential: the agent must be authenticated out of band, and
+without authentication the run blocks with `{:acp_auth_required, methods}` and the test
+fails with that human step in the message — it never fabricates a pass. Measured with
+Cline `3.0.65`, the credential/state is resolved by the agent from its own config
+directory (`~/.cline`), so the pipeline's `--data-dir` does not isolate the
+credential/state in this flow; the test therefore reuses whatever authentication the
+runtime already has, as an execution dependency. The file configures
+`acp.auto_approve_requests: true` **only** in its own disposable workflow (the global
+default stays fail-closed), and in the measured real turns the agent did not send
+`session/request_permission` at all. Measured state and the phase status:
+`../docs/fork/cline-acp-integration.md`.
+
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
 resources and launch a real `codex app-server` session:
 

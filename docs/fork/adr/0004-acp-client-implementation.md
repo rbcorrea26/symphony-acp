@@ -316,8 +316,10 @@ Estado: **implementado** (incremento 2 da fase 3). Arquivos:
 - timeouts do caminho ACP continuam vindo de `codex.read_timeout_ms`/
   `codex.turn_timeout_ms` (Q1);
 - nomes internos `codex_*` preservados (Q8);
-- métrica de uso ACP não representável no dashboard sem ambiguidade (Q6) — resolver
-  antes da integração real do Cline;
+- métrica de uso ACP não representável no dashboard sem ambiguidade (Q6): **segue aberta**
+  depois da integração real do Cline (fase 4), que aconteceu com a dívida ainda não
+  resolvida — o dashboard renderiza ausência como zeros, então ela precisa ser resolvida
+  antes de uso com projeto consumidor;
 - o fake ACP depende de `bash` e `jq` no ambiente de teste (declarado em
   `elixir/README.md` §Testing);
 - o `stderr` do agente é encaminhado ao sink de diagnóstico do nó e **não** passa pela

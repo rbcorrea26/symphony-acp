@@ -66,16 +66,17 @@ credencial. Com isso o entregável do roadmap da plataforma ("`Executor.Acp`
 exercitado por agente ACP fake por stdio") existe e está verde no repositório:
 **fase 3 = concluída**.
 
-O que **não** existe ainda: Cline como executor real (fase 4), DeepSeek (fase 5),
-cancelamento gracioso ACP, `session/load`, elicitation, modos/config options, MCP
-local para ferramentas do tracker e representação de métrica ausente no dashboard.
+O que **não** existe ainda: DeepSeek (fase 5), cancelamento gracioso ACP,
+`session/load`, elicitation, modos/config options e MCP local para ferramentas do
+tracker. O **Cline real como executor ACP existe** (fase 4 concluída no fork, com turno
+real medido): ver [../cline-acp-integration.md](../cline-acp-integration.md).
 
 A decisão de plataforma que autoriza o trabalho é
 `agentic-dev-environment/docs/architecture/adr/0002-acp-como-contrato-de-executor.md`
 e o executor inicial está em
 `.../adr/0003-cline-deepseek-como-executor-inicial.md`.
 
-Permanecem abertos, como **dívidas registradas** (não bloqueiam a fase 3): reuso
-temporário de chaves `codex.*` pelo caminho ACP, nomes internos `codex_*` e
-representação de métricas ausentes no dashboard antes da integração real do
-Cline.
+Permanecem abertos, como **dívidas registradas**: reuso temporário de chaves `codex.*`
+pelo caminho ACP, nomes internos `codex_*` e representação de métricas ausentes no
+dashboard — esta última **segue aberta** depois da integração real do Cline (fase 4), que
+aconteceu com a dívida ainda não resolvida (o dashboard renderiza ausência como zeros).

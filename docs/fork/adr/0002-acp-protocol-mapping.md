@@ -301,8 +301,10 @@ descrito em §2.3 (não é identidade do protocolo).
   ferramentas do cliente nem do tracker, sem cancelamento gracioso); o executor
   ACP recebe menos contexto institucional (sem `title`, sem ferramentas do
   tracker, sem elicitation); a dívida de nomes `codex_*` permanece; a
-  representação de métricas ausentes precisa ser resolvida antes da integração
-  real do Cline (Q6); a implementação precisa manter um segundo protocolo sob
+  representação de métricas ausentes precisa ser resolvida antes de uso com projeto
+  consumidor (Q6) — a integração real do Cline (fase 4) aconteceu com essa dívida ainda
+  aberta, registrada em [0004](0004-acp-client-implementation.md) §Dívidas; a implementação
+  precisa manter um segundo protocolo sob
   teste.
 - **Obrigações:** implementar somente o que está nesta decisão; toda extensão
   (MCP local, cancelamento gracioso, `session/load`, elicitation, modos) exige ADR

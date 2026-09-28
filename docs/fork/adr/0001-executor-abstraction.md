@@ -161,7 +161,7 @@ A escolha é a menor mudança que **não** reescreve arquivo upstream de execuç
   chamada de função a mais.
 
 
-### Impacto esperado em arquivos (planejado, não implementado)
+### Impacto esperado em arquivos (planejado na decisão; implementado na fase 3)
 
 | Arquivo | Tipo | Mudança esperada |
 |---|---|---|
@@ -174,6 +174,10 @@ A escolha é a menor mudança que **não** reescreve arquivo upstream de execuç
 | `elixir/README.md` | upstream | obrigatório quando a chave existir (política de docs do upstream): documentar `executor.kind`/`acp.*` e o que o ACP **não** garante |
 | `docs/fork/divergences.md` | fork | registrar cada arquivo upstream alterado, com motivo |
 | `elixir/lib/mix/tasks/specs.check.ex` | **não** alterado | continua cobrindo `@spec` de todo `def` público |
+
+Na implementação o plano foi cumprido com uma divisão a mais: o cliente ACP ficou em
+`elixir/lib/symphony_elixir/acp/client.ex` e o executor em
+`elixir/lib/symphony_elixir/executor/acp.ex` ([0004](0004-acp-client-implementation.md)).
 
 ### Impacto esperado em testes
 
@@ -248,15 +252,17 @@ A escolha é a menor mudança que **não** reescreve arquivo upstream de execuç
 
 ## Implementação
 
-Estado: **pendente** (nada implementado). Este ADR só existe porque a análise do
-código foi concluída ([../acp-analysis.md](../acp-analysis.md)); nenhum arquivo
-`.ex`/`.exs` foi criado ou alterado, e o caminho Codex segue intacto.
-As decisões humanas Q1–Q10 já estão registradas (§Decisões humanas incorporadas e
-[ADR-0002](0002-acp-protocol-mapping.md)), então **não há questão aberta
-bloqueando a fase 3**.
+Estado: **implementado** (fase 3 concluída). A ordem planejada abaixo foi seguida item
+a item: a abstração de executor e `executor.kind` entraram no incremento 1
+([0003](0003-phase3-executor-abstraction-scope.md)) e o caminho ACP
+(`SymphonyElixir.ACP.Client` + `SymphonyElixir.Executor.Acp`, validado pelo agente ACP
+fake determinístico) no incremento 2 ([0004](0004-acp-client-implementation.md)); o
+caminho Codex segue intacto e como default. O **Cline real como agente ACP** foi
+executado depois, na fase 4 ([../cline-acp-integration.md](../cline-acp-integration.md)).
+As decisões humanas Q1–Q10 estão registradas (§Decisões humanas incorporadas e
+[ADR-0002](0002-acp-protocol-mapping.md)).
 
-Ordem planejada da fase 3 (plataforma: "runner ACP com fake"), **ainda não
-iniciada**:
+Ordem seguida na fase 3 (plataforma: "runner ACP com fake"):
 
 1. integrar este ADR em `main` (a implementação parte da `main` integrada, não
    desta branch);
@@ -275,10 +281,12 @@ iniciada**:
 
 Coerência com o roadmap da plataforma (`agentic-dev-environment/docs/architecture/roadmap.md`):
 fase 3 = runner ACP com fake (este ADR + [ADR-0002](0002-acp-protocol-mapping.md));
-fase 4 = Cline como cliente ACP real; fase 5 = DeepSeek. **Cline não entra na
-fase 3** e nada nesta PR depende dele.
+fase 4 = Cline como **agente** ACP real; fase 5 = DeepSeek. **Cline não entra na
+fase 3** e nada nesta PR depende dele. A fase 4 foi executada depois, sem alterar esta
+decisão: estado medido e ressalvas em
+[../cline-acp-integration.md](../cline-acp-integration.md).
 
-Entradas para a fase 4 (não decididas aqui): MCP local para ferramentas do
-tracker, cancelamento gracioso, `session/load`, elicitation, modos/config options
-e representação de métricas ausentes (dívida Q6 registrada em
-[ADR-0002](0002-acp-protocol-mapping.md) §2.8).
+Entradas para a fase 4 (não decididas aqui e **não** implementadas por ela): MCP local
+para ferramentas do tracker, cancelamento gracioso, `session/load`, elicitation,
+modos/config options e representação de métricas ausentes (dívida Q6 registrada em
+[ADR-0002](0002-acp-protocol-mapping.md) §2.8) — todas seguem abertas.

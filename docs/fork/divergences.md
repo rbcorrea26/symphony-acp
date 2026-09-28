@@ -18,7 +18,18 @@ As de **implementação** do incremento 1 da fase 3 (abstração de executor,
 [adr/0003](adr/0003-phase3-executor-abstraction-scope.md). As do **incremento 2**
 (cliente ACP, executor ACP, `acp.*` e agente ACP fake por stdio) entram pela PR da
 branch `feat/acp-executor-fake-agent`, que também trouxe
-[adr/0004](adr/0004-acp-client-implementation.md).
+[adr/0004](adr/0004-acp-client-implementation.md). As da **verificação do Cline real**
+(fase 4: teste opt-in de integração, alvo do `Makefile` e
+[cline-acp-integration.md](cline-acp-integration.md)) entram pela PR da branch
+`feat/cline-acp-integration`, que **não** altera código de produção. O **fechamento da
+fase 4** (turno real do Cline já autenticado) entrou na mesma PR como rodada de
+documentação — `docs/fork/cline-acp-integration.md`, `docs/fork/README.md`,
+`docs/fork/adr/README.md`, `docs/fork/adr/0002-acp-protocol-mapping.md`,
+`docs/fork/adr/0004-acp-client-implementation.md`, `elixir/README.md` e o comentário de
+módulo de `elixir/test/symphony_elixir/cline_acp_e2e_test.exs` —, registrando o turno
+real medido, a dependência de autenticação e as duas ressalvas medidas (o `--data-dir`
+do pipeline não isola credencial/estado do Cline nesta versão e o agente deixa um *hub
+daemon* destacado após o turno).
 Arquivos **não** listados abaixo são idênticos à base registrada e
 seguem a documentação upstream como autoridade.
 
@@ -67,6 +78,16 @@ seguem a documentação upstream como autoridade.
 | `docs/fork/adr/README.md` | alterado | índice com o ADR-0004 e status da fase 3 concluída | não |
 | `docs/fork/README.md` | alterado | status: caminho ACP implementado; fase 3 concluída; Cline continua fase 4 | não |
 | `docs/fork/divergences.md` | alterado | este registro | não |
+| `docs/fork/cline-acp-integration.md` | novo | verificação do **Cline real** como agente ACP: *spike* (erro `-32000` antes da autenticação), turno real medido pelo caminho `AgentRunner → Executor.Acp → ACP.Client → Cline`, efeito determinístico no workspace descartável, `stopReason` `end_turn`, teardown, dependência de autenticação do runtime e ressalvas medidas (isolamento de credencial/estado e hub daemon); fase 4 **concluída** | não |
+| `elixir/test/symphony_elixir/cline_acp_e2e_test.exs` | novo | teste **opt-in** de integração real (`AgentRunner → Executor.Acp → ACP.Client → Cline --acp`) em workspace descartável, com validação determinística e verificação de teardown | não |
+| `elixir/Makefile` | alterado (aditivo) | alvo `cline-acp-e2e` (opt-in), espelhando o padrão do alvo `e2e` do upstream; `help`/`.PHONY` atualizados | não |
+| `elixir/README.md` | alterado (aditivo) | documenta o alvo opt-in `cline-acp-e2e`, as variáveis de ambiente e a dependência de autenticação do runtime isolado | não |
+
+A verificação da fase 4 **não** alterou código de produção: `elixir/lib/**` permanece
+exatamente como na revisão integrada da fase 3 (nenhuma capability, método ACP, default
+de permissão, caminho de autenticação ou comportamento Codex mudou). O que entrou foi
+teste opt-in e documentação — nenhuma incompatibilidade de protocolo foi demonstrada
+entre o Cline real e o cliente atual.
 
 Arquivos de `elixir/**` alterados pelo incremento 1 da fase 3: `agent_runner.ex`
 (indireção do executor), `config/schema.ex` e `config.ex` (chave `executor.kind` +

@@ -63,6 +63,17 @@ roadmap e o contrato de segredo continuam na plataforma
 (`agentic-dev-environment`, ADR-0003) — inclusive o formato `KEY=VALUE` sem aspas, que a
 execução real exigiu passar a verificar.
 
+**Fase 6 — estágio de entrega (gates, Draft PR, CI, candidato, handoff): concluída no
+fork, com execução real ponta a ponta.** O fork passou a ter
+`SymphonyElixir.Delivery`, chamado pelo `AgentRunner` depois dos turnos quando o
+workflow do consumidor opta (`delivery.enabled`): gates do projeto no workspace,
+branch + Draft PR do pipeline, observação dos check runs do CI, *candidate stable*
+derivado do GitHub, review one-shot e handoff (`ready-for-human`) com remoção do
+rótulo de entrada. A decisão está em [adr/0005](adr/0005-delivery-stage.md) e o
+comportamento, os limites e a evidência medida em
+[delivery-and-promotion.md](delivery-and-promotion.md). Nada disso é obrigatório: sem
+o bloco `delivery` o comportamento upstream (e o caminho Codex) continua igual.
+
 ## 2. Relação `origin` / `upstream`
 
 | Remote | URL | Papel |

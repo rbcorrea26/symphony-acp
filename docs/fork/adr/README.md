@@ -24,6 +24,7 @@ daqui com os da plataforma (`agentic-dev-environment/docs/architecture/adr/`).
 | [`0002`](0002-acp-protocol-mapping.md) | **ACP protocol mapping**: tradução entre o protocolo do Codex App Server e o ACP (sessão, turno, streaming, permissão, entrada do usuário, cancelamento, timeouts, ferramentas, sandbox, erros, lifecycle) | **aceito** (implementado no incremento 2 da fase 3; ver `0004`) |
 | [`0003`](0003-phase3-executor-abstraction-scope.md) | **escopo da fase 3**: abstração implementada com executor fake determinístico de teste; sem cliente ACP, sem `acp.*`, preflight do `executor.kind` em `config.ex`/`orchestrator.ex` | **aceito** (implementado) |
 | [`0004`](0004-acp-client-implementation.md) | **cliente ACP e turnos (incremento 2)**: `ACP.Client` + `Executor.Acp`, `acp.command`/`acp.auto_approve_requests`, política de permissão fail-closed, identidade sintética de turno, eventos mapeados e o agente ACP fake por stdio que prova o caminho de ponta a ponta | **aceito** (implementado) |
+| [`0005`](0005-delivery-stage.md) | **estágio de entrega (fase 6 da plataforma)**: gates do consumidor, Draft PR, observação do CI, candidato derivado do GitHub, review one-shot e handoff — opt-in por `delivery.enabled`, local apenas, sem force push e sem merge | **aceito** (implementado e validado em execução real) |
 
 Evidência que sustenta os dois ADRs: [../acp-analysis.md](../acp-analysis.md)
 (matriz `D1`–`D33`, fontes, opções de abstração, segurança e decisões Q1–Q10).

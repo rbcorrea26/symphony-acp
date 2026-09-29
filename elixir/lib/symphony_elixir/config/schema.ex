@@ -289,6 +289,71 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Delivery do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+
+    # Delivery is opt-in and additive: a workflow without this block keeps the
+    # upstream behavior (the agent runner ends the turn and nothing is published).
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      # The gates are the consumer project's own commands; the platform never
+      # hardcodes them.
+      field(:gates, :string)
+      field(:gates_timeout_ms, :integer, default: 600_000)
+      field(:base_branch, :string, default: "main")
+      field(:branch_prefix, :string, default: "pipeline/")
+      field(:handoff_label, :string, default: "pipeline:ready-for-human")
+      # Removing the tracker entry label is what keeps a delivered issue from
+      # being dispatched again by the next poll cycle.
+      field(:remove_entry_labels, :boolean, default: true)
+      field(:commit_name, :string, default: "agentic pipeline")
+      field(:commit_email, :string, default: "pipeline@users.noreply.github.com")
+      field(:ci_timeout_ms, :integer, default: 900_000)
+      field(:ci_poll_interval_ms, :integer, default: 10_000)
+      # One-shot review request. Unavailable review is recorded, never faked.
+      field(:request_review, :boolean, default: true)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :enabled,
+          :gates,
+          :gates_timeout_ms,
+          :base_branch,
+          :branch_prefix,
+          :handoff_label,
+          :remove_entry_labels,
+          :commit_name,
+          :commit_email,
+          :ci_timeout_ms,
+          :ci_poll_interval_ms,
+          :request_review
+        ],
+        empty_values: []
+      )
+      |> validate_number(:gates_timeout_ms, greater_than: 0)
+      |> validate_number(:ci_timeout_ms, greater_than: 0)
+      |> validate_number(:ci_poll_interval_ms, greater_than: 0)
+      |> validate_change(:gates, fn :gates, gates ->
+        if is_binary(gates) and String.trim(gates) != "", do: [], else: [gates: "can't be blank"]
+      end)
+      |> validate_change(:base_branch, fn :base_branch, branch ->
+        if is_binary(branch) and String.trim(branch) != "", do: [], else: [base_branch: "can't be blank"]
+      end)
+      |> validate_change(:handoff_label, fn :handoff_label, label ->
+        if is_binary(label) and String.trim(label) != "", do: [], else: [handoff_label: "can't be blank"]
+      end)
+    end
+  end
+
   defmodule Observability do
     @moduledoc false
     use Ecto.Schema
@@ -339,6 +404,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:executor, Executor, on_replace: :update, defaults_to_struct: true)
     embeds_one(:acp, Acp, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:delivery, Delivery, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
   end
@@ -435,6 +501,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:executor, with: &Executor.changeset/2)
     |> cast_embed(:acp, with: &Acp.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
+    |> cast_embed(:delivery, with: &Delivery.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
   end

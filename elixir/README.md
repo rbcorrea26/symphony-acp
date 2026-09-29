@@ -258,6 +258,50 @@ acp:
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
+- `delivery` (fork extension) turns the end of the agent run into a published candidate:
+  the consumer's gates run in the workspace, then a per-issue branch and a **draft** pull
+  request are created, the CI check runs of that branch are observed, and the handoff
+  (`ready-for-human`) is written back to the issue. Without the block the upstream behavior
+  is unchanged (`delivery.enabled` defaults to `false`).
+
+```yaml
+delivery:
+  enabled: true
+  gates: "scripts/agent/preflight.sh --gates"   # the project defines "passed"
+  base_branch: main
+  branch_prefix: "pipeline/"
+  handoff_label: "pipeline:ready-for-human"
+  remove_entry_labels: true        # entry label off => the issue leaves the active state
+  commit_name: "agentic pipeline"
+  commit_email: "pipeline@users.noreply.github.com"
+  ci_timeout_ms: 1800000
+  ci_poll_interval_ms: 15000
+  request_review: true             # one-shot request, only after a stable candidate
+```
+
+- A non-zero exit from `delivery.gates` fails the run: nothing is published.
+- The candidate is the head SHA of the delivery branch that passed the local gates **and**
+  whose check runs all concluded successfully **and** that was still the branch head when
+  the observation finished. A push that lands during the observation invalidates it and
+  the observation restarts on the new SHA; no CI at all, a failing check or a timeout
+  blocks the promotion.
+- State comes from GitHub (open pull request, ref, check runs, labels, comments), so a
+  retry reconciles the existing candidate: no second branch, no second pull request, no
+  second handoff comment, no repeated push. A reconciled candidate does not request a new
+  review either (the review is one-shot).
+- The entry labels (`tracker.required_labels`) are removed at the handoff, which is what
+  stops the next poll from dispatching an issue that was already delivered; the handoff
+  comment carries the candidate SHA, the gates command, the CI result and the review state.
+- The credential is never written to `argv`, to the workspace or to a log: the push uses a
+  throwaway `GIT_ASKPASS` helper (it holds no secret and is removed even on failure) and
+  the REST calls reuse the tracker authentication.
+- `delivery.enabled` fails dispatch preflight when the tracker is not GitHub, when the
+  worker is remote (`worker.ssh_hosts`) or when `delivery.gates` is missing.
+  `delivery-and-promotion.md` in `../docs/fork/` documents the limits and the measured
+  end-to-end evidence.
+
+- If a later reload fails, Symphony keeps running with the last known good workflow and logs the
+  reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 

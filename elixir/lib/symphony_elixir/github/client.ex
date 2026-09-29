@@ -52,6 +52,19 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
+  @doc """
+  Resolves the GitHub connection (API URL, `owner/name` repository and token)
+  from tracker settings.
+
+  Authored for the delivery stage, which must authenticate `git push` and the
+  REST calls of the same repository without ever putting the credential in
+  `argv`, in a file inside the workspace or in a log line. The token is resolved
+  exactly like the polling path resolves it (`$VAR` reference or literal), so
+  delivery and tracker cannot disagree about which credential is in use.
+  """
+  @spec connection(map()) :: {:ok, map()} | {:error, term()}
+  def connection(tracker_settings), do: settings(tracker_settings)
+
   @doc false
   @spec normalize_issue_for_test(map(), String.t()) :: Issue.t() | nil
   def normalize_issue_for_test(issue, repo) when is_map(issue) and is_binary(repo) do

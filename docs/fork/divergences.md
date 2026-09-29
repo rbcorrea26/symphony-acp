@@ -135,6 +135,20 @@ merge, porque depende dele desde o upstream.
 | `docs/fork/cline-acp-integration.md` | alterado | §8: mecanismo do provedor medido no Cline `3.0.65` (`CLINE_PROVIDER`/`CLINE_MODEL`/`CLINE_API_KEY`, `authMethods` do ACP), evidência do teste opt-in e **resultado da execução real da fase 5** (`1 test, 0 failures`, `provider=deepseek`/`model=deepseek-v4-flash`) | não |
 | `docs/fork/README.md` | alterado | status da fase 5 (mecanismo medido, teste opt-in e turno real executado com sucesso) | não |
 | `docs/fork/divergences.md` | alterado | este registro | não |
+| `docs/fork/adr/0005-delivery-stage.md` | novo | ADR do estágio de entrega (fase 6: gates do consumidor, Draft PR, CI, candidato derivado do GitHub, review one-shot e handoff) | não |
+| `docs/fork/delivery-and-promotion.md` | novo | comportamento, configuração, limites declarados e evidência da execução real da fase 6 | não |
+| `elixir/lib/symphony_elixir/delivery.ex` | novo | estágio de entrega: gates do consumidor, publicação da branch/Draft PR, observação do CI, candidato, review one-shot e handoff | não |
+| `elixir/lib/symphony_elixir/delivery/git.ex` | novo | operações git locais do estágio (status, branch, commit, push com `GIT_ASKPASS` temporário, redação de saída) | não |
+| `elixir/lib/symphony_elixir/delivery/github.ex` | novo | superfície REST do estágio (PR, ref, check runs, labels, comentários, review) reusando o cliente do tracker | não |
+| `elixir/lib/symphony_elixir/agent_runner.ex` | alterado | chama o estágio de entrega depois dos turnos quando habilitado; erro de entrega é erro do run | não |
+| `elixir/lib/symphony_elixir/config/schema.ex` | alterado (aditivo) | bloco `delivery` (default `enabled: false`: comportamento upstream preservado) | não |
+| `elixir/lib/symphony_elixir/config.ex` | alterado | preflight do estágio (`Delivery.validate_config/1`) junto dos preflights existentes | não |
+| `elixir/lib/symphony_elixir/github/client.ex` | alterado (aditivo) | `connection/1` expõe coordenadas/auth do tracker ao estágio de entrega (mesma resolução de token do polling) | não |
+| `elixir/test/support/test_support.exs` | alterado | harness gera os blocos `tracker.provider` e `delivery` | não |
+| `elixir/test/symphony_elixir/delivery_test.exs` | novo | testes do estágio (git real contra `origin` bare + stand-in da API), sem rede, GitHub ou credencial | não |
+| `elixir/README.md` | alterado | documenta o bloco `delivery` e o estágio de entrega | não |
+| `docs/fork/README.md` | alterado | status da fase 6 (estágio de entrega implementado e validado em execução real) | não |
+| `docs/fork/adr/README.md` | alterado | índice do ADR `0005` | não |
 
 ## Regras do registro
 

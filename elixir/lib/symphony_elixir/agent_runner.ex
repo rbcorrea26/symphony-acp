@@ -4,7 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, Executor, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Delivery, Executor, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
@@ -42,8 +42,9 @@ defmodule SymphonyElixir.AgentRunner do
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host),
+               :ok <- run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+            deliver(workspace, issue, worker_host)
           end
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
@@ -51,6 +52,18 @@ defmodule SymphonyElixir.AgentRunner do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # Delivery runs only after the agent turns finished. It is disabled unless the
+  # workflow opts in (`delivery.enabled`), and a delivery failure is a failed run:
+  # the orchestrator retries the issue instead of reporting a successful run
+  # without a candidate.
+  defp deliver(workspace, issue, worker_host) do
+    case Delivery.run(workspace, issue, worker_host: worker_host) do
+      :disabled -> :ok
+      {:ok, _result} -> :ok
+      {:error, reason} -> {:error, {:delivery_failed, reason}}
     end
   end
 

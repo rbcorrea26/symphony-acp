@@ -19,7 +19,7 @@ duplica a análise documental ([acp-analysis.md](acp-analysis.md)).
 | Cline CLI como **agente ACP** (`acp.command`) | **verificado em turno real** |
 | Fase 4 (integração Cline) no fork | **concluída** (turno real, efeito verificado, teardown) |
 | Autenticação do agente | passo humano, feito **fora** do Symphony; dependência do runtime (§5) |
-| DeepSeek | fase 5 da plataforma; **não** configurado nem canonizado aqui |
+| DeepSeek (provedor inicial, fase 5) | mecanismo **medido** e configurado pela plataforma; teste opt-in pronto (§8); turno real pago **ainda não executado** (falta a credencial do provedor no arquivo de segredos) |
 
 Provado nesta verificação: `initialize`, `session/new`, `session/prompt` e
 `session/update` reais; resposta real do modelo; alteração real no workspace descartável
@@ -27,10 +27,12 @@ com validação determinística; `stopReason` final; teardown do processo do age
 pelo caminho de produção (`AgentRunner`, com `executor.kind: acp` resolvido por
 configuração). Evidência em §4.
 
-Continuam fora de escopo: DeepSeek (fase 5), `authenticate` ACP, `session/cancel`/
-`session/close`, `session/load`, elicitation, MCP local e capabilities `fs`/`terminal`.
-Uma dívida herdada da fase 3 (representação de métricas ausentes no dashboard) segue
-aberta e está registrada em §6.
+Continuam fora de escopo: `authenticate` ACP, `session/cancel`/`session/close`,
+`session/load`, elicitation, MCP local e capabilities `fs`/`terminal`. O provedor de
+modelo (DeepSeek) é configuração da plataforma, entregue ao processo do agente pelo
+wrapper do runtime isolado — o cliente ACP não conhece credencial (§8). Uma dívida
+herdada da fase 3 (representação de métricas ausentes no dashboard) segue aberta e está
+registrada em §6.
 
 ## 2. Runtime verificado
 
@@ -197,7 +199,89 @@ chegarem e se o processo do agente não existir mais. O agente precisa estar aut
 fora de banda (o teste nunca autentica em nome do agente nem carrega credencial); sem
 autenticação ele falha com mensagem explícita, nunca passa em silêncio.
 
-## 8. Referências
+## 8. Fase 5 — provedor inicial (DeepSeek): mecanismo medido e teste opt-in
+
+A fase 5 liga o **provedor de modelo** ao Cline do caminho ACP acima. A decisão e o
+contrato de segredo são da plataforma
+(`agentic-dev-environment`: ADR-0003, `config/defaults.env`,
+`manifests/tool-versions.txt`, `docs/operations/troubleshooting.md` §19); este
+documento registra **o que foi medido no agente real** e como o caminho ACP é provado
+com ele, sem duplicar a decisão.
+
+Mecanismo medido no binário `3.0.65` instalado no runtime isolado (bundle do servidor
+ACP):
+
+| Item | Medido |
+|---|---|
+| provedor | `process.env.CLINE_PROVIDER` (senão o provedor restaurado do estado, senão `cline`) |
+| modelo | `process.env.CLINE_MODEL` (senão o `defaultModelId` do provedor) |
+| credencial | `process.env.CLINE_API_KEY` (senão a credencial restaurada) |
+| prontidão da sessão | `isSessionReady` exige `CLINE_API_KEY` **ou** credencial restaurável de uma das `authMethods` anunciadas — `cline`, `cline-pass` e `openai-codex` apenas |
+| id do provedor DeepSeek | `deepseek` (família `openai-compatible`, protocolo `openai-chat`, `baseUrl https://api.deepseek.com/v1`) |
+| modelos publicados | `deepseek-flash`, `deepseek-v4-pro`, `deepseek-v4-flash` (default do provedor: `deepseek-v4-flash`) |
+
+Consequências para o caminho ACP (todas verificadas em código do binário instalado,
+não presumidas):
+
+- `deepseek` **não** está nas `authMethods` do ACP: `cline auth`/`providers.json` não
+  deixam a sessão pronta sozinhos, e `session/new` continua respondendo
+  `Authentication required` quando não há `CLINE_API_KEY` nem credencial OAuth
+  restaurável — o erro que o cliente já mapeia para `{:acp_auth_required, _}`;
+- por isso a credencial do provedor é entregue **ao processo do agente** pelo wrapper do
+  runtime isolado (`CLINE_API_KEY`), a partir do arquivo de segredos da plataforma: o
+  Symphony continua sem conhecer credencial alguma e o caminho ACP não mudou — **nenhuma
+  alteração** em `Executor.Acp`/`ACP.Client` foi necessária para a fase 5;
+- sem a credencial, o wrapper **não** seleciona provedor/modelo (nenhuma credencial de
+  outro provedor — por exemplo a OAuth do estado isolado — é reaproveitada em nome do
+  DeepSeek);
+- modelo inválido em `CLINE_MODEL` **não** falha: o agente cai no default do provedor.
+  O modelo realmente usado precisa ser conferido, não presumido.
+
+### Evidência e teste
+
+`elixir/test/symphony_elixir/cline_deepseek_e2e_test.exs` (opt-in, **pago**, nunca em
+`make all`/CI) exige o mesmo turno real do caminho de produção
+(`AgentRunner` → `Executor.Acp` → `ACP.Client` → `acp.command`) e acrescenta a prova da
+**camada de modelo**:
+
+```bash
+cd elixir && make cline-deepseek-e2e
+# ou
+SYMPHONY_RUN_CLINE_DEEPSEEK_E2E=1 mix test test/symphony_elixir/cline_deepseek_e2e_test.exs
+```
+
+| Variável | Papel |
+|---|---|
+| `SYMPHONY_RUN_CLINE_DEEPSEEK_E2E=1` | gate: sem ela o teste é *skipped* |
+| `SYMPHONY_CLINE_ACP_COMMAND` | `acp.command`; default = wrapper do pipeline `$HOME/automation/bin/cline --acp` |
+| `SYMPHONY_CLINE_DEEPSEEK_MODEL` | modelo que o turno deve ter usado; default `deepseek-v4-flash` |
+| `SYMPHONY_CLINE_STATE_DIR` | estado **isolado** do Cline do pipeline (default `$HOME/automation/state/cline`); nunca `~/.cline` |
+
+`SYMPHONY_CLINE_DEEPSEEK_MODEL` é a **expectativa** do teste; o modelo que o agente
+realmente usa vem de `CLINE_MODEL` (default do wrapper, ou o ambiente do operador, que
+tem precedência). Ao rodar com outro modelo, informe os dois:
+`CLINE_MODEL=deepseek-v4-pro SYMPHONY_CLINE_DEEPSEEK_MODEL=deepseek-v4-pro make cline-deepseek-e2e`.
+
+Além do efeito determinístico no projeto descartável (`bash answer.sh` → exatamente
+`42`, nenhum outro arquivo alterado, eventos `:session_started`/`:turn_completed`,
+processo do agente encerrado), o teste lê o **registro de sessão que o próprio agente
+grava no estado isolado** (`data/sessions/<id>/<id>.json`, sem credencial alguma) e
+exige `provider == "deepseek"` e o modelo esperado. Um turno que caísse em outro
+provedor — ou sem credencial do provedor — **falha** com mensagem explícita que nomeia
+o arquivo de segredos a preencher, em vez de passar como "fase 5 verificada". O teste
+também recusa apontar para o estado pessoal e falha se não encontrar o registro da
+sessão (na ausência de registro não há evidência de DeepSeek).
+
+Uso/custo do turno (quando existir no registro) é impresso **apenas** como evidência
+operacional transitória: não é asserido e não é versionado
+(`agentic-dev-environment/docs/architecture/source-of-truth.md`).
+
+**Estado:** o mecanismo está medido e implementado (plataforma + este teste opt-in); a
+execução real paga com DeepSeek **ainda não foi executada** neste ambiente porque a
+credencial do provedor não está preenchida no arquivo de segredos do usuário. A fase 5
+segue `pendente` no roadmap da plataforma até esse turno acontecer.
+
+## 9. Referências
 
 - [adr/0002](adr/0002-acp-protocol-mapping.md) (mapeamento ACP; Q2/Q5/Q6/Q7),
   [adr/0003](adr/0003-phase3-executor-abstraction-scope.md) e
@@ -206,9 +290,13 @@ autenticação ele falha com mensagem explícita, nunca passa em silêncio.
 - [divergences.md](divergences.md) (registro do diff em relação ao upstream);
 - código: `elixir/lib/symphony_elixir/acp/client.ex`,
   `elixir/lib/symphony_elixir/executor/acp.ex`, `elixir/lib/symphony_elixir/agent_runner.ex`;
-- testes: `elixir/test/symphony_elixir/cline_acp_e2e_test.exs` (opt-in, agente real) e
-  `elixir/test/symphony_elixir/acp_test.exs` (determinístico, agente ACP fake);
-- plataforma: `agentic-dev-environment/docs/architecture/roadmap.md` (fase 4),
-  `docs/architecture/adr/0002-*`, `docs/architecture/adr/0003-*`,
-  `docs/architecture/adr/0005-*` (isolamento de runtime),
+- testes: `elixir/test/symphony_elixir/cline_acp_e2e_test.exs` (opt-in, agente real),
+  `elixir/test/symphony_elixir/cline_deepseek_e2e_test.exs` (opt-in, agente real com o
+  provedor DeepSeek — fase 5) e `elixir/test/symphony_elixir/acp_test.exs`
+  (determinístico, agente ACP fake);
+- plataforma: `agentic-dev-environment/docs/architecture/roadmap.md` (fases 4 e 5),
+  `docs/architecture/adr/0002-*`, `docs/architecture/adr/0003-*` (Cline + DeepSeek,
+  com o mecanismo do provedor medido), `docs/architecture/adr/0005-*` (isolamento de
+  runtime), `docs/operations/troubleshooting.md` (§19, executor sem credencial),
+  `manifests/tool-versions.txt` (medições do executor) e
   `docs/security/permissions.md`.

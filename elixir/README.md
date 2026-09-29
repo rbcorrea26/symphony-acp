@@ -389,8 +389,21 @@ runs in CI, because it needs an authenticated agent and a model:
 
 ```bash
 cd elixir
-make cline-acp-e2e
+make cline-acp-e2e     # real Cline turn, provider resolved by the isolated runtime
+make cline-deepseek-e2e # the same turn, requiring the DeepSeek provider (phase 5)
 ```
+
+`make cline-deepseek-e2e` adds the model layer of phase 5: besides the real turn, it
+reads the session record the agent writes in its own isolated state and requires
+`provider == "deepseek"` and the expected model, so a run that fell back to another
+provider (or that had no provider credential) fails instead of passing as verified. It
+has been executed successfully against the platform's isolated runtime (real turn,
+`provider == "deepseek"`, `model == "deepseek-v4-flash"`, 1 test / 0 failures); the paid
+run is never part of `make all` or CI, and one successful run is enough. Its
+provider/model mechanism and the extra environment variables
+(`SYMPHONY_RUN_CLINE_DEEPSEEK_E2E`, `SYMPHONY_CLINE_DEEPSEEK_MODEL`,
+`SYMPHONY_CLINE_STATE_DIR`) are documented in
+[docs/fork/cline-acp-integration.md](../docs/fork/cline-acp-integration.md) §8.
 
 It launches the agent through `acp.command` using the production path
 (`AgentRunner -> Executor.Acp -> ACP.Client -> stdio/JSON-RPC`), runs a real turn in a

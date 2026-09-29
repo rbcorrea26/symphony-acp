@@ -29,7 +29,15 @@ documentação — `docs/fork/cline-acp-integration.md`, `docs/fork/README.md`,
 módulo de `elixir/test/symphony_elixir/cline_acp_e2e_test.exs` —, registrando o turno
 real medido, a dependência de autenticação e as duas ressalvas medidas (o `--data-dir`
 do pipeline não isola credencial/estado do Cline nesta versão e o agente deixa um *hub
-daemon* destacado após o turno).
+daemon* destacado após o turno). As da **fase 5** (mecanismo do provedor DeepSeek
+medido no Cline `3.0.65`, teste opt-in que exige o provedor pelo registro de sessão do
+agente e o **resultado da execução real**, `1 test, 0 failures`, já com
+`provider=deepseek`/`model=deepseek-v4-flash`) entram pela branch
+`feat/issue-12-deepseek-phase5` e **não** alteram código de
+produção: o executor ACP e o cliente ACP seguem intocados — o provedor/credencial são
+configuração da plataforma, entregues ao processo do agente pelo wrapper do runtime
+isolado. A fragilidade descoberta na execução real (valor de credencial entre aspas) foi
+corrigida **na plataforma**, não aqui.
 Arquivos **não** listados abaixo são idênticos à base registrada e
 seguem a documentação upstream como autoridade.
 
@@ -120,6 +128,13 @@ A separação de `stdout`/`stderr` do caminho ACP (correção registrada em
 (remoto). O `stderr` do agente é herdado pelo nó e permanece observável no sink de
 diagnóstico do serviço, sem nunca chegar ao parser JSON-RPC. O caminho Codex mantém o
 merge, porque depende dele desde o upstream.
+
+| `elixir/Makefile` | alterado (aditivo) | alvo `cline-deepseek-e2e` (fase 5): o mesmo turno real do `cline-acp-e2e`, exigindo o provedor DeepSeek pelo registro de sessão do agente; pago e opt-in, fora de `make all`/CI | não |
+| `elixir/README.md` | alterado | documenta o alvo `cline-deepseek-e2e` e onde o mecanismo do provedor/credencial está registrado | não |
+| `elixir/test/symphony_elixir/cline_deepseek_e2e_test.exs` | novo | teste opt-in de integração real com o provedor DeepSeek (fase 5): efeito determinístico + `provider`/`model` do registro de sessão do agente + teardown; nunca autentica em nome do agente e nunca carrega credencial | não |
+| `docs/fork/cline-acp-integration.md` | alterado | §8: mecanismo do provedor medido no Cline `3.0.65` (`CLINE_PROVIDER`/`CLINE_MODEL`/`CLINE_API_KEY`, `authMethods` do ACP), evidência do teste opt-in e **resultado da execução real da fase 5** (`1 test, 0 failures`, `provider=deepseek`/`model=deepseek-v4-flash`) | não |
+| `docs/fork/README.md` | alterado | status da fase 5 (mecanismo medido, teste opt-in e turno real executado com sucesso) | não |
+| `docs/fork/divergences.md` | alterado | este registro | não |
 
 ## Regras do registro
 

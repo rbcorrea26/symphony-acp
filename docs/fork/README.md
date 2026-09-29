@@ -47,8 +47,21 @@ segue ao dono do ambiente; nada de credencial entrou no repositório, no workflo
 log. Duas ressalvas medidas estão registradas em
 [cline-acp-integration.md](cline-acp-integration.md): o `--data-dir` do pipeline **não**
 isolou credencial/estado do Cline nesta versão (a reconciliação é da plataforma) e o
-Cline deixa um *hub daemon* destacado após o turno (comportamento do agente). DeepSeek
-continua fase 5.
+Cline deixa um *hub daemon* destacado após o turno (comportamento do agente).
+
+**Fase 5 — provedor inicial (DeepSeek): concluída no fork, com turno real pago.** O
+mecanismo do provedor no modo ACP foi medido no binário `3.0.65` instalado
+(`CLINE_PROVIDER`/`CLINE_MODEL`/`CLINE_API_KEY`; `deepseek` não está nas `authMethods`
+do ACP, então a credencial do provedor é entregue ao processo do agente pelo wrapper do
+runtime isolado da plataforma) e **nenhuma alteração de código ACP foi necessária**. O
+teste opt-in `make cline-deepseek-e2e` foi executado com sucesso (`1 test, 0 failures`)
+exigindo, além do turno real, que o registro de sessão do próprio agente no estado
+isolado diga `provider == "deepseek"` com o modelo esperado — um turno que caísse em
+outro provedor falha em vez de passar. O mecanismo, o resultado e o que ficou fora de
+escopo estão em [cline-acp-integration.md](cline-acp-integration.md) §8; a decisão, o
+roadmap e o contrato de segredo continuam na plataforma
+(`agentic-dev-environment`, ADR-0003) — inclusive o formato `KEY=VALUE` sem aspas, que a
+execução real exigiu passar a verificar.
 
 ## 2. Relação `origin` / `upstream`
 

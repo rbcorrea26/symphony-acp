@@ -49,9 +49,18 @@ presente. Qualquer outro caso falha o dispatch em vez de rodar um worker inútil
   issue com backoff). Como a issue continua em estado ativo até o handoff, use
   `agent.max_turns:` pequeno para não encadear turnos pagos enquanto o item não é
   entregue;
-- **aprovação ACP**: execução headless exige `acp.auto_approve_requests: true`; com o
-  default `false` o agente pede permissão, o cliente nega (fail-closed) e o run
-  termina em `{:approval_required, _}` sem produzir nada (comportamento medido).
+- **aprovação ACP (risco declarado, não contenção)**: execução headless exige
+  `acp.auto_approve_requests: true`; com o default `false` o agente pede permissão, o
+  cliente nega (fail-closed) e o run termina em `{:approval_required, _}` sem produzir
+  nada (comportamento medido). Auto-aprovar **não** restringe o processo do agente: o
+  ACP não promete sandbox, o `cwd` validado sob o workspace root é diretório de
+  trabalho e não barreira de filesystem, não há isolamento de filesystem/processo/rede
+  e o agente herda os privilégios normais do usuário que executa o pipeline. O que
+  existe: o token do tracker é removido do processo do agente (`unset`) e o cliente ACP
+  não anuncia capabilities `fs`/`terminal` — o que limita o que o agente pediria ao
+  Symphony, não o que ele faz por conta própria. Antes do primeiro consumidor real, a
+  política de contenção precisa ser revisada/aceita ou substituída por contenção real:
+  issue `rbcorrea26/agentic-dev-environment#26`.
 
 ## Evidência da execução real (fase 6)
 

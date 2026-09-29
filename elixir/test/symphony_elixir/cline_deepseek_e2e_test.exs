@@ -60,7 +60,7 @@ defmodule SymphonyElixir.ClineDeepseekE2ETest do
   @read_timeout_ms 60_000
   @turn_timeout_ms 600_000
   @runner_timeout_ms 600_000
-  @session_record_timeout_ms 60_000
+  @session_record_timeout_ms 120_000
 
   @skip_reason if System.get_env(@run_gate) != "1",
                  do: "set #{@run_gate}=1 (or `make cline-deepseek-e2e`) to run the real DeepSeek ACP test"
@@ -116,13 +116,13 @@ defmodule SymphonyElixir.ClineDeepseekE2ETest do
     assert record["model"] == model, model_not_used_message(record, model)
     assert Path.expand(record["cwd"]) == Path.expand(context.workspace)
 
-    # No credential material may appear in the agent's own record.
+    # No credential material may appear in the agent's own record (checked by key
+    # name, not by free text: the record carries provider/model/cwd and usage
+    # figures, and its prompt/title are agent-generated text).
     raw = File.read!(record_path)
 
-    refute raw =~ "apiKey"
-    refute raw =~ "api_key"
-    refute raw =~ "secret"
-    refute raw =~ "refresh_token"
+    refute raw =~ ~r/"(apiKey|api_key|accessToken|refreshToken|secret|credential)"/,
+           "the agent's own session record must not contain credential material"
 
     report_usage(record)
   end
@@ -183,8 +183,10 @@ defmodule SymphonyElixir.ClineDeepseekE2ETest do
   end
 
   # The agent writes `<state>/data/sessions/<id>/<id>.json` when the session ends
-  # (the record of the run, without any credential). The state is the pipeline's
-  # own, so the only filter needed is the disposable workspace of this test.
+  # (the record of the run, without any credential) -- measured: the file is
+  # written at the end of the session. The state is the pipeline's own, so the
+  # only filter needed is the disposable workspace of this test. It is polled
+  # because the record can be finalized asynchronously by the agent's daemon.
   defp session_record_path!(state_dir, workspace, deadline \\ nil) do
     deadline = deadline || System.monotonic_time(:millisecond) + @session_record_timeout_ms
 

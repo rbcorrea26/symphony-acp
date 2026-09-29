@@ -58,9 +58,13 @@ presente. Qualquer outro caso falha o dispatch em vez de rodar um worker inútil
   e o agente herda os privilégios normais do usuário que executa o pipeline. O que
   existe: o token do tracker é removido do processo do agente (`unset`) e o cliente ACP
   não anuncia capabilities `fs`/`terminal` — o que limita o que o agente pediria ao
-  Symphony, não o que ele faz por conta própria. Antes do primeiro consumidor real, a
-  política de contenção precisa ser revisada/aceita ou substituída por contenção real:
-  issue `rbcorrea26/agentic-dev-environment#26`.
+  Symphony, não o que ele faz por conta própria. Essa ressalva foi resolvida **na
+  plataforma** depois desta prova (fase 6b, issue `rbcorrea26/agentic-dev-environment#26`):
+  `acp.command` passa a apontar para o wrapper contido
+  (`$HOME/automation/bin/cline-sandboxed --acp`), que monta uma allowlist de filesystem
+  com bubblewrap antes de lançar o agente
+  ([ADR-0008](https://github.com/rbcorrea26/agentic-dev-environment/blob/main/docs/architecture/adr/0008-contencao-do-agente-acp.md)).
+  Nenhum código deste fork mudou; a rede continua compartilhada com o host.
 
 ## Evidência da execução real (fase 6)
 
@@ -71,7 +75,7 @@ Rodada real contra o repositório descartável
 | Passo | Resultado observado |
 |---|---|
 | tracker → workspace | issue consumida pelo poll; workspace isolado por issue em `~/automation/workspaces/<projeto>/GH-1`, com clone via `after_create` (o clone canônico não é tocado) |
-| executor | `Executor.Acp` → `ACP.Client` → `~/automation/bin/cline --acp` → DeepSeek; `provider=deepseek`, `model=deepseek-v4-flash` no registro de sessão do próprio agente |
+| executor | `Executor.Acp` → `ACP.Client` → `~/automation/bin/cline --acp` → DeepSeek; `provider=deepseek`, `model=deepseek-v4-flash` no registro de sessão do próprio agente (desde a fase 6b o comando canônico é o wrapper contido `~/automation/bin/cline-sandboxed --acp`, sem mudança neste fork) |
 | turno | `turn=1/1`, alteração determinística de `answer.sh` (`echo "42"`) |
 | gates | `scripts/agent/preflight.sh --gates` do próprio projeto, exit 0 (inclui o teste do projeto) |
 | publicação | branch `pipeline/gh-1` + Draft PR criada **pelo pipeline**; diff somente `answer.sh` |

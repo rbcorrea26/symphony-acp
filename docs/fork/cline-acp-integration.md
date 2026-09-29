@@ -20,6 +20,25 @@ duplica a análise documental ([acp-analysis.md](acp-analysis.md)).
 | Fase 4 (integração Cline) no fork | **concluída** (turno real, efeito verificado, teardown) |
 | Autenticação do agente | passo humano, feito **fora** do Symphony; dependência do runtime (§5) |
 | DeepSeek (provedor inicial, fase 5) | **provado em turno real**: `provider=deepseek` e `model=deepseek-v4-flash` conferidos no registro de sessão do agente; teste opt-in pago `make cline-deepseek-e2e` (§8) |
+| Contenção do agente (fase 6b, plataforma) | fora deste fork: `acp.command` passa a apontar para o wrapper contido da plataforma (ADR-0008 dela). **Nenhum código deste repositório mudou** (§0) |
+
+### 0. Fronteira do comando ACP (atualização da plataforma, issue #26)
+
+Depois da fase 6, a plataforma
+(`rbcorrea26/agentic-dev-environment`) decidiu a política de contenção do agente ACP
+headless no
+[ADR-0008](https://github.com/rbcorrea26/agentic-dev-environment/blob/main/docs/architecture/adr/0008-contencao-do-agente-acp.md):
+o `acp.command` canônico passou a ser **`$HOME/automation/bin/cline-sandboxed --acp`**, um
+wrapper que monta uma allowlist de filesystem (bubblewrap) antes de lançar o Cline — com
+o workspace da issue RW, HOME sintético e o estado do Cline da execução isolado.
+
+Isso é **drop-in do ponto de vista deste fork**: `Executor.Acp`/`ACP.Client` continuam
+genéricos, lançando o comando configurado por stdio, sem código novo e sem conhecimento
+da sandbox. As medições das fases 4 e 5 (§2 e §5 abaixo) foram feitas **antes** dessa
+mudança, com o wrapper `~/automation/bin/cline`; elas descrevem o comportamento do Cline
+`3.0.65` e do protocolo, e continuam válidas. O wrapper contido **não** é isolamento de
+rede: a rede é compartilhada com o host por decisão da plataforma (risco residual
+declarado no ADR-0008 dela).
 
 Provado nesta verificação: `initialize`, `session/new`, `session/prompt` e
 `session/update` reais; resposta real do modelo; alteração real no workspace descartável

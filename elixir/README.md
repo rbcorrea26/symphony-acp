@@ -177,7 +177,14 @@ Notes:
     commands through it, and a request for one of those methods gets an explicit JSON-RPC error
     and fails the turn;
   - there is **no ACP sandbox**: `codex.thread_sandbox`, `codex.turn_sandbox_policy` and
-    `codex.approval_policy` are not sent to the agent (the protocol has no such fields);
+    `codex.approval_policy` are not sent to the agent (the protocol has no such fields).
+    Filesystem containment for a headless, auto-approved agent is **not** a protocol
+    feature: the platform ships it outside the protocol, by pointing `acp.command` at a
+    contained launcher (`$HOME/automation/bin/cline-sandboxed --acp`, filesystem
+    allowlist built with bubblewrap — see
+    [agentic-dev-environment ADR-0008](https://github.com/rbcorrea26/agentic-dev-environment/blob/main/docs/architecture/adr/0008-contencao-do-agente-acp.md)).
+    This executor stays generic: it launches whatever `acp.command` says. The shared
+    network of that launcher is **not** network isolation;
   - `auth_required` (JSON-RPC error `-32000`) blocks the run with `{:acp_auth_required, methods}`
     and expects human authentication of the agent; Symphony stores no credential;
   - tool calls are reported as notifications but never executed or blocked by Symphony, and there
@@ -458,7 +465,9 @@ process is gone after teardown. Optional environment variables:
 
 - `SYMPHONY_CLINE_ACP_COMMAND` overrides `acp.command`. The default is the platform
   wrapper `$HOME/automation/bin/cline --acp` — the pipeline's isolated runtime
-  (binary/Node), never the user's personal installation;
+  (binary/Node), never the user's personal installation. The platform's canonical
+  command is now the **contained** launcher
+  (`$HOME/automation/bin/cline-sandboxed --acp`); both are drop-in for this test;
 - `SYMPHONY_RUN_CLINE_ACP_E2E=1` is the gate the target sets (without it the file is
   skipped).
 

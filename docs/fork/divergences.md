@@ -38,6 +38,15 @@ produção: o executor ACP e o cliente ACP seguem intocados — o provedor/crede
 configuração da plataforma, entregues ao processo do agente pelo wrapper do runtime
 isolado. A fragilidade descoberta na execução real (valor de credencial entre aspas) foi
 corrigida **na plataforma**, não aqui.
+
+A **fase 6b** (contenção do agente ACP headless, issue
+`rbcorrea26/agentic-dev-environment#26`) também pertence à plataforma e **não** adiciona
+divergência neste fork: `acp.command` passou a apontar para o wrapper contido
+`$HOME/automation/bin/cline-sandboxed --acp`, que monta uma allowlist de filesystem com
+bubblewrap. `Executor.Acp`/`ACP.Client` seguem genéricos (lançam o comando configurado,
+sem conhecer a sandbox) e nenhum arquivo deste repositório mudou de comportamento — as
+mudanças são de documentação (`docs/fork/cline-acp-integration.md`,
+`docs/fork/delivery-and-promotion.md`, `docs/fork/README.md` e este registro).
 Arquivos **não** listados abaixo são idênticos à base registrada e
 seguem a documentação upstream como autoridade.
 

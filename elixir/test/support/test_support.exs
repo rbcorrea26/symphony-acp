@@ -97,6 +97,7 @@ defmodule SymphonyElixir.TestSupport do
           tracker_project_slug: "project",
           tracker_assignee: nil,
           tracker_required_labels: [],
+          tracker_provider: %{},
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           poll_interval_ms: 30_000,
@@ -122,6 +123,7 @@ defmodule SymphonyElixir.TestSupport do
           hook_after_run: nil,
           hook_before_remove: nil,
           hook_timeout_ms: 60_000,
+          delivery: nil,
           observability_enabled: true,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
@@ -138,6 +140,7 @@ defmodule SymphonyElixir.TestSupport do
     tracker_project_slug = Keyword.get(config, :tracker_project_slug)
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_required_labels = Keyword.get(config, :tracker_required_labels)
+    tracker_provider = Keyword.get(config, :tracker_provider)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
@@ -163,6 +166,7 @@ defmodule SymphonyElixir.TestSupport do
     hook_after_run = Keyword.get(config, :hook_after_run)
     hook_before_remove = Keyword.get(config, :hook_before_remove)
     hook_timeout_ms = Keyword.get(config, :hook_timeout_ms)
+    delivery = Keyword.get(config, :delivery)
     observability_enabled = Keyword.get(config, :observability_enabled)
     observability_refresh_ms = Keyword.get(config, :observability_refresh_ms)
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
@@ -180,6 +184,7 @@ defmodule SymphonyElixir.TestSupport do
         "  project_slug: #{yaml_value(tracker_project_slug)}",
         "  assignee: #{yaml_value(tracker_assignee)}",
         "  required_labels: #{yaml_value(tracker_required_labels)}",
+        "  provider: #{yaml_value(tracker_provider)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
         "polling:",
@@ -203,6 +208,7 @@ defmodule SymphonyElixir.TestSupport do
         executor_yaml(executor_kind),
         acp_yaml(acp_command, acp_auto_approve_requests),
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
+        delivery_yaml(delivery),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
         "---",
@@ -226,6 +232,30 @@ defmodule SymphonyElixir.TestSupport do
       "  auto_approve_requests: #{yaml_value(auto_approve_requests)}"
     ]
     |> Enum.join("\n")
+  end
+
+  defp delivery_yaml(nil), do: nil
+
+  defp delivery_yaml(overrides) when is_list(overrides) do
+    defaults = [
+      enabled: true,
+      gates: "true",
+      gates_timeout_ms: 60_000,
+      base_branch: "main",
+      branch_prefix: "pipeline/",
+      handoff_label: "pipeline:ready-for-human",
+      remove_entry_labels: true,
+      commit_name: "agentic pipeline",
+      commit_email: "pipeline@users.noreply.github.com",
+      ci_timeout_ms: 60_000,
+      ci_poll_interval_ms: 10,
+      request_review: true
+    ]
+
+    defaults
+    |> Keyword.merge(overrides)
+    |> Enum.map_join("\n", fn {key, value} -> "  #{key}: #{yaml_value(value)}" end)
+    |> then(&"delivery:\n#{&1}")
   end
 
   defp yaml_value(value) when is_binary(value) do

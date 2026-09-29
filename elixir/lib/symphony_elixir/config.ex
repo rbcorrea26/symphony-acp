@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
-  alias SymphonyElixir.{Config.Schema, Executor, Tracker}
+  alias SymphonyElixir.{Config.Schema, Delivery, Executor, Tracker}
   alias SymphonyElixir.{Workflow, WorkflowStore}
 
   @default_prompt_template """
@@ -119,8 +119,9 @@ defmodule SymphonyElixir.Config do
     if is_nil(settings.tracker.kind) do
       {:error, :missing_tracker_kind}
     else
-      with :ok <- Tracker.validate_config(settings.tracker) do
-        Executor.validate_config(settings)
+      with :ok <- Tracker.validate_config(settings.tracker),
+           :ok <- Executor.validate_config(settings) do
+        Delivery.validate_config(settings)
       end
     end
   end

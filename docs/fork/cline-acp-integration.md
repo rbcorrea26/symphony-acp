@@ -19,7 +19,7 @@ duplica a análise documental ([acp-analysis.md](acp-analysis.md)).
 | Cline CLI como **agente ACP** (`acp.command`) | **verificado em turno real** |
 | Fase 4 (integração Cline) no fork | **concluída** (turno real, efeito verificado, teardown) |
 | Autenticação do agente | passo humano, feito **fora** do Symphony; dependência do runtime (§5) |
-| DeepSeek (provedor inicial, fase 5) | mecanismo **medido** e configurado pela plataforma; teste opt-in pronto (§8); turno real pago **ainda não executado** (falta a credencial do provedor no arquivo de segredos) |
+| DeepSeek (provedor inicial, fase 5) | **provado em turno real**: `provider=deepseek` e `model=deepseek-v4-flash` conferidos no registro de sessão do agente; teste opt-in pago `make cline-deepseek-e2e` (§8) |
 
 Provado nesta verificação: `initialize`, `session/new`, `session/prompt` e
 `session/update` reais; resposta real do modelo; alteração real no workspace descartável
@@ -276,10 +276,31 @@ Uso/custo do turno (quando existir no registro) é impresso **apenas** como evid
 operacional transitória: não é asserido e não é versionado
 (`agentic-dev-environment/docs/architecture/source-of-truth.md`).
 
-**Estado:** o mecanismo está medido e implementado (plataforma + este teste opt-in); a
-execução real paga com DeepSeek **ainda não foi executada** neste ambiente porque a
-credencial do provedor não está preenchida no arquivo de segredos do usuário. A fase 5
-segue `pendente` no roadmap da plataforma até esse turno acontecer.
+### Resultado (prova real executada)
+
+A execução real foi feita com o wrapper do runtime isolado da plataforma
+(`acp.command` default) e o segredo real **já configurado sem aspas**:
+
+```bash
+cd ~/automation/src/symphony-acp/elixir && make cline-deepseek-e2e
+# 1 test, 0 failures
+```
+
+O turno percorreu o caminho de produção completo
+(`AgentRunner` → `Executor.Acp` → `ACP.Client` → `Cline → DeepSeek`) em projeto
+descartável e foi aprovado pelos critérios acima: `bash answer.sh` → exatamente `42`,
+apenas `answer.sh` alterado, eventos `:session_started`/`:turn_completed`, processo do
+agente encerrado e `provider == "deepseek"` com o modelo esperado lidos no registro de
+sessão do próprio agente. **Fase 5 concluída no fork**; a fase 6 do roadmap (teste local
+descartável do pipeline inteiro) é o próximo passo da **plataforma**, não deste fork.
+
+A execução real também revelou uma fragilidade **da plataforma** (não deste fork):
+`DEEPSEEK_API_KEY="sk-..."` era aceito pelo carregador de ambiente e as aspas viajavam
+dentro do valor entregue ao agente, e a API respondia
+`Authentication Fails ... api key ... is invalid`. O contrato `KEY=VALUE`, sem aspas,
+passou a ser verificado (e nunca "corrigido" em silêncio) na plataforma — sem nenhuma
+mudança nesta camada ACP (`agentic-dev-environment`: ADR-0003,
+`docs/operations/troubleshooting.md` §19).
 
 ## 9. Referências
 

@@ -29,7 +29,7 @@ symphony [--logs-root <path>] [--port <port>]
 
 | Opção | Efeito |
 |---|---|
-| `--exit-when-idle` | encerra o processo quando o ciclo não tem mais nada a fazer (nada rodando, nada em retry, nada bloqueado e nenhum candidato despachável) |
+| `--exit-when-idle` | encerra o processo quando o ciclo não tem mais nada a fazer (nada rodando, nada em retry, nada bloqueado, nenhum claim pendente e nenhum candidato despachável) |
 | `--issue <id>` | limita o ciclo a **uma** issue (ex.: `GH-64`); sem ela, o comportamento upstream (todos os candidatos) permanece |
 | `--resume-only` | avança um estado assíncrono (CI, review, arquiteto) do candidato **já publicado**, sem rodar os turnos do agente de novo |
 | `--max-runtime-seconds <n>` | teto **gracioso** de duração do processo (`n` > 0; `0` e negativo são recusados como uso inválido); ao atingir, encerra com código 3 em vez de ficar preso |

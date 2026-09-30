@@ -126,7 +126,11 @@ defmodule SymphonyElixir.OnDemandTest do
         workspace_path: nil
       }
 
-      %{state | retry_attempts: Map.put(state.retry_attempts, issue.id, entry)}
+      %{
+        state
+        | retry_attempts: Map.put(state.retry_attempts, issue.id, entry),
+          claimed: MapSet.put(state.claimed, issue.id)
+      }
     end)
 
     retry_token
@@ -360,6 +364,34 @@ defmodule SymphonyElixir.OnDemandTest do
 
       assert log =~ "Runtime cap reached; skipping dispatch of issue_id=issue-4"
       refute log =~ "Dispatching issue to agent"
+    end
+
+    test "retry adiado pelo prazo nao vira ciclo idle (encerra com 3, nao 0)" do
+      clear_on_demand_env()
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        poll_interval_ms: 30_000
+      )
+
+      issue = resume_issue("issue-5", "GH-75")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      Application.put_env(:symphony_elixir, :issue_filter, "GH-9999")
+      Application.put_env(:symphony_elixir, :exit_when_idle, true)
+      Application.put_env(:symphony_elixir, :max_runtime_seconds, 1)
+      shutdown_to_test()
+
+      pid = start_orchestrator()
+      retry_token = install_retry(pid, issue)
+      wait_for_poll_cycle(pid)
+      expire_deadline(pid)
+
+      send(pid, {:retry_issue, "issue-5", retry_token})
+
+      # O retry sai de `retry_attempts` e o despacho e recusado pelo prazo: o item
+      # continua reivindicado, entao o ciclo nao pode se declarar idle.
+      assert_receive {:shutdown, 3}, 5_000
+      refute_receive {:shutdown, 0}, 500
     end
   end
 

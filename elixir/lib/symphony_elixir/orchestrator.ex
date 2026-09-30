@@ -1731,11 +1731,13 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  # Idle de verdade: nada rodando, nada em retry e nada bloqueado. Um item bloqueado
-  # mantem o processo vivo de proposito (o control plane ainda tem trabalho no
-  # modelo); com `--max-runtime-seconds` o ciclo encerra em 3 em vez de ficar preso.
-  defp idle_state?(%State{running: running, retry_attempts: retries, blocked: blocked}) do
-    map_size(running) == 0 and map_size(retries) == 0 and map_size(blocked) == 0
+  # Idle de verdade: nada rodando, nada em retry, nada bloqueado e nenhum claim pendente.
+  # Item bloqueado e claim pendente mantem o processo vivo de proposito (ainda ha trabalho
+  # no modelo); o claim entra na invariante porque um retry adiado pelo teto sai de
+  # `retry_attempts` antes de o despacho ser recusado - sem ele, o ciclo seguinte se
+  # declararia idle e encerraria com `0` mesmo com trabalho esperando.
+  defp idle_state?(%State{running: running, retry_attempts: retries, blocked: blocked, claimed: claimed}) do
+    map_size(running) == 0 and map_size(retries) == 0 and map_size(blocked) == 0 and MapSet.size(claimed) == 0
   end
 
   defp deadline_expired?(%State{deadline_ms: nil}), do: false

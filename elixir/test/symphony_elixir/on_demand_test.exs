@@ -108,6 +108,30 @@ defmodule SymphonyElixir.OnDemandTest do
     end)
   end
 
+  # Instala uma entrada de retry como se o run anterior tivesse falhado, para exercitar
+  # o caminho de retry (`do_dispatch_issue/4`) sem depender do backoff real.
+  defp install_retry(pid, issue) do
+    retry_token = make_ref()
+
+    :sys.replace_state(pid, fn state ->
+      entry = %{
+        attempt: 1,
+        timer_ref: nil,
+        retry_token: retry_token,
+        due_at_ms: System.monotonic_time(:millisecond),
+        identifier: issue.identifier,
+        issue_url: nil,
+        error: nil,
+        worker_host: nil,
+        workspace_path: nil
+      }
+
+      %{state | retry_attempts: Map.put(state.retry_attempts, issue.id, entry)}
+    end)
+
+    retry_token
+  end
+
   defp resume_issue(id, identifier) do
     %Issue{
       id: id,
@@ -304,6 +328,38 @@ defmodule SymphonyElixir.OnDemandTest do
 
       assert_receive {:shutdown, 0}, 5_000
       refute_receive {:shutdown, 3}, 1_000
+    end
+
+    test "retry tambem respeita o prazo (nenhuma porta de despacho inicia run depois do teto)" do
+      clear_on_demand_env()
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        poll_interval_ms: 30_000
+      )
+
+      issue = resume_issue("issue-4", "GH-74")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      # O poll nunca despacha este item (o filtro nao casa): o unico caminho que o ve e
+      # o retry, que busca a issue por id, e ele tambem tem que respeitar o teto.
+      Application.put_env(:symphony_elixir, :issue_filter, "GH-9999")
+      Application.put_env(:symphony_elixir, :max_runtime_seconds, 1)
+      shutdown_to_test()
+
+      pid = start_orchestrator()
+      wait_for_poll_cycle(pid)
+
+      expire_deadline(pid)
+      retry_token = install_retry(pid, issue)
+
+      log =
+        capture_log(fn ->
+          send(pid, {:retry_issue, "issue-4", retry_token})
+          assert_receive {:shutdown, 3}, 5_000
+        end)
+
+      assert log =~ "Runtime cap reached; skipping dispatch of issue_id=issue-4"
+      refute log =~ "Dispatching issue to agent"
     end
   end
 

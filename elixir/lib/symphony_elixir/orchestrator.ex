@@ -825,7 +825,7 @@ defmodule SymphonyElixir.Orchestrator do
     issues
     |> sort_issues_for_dispatch()
     |> Enum.reduce(state, fn issue, state_acc ->
-      if dispatchable_within_deadline?(issue, state_acc, active_states, terminal_states) do
+      if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
         dispatch_issue(state_acc, issue)
       else
         state_acc
@@ -870,13 +870,6 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
-
-  # `--max-runtime-seconds` e um prazo: depois dele o ciclo nao inicia trabalho novo
-  # (ele vai encerrar), mas a avaliacao de candidatos continua valendo - e o que
-  # permite um ciclo comprovadamente idle encerrar com `0` em vez de `3`.
-  defp dispatchable_within_deadline?(issue, %State{} = state, active_states, terminal_states) do
-    should_dispatch_issue?(issue, state, active_states, terminal_states) and not deadline_expired?(state)
-  end
 
   # `--issue <identificador>`: um ciclo on-demand atende UMA issue. Sem filtro, o
   # comportamento upstream (todos os candidatos) permanece intacto.
@@ -996,15 +989,22 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
-    recipient = self()
+    if deadline_expired?(state) do
+      # `--max-runtime-seconds` e um prazo: nenhuma porta de entrada de despacho
+      # (poll ou retry) inicia trabalho novo depois dele - o processo vai encerrar.
+      Logger.info("Runtime cap reached; skipping dispatch of #{issue_context(issue)}")
+      state
+    else
+      recipient = self()
 
-    case select_worker_host(state, preferred_worker_host) do
-      :no_worker_capacity ->
-        Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
-        state
+      case select_worker_host(state, preferred_worker_host) do
+        :no_worker_capacity ->
+          Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
+          state
 
-      worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+        worker_host ->
+          spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+      end
     end
   end
 

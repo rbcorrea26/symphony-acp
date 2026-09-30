@@ -48,6 +48,11 @@ as flags, o comportamento é exatamente o upstream (poll contínuo).
 O dispatcher da plataforma interpreta esses códigos: `3` é "chama de novo depois" e `1` é
 falha que merece atenção do operador.
 
+O código pedido pelo ciclo é registrado por `Shutdown.request/2` e **preservado até o fim do
+processo**: quando a árvore de supervisão cai (`:shutdown`), a CLI encerra a VM com esse código,
+não com o default residente. Sem ciclo sob demanda não existe registro e o mapeamento residente
+do upstream continua (`:normal` → `0`, resto → `1`).
+
 ## 4. Por que `resume-only`
 
 Review e CI são **assíncronos**. Quando o pipeline retoma a issue no ciclo seguinte, o
@@ -61,7 +66,7 @@ ciclo executa apenas a etapa de entrega (`SymphonyElixir.Delivery`) sobre o que 
 | Arquivo | Natureza | Comportamento upstream afetado? |
 |---|---|---|
 | `elixir/lib/symphony_elixir/shutdown.ex` | novo | não (só é chamado pelo modo sob demanda) |
-| `elixir/lib/symphony_elixir/cli.ex` | alterado (aditivo) | não: as quatro flags são novas; sem elas, o fluxo é o upstream |
+| `elixir/lib/symphony_elixir/cli.ex` | alterado (aditivo) | não: as quatro flags são novas; sem elas, o fluxo é o upstream. O único ponto tocado no caminho residente é o encerramento, que passa a preservar o código registrado pelo ciclo quando ele existe |
 | `elixir/lib/symphony_elixir/orchestrator.ex` | alterado | **sim, mínimo**: o ciclo de poll passa a devolver também "houve algo despachável neste ciclo" (para decidir o idle) e o filtro `--issue` só age quando configurado |
 | `elixir/lib/symphony_elixir/agent_runner.ex` | alterado (aditivo) | não: `resume-only` apenas pula os turnos do agente; sem a flag nada muda |
 | `elixir/test/symphony_elixir/on_demand_test.exs` | novo | não |

@@ -17,12 +17,17 @@ defmodule SymphonyElixir.CLI do
   ]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
+  # `set_run_options` is optional on purpose: the five upstream hooks are always
+  # provided, while the on-demand lifecycle options (fork extension) are only
+  # published when the runtime wires them — callers that do not care about the
+  # fork extension keep passing the upstream shape untouched.
   @type deps :: %{
-          file_regular?: (String.t() -> boolean()),
-          set_workflow_file_path: (String.t() -> :ok | {:error, term()}),
-          set_logs_root: (String.t() -> :ok | {:error, term()}),
-          set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
-          ensure_all_started: (-> ensure_started_result())
+          required(:file_regular?) => (String.t() -> boolean()),
+          required(:set_workflow_file_path) => (String.t() -> :ok | {:error, term()}),
+          required(:set_logs_root) => (String.t() -> :ok | {:error, term()}),
+          optional(:set_run_options) => (keyword() -> :ok),
+          required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
+          required(:ensure_all_started) => (-> ensure_started_result())
         }
 
   @spec main([String.t()]) :: no_return()
@@ -246,10 +251,10 @@ defmodule SymphonyElixir.CLI do
 
         receive do
           {:DOWN, ^ref, :process, ^pid, reason} ->
-            case reason do
-              :normal -> System.halt(0)
-              _ -> System.halt(1)
-            end
+            # The on-demand cycle ends the VM with the code it asked for (see
+            # `SymphonyElixir.Shutdown`); a resident Symphony keeps the upstream
+            # mapping of the supervision tree exit reason.
+            System.halt(SymphonyElixir.Shutdown.exit_code_for_reason(reason))
         end
     end
   end

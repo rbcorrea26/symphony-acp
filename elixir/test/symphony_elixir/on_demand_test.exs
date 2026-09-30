@@ -47,6 +47,7 @@ defmodule SymphonyElixir.OnDemandTest do
       Application.delete_env(:symphony_elixir, :issue_filter)
       Application.delete_env(:symphony_elixir, :max_runtime_seconds)
       Application.delete_env(:symphony_elixir, :shutdown_fun)
+      Application.delete_env(:symphony_elixir, :shutdown_exit_code)
     end)
   end
 
@@ -143,6 +144,39 @@ defmodule SymphonyElixir.OnDemandTest do
 
       assert :ok = Shutdown.request(0, "teste")
       assert_received {:stopped, 0}
+    end
+
+    test "o codigo pedido pelo ciclo vence o default residente no fim do processo" do
+      clear_on_demand_env()
+      shutdown_to_test()
+
+      assert :ok = Shutdown.request(3, "teto de duracao atingido")
+
+      # A CLI encerra a VM quando a arvore de supervisao cai (motivo `:shutdown`):
+      # sem o registro, o codigo do ciclo seria trocado pelo default residente 1.
+      assert Shutdown.exit_code_for_reason(:shutdown) == 3
+    end
+
+    test "sem ciclo sob demanda o default residente do upstream e preservado" do
+      clear_on_demand_env()
+
+      assert Shutdown.exit_code_for_reason(:normal) == 0
+      assert Shutdown.exit_code_for_reason(:shutdown) == 1
+    end
+  end
+
+  describe "teto de duracao" do
+    test "atingir o teto encerra o ciclo com 3 (trabalho pode seguir pendente)" do
+      clear_on_demand_env()
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", poll_interval_ms: 50)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      Application.put_env(:symphony_elixir, :max_runtime_seconds, 1)
+      shutdown_to_test()
+
+      start_orchestrator()
+
+      assert_receive {:shutdown, 3}, 5_000
+      assert Shutdown.exit_code_for_reason(:shutdown) == 3
     end
   end
 

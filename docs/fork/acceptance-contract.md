@@ -57,6 +57,8 @@ Regras do parser (`SymphonyElixir.PipelineContract`):
 | chave escrita com aspas (`"scope_mode":`, `'scope_mode':`), com tag (`!!str`), com âncora ou com o indicador explícito (`? scope_mode`) | é a **mesma** chave que o decoder lê: presença, escopo e duplicidade continuam sendo verificadas |
 | uma mesma chave repetida no mapeamento (bloco, flow ou `? chave`) | `{:duplicate_field, "scope_mode"}` → reprova |
 | `pipeline_contract:` **dentro de um scalar** (exemplo em bloco de documentação) | não é declaração: o parser não vê a chave ali, então o corpo segue `:absent`; um bloco que não pode ser decodificado **e** cujo texto cita a chave é erro, nunca ausência |
+| conteúdo de block scalar (`key: \|`, `key: >-`, `- \|`) | é **texto**: a chave ou a âncora escrita dentro dele não conta (o escalar termina na primeira linha menos indentada) |
+| aspas simples escapada (`''`) dentro de scalar | continua sendo **um** scalar (`'docs/it''s &notes.md'` não é scalar + âncora) |
 | padrão que não é UTF-8 (ex.: um `!!binary`) | `{:invalid_pattern, _, :not_utf8}` → reprova (a comparação de paths é sobre UTF-8) |
 | tag YAML (`!foo`, `!ruby/object`, `!!python/...`) | `{:invalid_yaml, %{type: :unrecognized_node}}` → reprova |
 | âncora (`&name`) | `{:anchors_not_supported, "&name"}` → reprova (alias/expansão não têm uso no schema) |
@@ -253,6 +255,11 @@ ninguém aceitou.
   movem o escopo;
 - **symlink**: a leitura dos arquivos não rastreados usa `lstat` e recusa tudo que
   não for arquivo regular (um link não faz a varredura ler fora do workspace);
+  **arquivo regular que não pode ser lido** (permissão, corrida, I/O) não é
+  "varredura completa": ele conta como buraco no scan (o mesmo
+  `prohibition_scan_truncated`), porque pode conter uma proibição que a camada não
+  vê — diferente do symlink/diretório/dispositivo, cujo conteúdo não faz parte do
+  candidato e cuja recusa é intencional;
 - **segredos**: o texto dos findings é mascarado (`gho_*`, `ghp_*`, `github_pat_*`,
   `sk-*`, `x-access-token:`), truncado e sem quebras de linha antes de ir para log
   ou comentário; a saída das evidências não é persistida;

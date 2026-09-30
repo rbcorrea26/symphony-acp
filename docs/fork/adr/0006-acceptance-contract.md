@@ -176,6 +176,14 @@ reprovar: o candidato que está sendo retomado foi aceito pelo ciclo que o criou
 O relatório aparece no comentário de handoff e no log; nunca é inventado um
 "aceite verde".
 
+Esse "aceito pelo ciclo que o criou" é **verificado, não assumido**: o candidato do
+run reconciliado é o **HEAD local** do workspace (o conteúdo que este run tem em
+mãos) e o head observado da branch tem de ser exatamente ele. Um push de fora —
+antes ou durante a observação do CI — é recusado com `delivery_candidate_replaced`:
+o run não promove (nem rotula) um commit que ele não aceitou e cujos gates locais
+não rodaram aqui. É a mesma regra do run que publica: o veredicto pertence ao commit
+observado, e o observado tem de ser o aceito.
+
 ### 6. O veredicto é dado estruturado, não booleano
 
 O aceite devolve `SymphonyElixir.Delivery.Acceptance.Result`:

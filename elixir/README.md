@@ -348,7 +348,9 @@ pipeline_contract:
 - Candidate reads fail closed: a change set above 5 000 entries
   (`change_set_too_large`) or with a non-UTF-8 path (`change_set_not_utf8`) is an error
   instead of a partial verdict, and every scan bound reached is declared
-  (`change_scan_truncated`). A rename counts as two changes — the destination and the origin
+  (`change_scan_truncated`) — including an untracked regular file that could not be
+  read, which is a hole in the scan rather than a file "without findings". A rename
+  counts as two changes — the destination and the origin
   as a deletion, because the rename removed it — so authorizing only the new path does not
   authorize deleting the old one; a copy is only the destination.
 - The scope is evaluated again **after** the gates and the evidence commands, because they run
@@ -383,6 +385,9 @@ pipeline_contract:
   the observation finished. A push that lands during the observation invalidates it: the new
   head is not the commit the acceptance and the local gates validated, so the run fails
   (`delivery_candidate_replaced`) instead of promoting it with another candidate's verdict.
+  A **reconciled** run (a retry of an already published candidate, with no new change set)
+  binds the same way: its candidate is the local HEAD of the workspace, so a branch that
+  moved (a push from outside) is refused instead of being labeled with this run's verdict.
   No CI at all, a failing check or a timeout blocks the promotion.
 - State comes from GitHub (open pull request, ref, check runs, labels, comments), so a
   retry reconciles the existing candidate: no second branch, no second pull request, no

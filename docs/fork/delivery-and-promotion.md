@@ -36,7 +36,11 @@ O **candidato fica amarrado ao que foi aceito**: o aceite e os gates rodam no
 conteúdo do workspace que este run publica. Se o head da branch observado no fim da
 espera do CI for outro commit (um push concorrente), o run falha com
 `delivery_candidate_replaced` em vez de promover um head que ninguém aceitou; o
-retry reexecuta o aceite sobre o conteúdo e republica.
+retry reexecuta o aceite sobre o conteúdo e republica. O mesmo vale para o run
+**reconciliado** (retry de um candidato já publicado, sem change set novo): o
+candidato dele é o **HEAD local** — o conteúdo que este workspace aceita — e uma
+branch que andou (push de fora, antes ou durante a observação) é recusada com
+`delivery_candidate_replaced` em vez de receber os rótulos deste run.
 
 ## As três camadas de verificação
 

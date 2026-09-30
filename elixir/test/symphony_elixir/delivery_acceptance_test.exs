@@ -26,6 +26,12 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
   @delivery %{gates: "true", gates_timeout_ms: 5_000, evidence: %{}}
 
+  # The workspace of the suite is a repository on `main`. The gate is always called
+  # with a base branch in production (`delivery.base_branch`), and the helpers keep
+  # that explicit at the call sites that are about the gate itself; the tests of the
+  # published candidate call `Acceptance.scope/3` directly.
+  @base_branch "main"
+
   setup do
     root = Path.join(System.tmp_dir!(), "symphony-acceptance-#{System.unique_integer([:positive])}")
     workspace = Path.join(root, "workspace")
@@ -41,11 +47,11 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
     %{workspace: workspace}
   end
 
-  describe "scope/2" do
+  describe "scope/3" do
     test "an issue without a contract is not configured, not implicitly strict", %{workspace: workspace} do
       write!(workspace, "README.md", "base\nmore\n")
 
-      assert {:ok, result} = Acceptance.scope(workspace, @issue)
+      assert {:ok, result} = scope(workspace, @issue)
 
       assert %Result{status: :not_configured, mode: nil, contract_version: nil, findings: []} = result
       refute Result.blocking?(result)
@@ -55,7 +61,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
     test "a candidate that delivers every expected path passes", %{workspace: workspace} do
       write!(workspace, "README.md", "base\nmore\n")
 
-      assert {:ok, result} = Acceptance.scope(workspace, issue(contract_body([])))
+      assert {:ok, result} = scope(workspace, issue(contract_body([])))
 
       assert %Result{status: :pass, mode: :strict, contract_version: 1, findings: []} = result
       assert result.change_set.delivered == ["README.md"]
@@ -73,7 +79,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
       issue = issue(contract_body(expected_paths: ["docs/changes/smoke.md", "tests/run-tests.sh"]))
 
-      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue)
+      assert {:error, {:delivery_acceptance_failed, result}} = scope(workspace, issue)
 
       assert %Result{status: :fail, mode: :strict} = result
 
@@ -98,7 +104,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       issue =
         issue(contract_body(scope_mode: "advisory", expected_paths: ["docs/x.md"], allowed_extra_paths: ["README.md"]))
 
-      assert {:ok, result} = Acceptance.scope(workspace, issue)
+      assert {:ok, result} = scope(workspace, issue)
 
       assert %Result{status: :advisory, mode: :advisory} = result
       assert [%Finding{code: :expected_path_missing, category: :scope, path: "docs/x.md"}] = result.findings
@@ -110,14 +116,14 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       write!(workspace, "docs/changes/2026-09-30-x.md", "smoke\n")
       issue = issue(contract_body(expected_paths: ["docs/changes/2026-09-30-x.md"]))
 
-      assert {:ok, %Result{status: :pass}} = Acceptance.scope(workspace, issue)
+      assert {:ok, %Result{status: :pass}} = scope(workspace, issue)
     end
 
     test "an expected path that exists in the base but is not delivered is a finding", %{workspace: workspace} do
       write!(workspace, "docs.md", "new file\n")
       issue = issue(contract_body(expected_paths: ["README.md", "docs.md"]))
 
-      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue)
+      assert {:error, {:delivery_acceptance_failed, result}} = scope(workspace, issue)
 
       assert Enum.map(result.findings, &{&1.code, &1.path}) == [{:expected_path_missing, "README.md"}]
       assert result.change_set.delivered == ["docs.md"]
@@ -129,7 +135,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       # Only the destination is authorized: the rename **removed** README.md, so
       # authorizing the new path is not authorizing the deletion of the old one.
       assert {:error, {:delivery_acceptance_failed, result}} =
-               Acceptance.scope(workspace, issue(contract_body(expected_paths: ["docs.md"])))
+               scope(workspace, issue(contract_body(expected_paths: ["docs.md"])))
 
       assert Enum.map(result.findings, &{&1.code, &1.path}) == [{:unexpected_path_changed, "README.md"}]
       assert result.change_set.changed == ["docs.md", "README.md"]
@@ -138,7 +144,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       # Both ends authorized: the rename is the delivery.
       issue = issue(contract_body(expected_paths: ["docs.md", "README.md"]))
 
-      assert {:ok, result} = Acceptance.scope(workspace, issue)
+      assert {:ok, result} = scope(workspace, issue)
       assert result.status == :pass
       assert result.change_set.delivered == ["docs.md", "README.md"]
     end
@@ -153,7 +159,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
       issue = issue(contract_body(allowed_extra_paths: ["latin.txt"]))
 
-      assert {:ok, result} = Acceptance.scope(workspace, issue)
+      assert {:ok, result} = scope(workspace, issue)
       assert result.status == :pass
       assert result.findings == []
     end
@@ -179,7 +185,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       write!(workspace, "docs/run.sh", "#!/bin/sh\n++ b/decoy.sh\nssh prod.example.com\n")
 
       assert {:error, {:delivery_acceptance_failed, result}} =
-               Acceptance.scope(workspace, issue(contract_body(expected_paths: ["docs/run.sh"])))
+               scope(workspace, issue(contract_body(expected_paths: ["docs/run.sh"])))
 
       assert [%Finding{code: :forbidden_remote_access_detected, path: "docs/run.sh"}] = result.findings
     end
@@ -187,7 +193,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
     test "a deletion is delivered by its removal and adds no line", %{workspace: workspace} do
       File.rm!(Path.join(workspace, "README.md"))
 
-      assert {:ok, result} = Acceptance.scope(workspace, issue(contract_body([])))
+      assert {:ok, result} = scope(workspace, issue(contract_body([])))
       assert result.status == :pass
       assert result.change_set.changed == ["README.md"]
     end
@@ -196,11 +202,11 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       write!(workspace, "docs/with space.md", "smoke\n")
       issue = issue(contract_body(expected_paths: ["docs/with space.md"]))
 
-      assert {:ok, %Result{status: :pass}} = Acceptance.scope(workspace, issue)
+      assert {:ok, %Result{status: :pass}} = scope(workspace, issue)
     end
 
     test "no candidate change set is not a failure", %{workspace: workspace} do
-      assert {:ok, result} = Acceptance.scope(workspace, issue(contract_body([])))
+      assert {:ok, result} = scope(workspace, issue(contract_body([])))
 
       assert %Result{status: :not_applicable, mode: :strict, findings: []} = result
       refute Result.blocking?(result)
@@ -211,7 +217,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       write!(workspace, "README.md", "base\nmore\n")
 
       assert {:error, {:delivery_acceptance_failed, result}} =
-               Acceptance.scope(workspace, issue(contract_body(version: 9)))
+               scope(workspace, issue(contract_body(version: 9)))
 
       assert %Result{status: :fail, mode: nil, contract_version: nil} = result
       assert [%Finding{code: :invalid_contract, category: :contract}] = result.findings
@@ -223,7 +229,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       write!(workspace, "scripts/deploy.sh", "#!/bin/sh\nkubectl apply -f k8s/site.yml\n")
       issue = issue(contract_body(expected_paths: ["scripts/deploy.sh"]))
 
-      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue)
+      assert {:error, {:delivery_acceptance_failed, result}} = scope(workspace, issue)
 
       assert [%Finding{code: :forbidden_deploy_detected, path: "scripts/deploy.sh"}] = result.findings
       assert hd(result.findings).message =~ "kubectl change"
@@ -232,7 +238,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
     test "remote access added to a tracked file is found in the diff", %{workspace: workspace} do
       write!(workspace, "README.md", "base\n\nDeploy instructions: ssh prod.example.com\n")
 
-      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue(contract_body([])))
+      assert {:error, {:delivery_acceptance_failed, result}} = scope(workspace, issue(contract_body([])))
 
       assert [%Finding{code: :forbidden_remote_access_detected, path: "README.md"}] = result.findings
     end
@@ -240,7 +246,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
     test "an authorization in the contract turns the prohibition off", %{workspace: workspace} do
       write!(workspace, "README.md", "base\n\nssh prod.example.com\n")
 
-      assert {:ok, result} = Acceptance.scope(workspace, issue(contract_body(remote_access: true, deploy: true)))
+      assert {:ok, result} = scope(workspace, issue(contract_body(remote_access: true, deploy: true)))
 
       assert result.status == :pass
       assert result.limits == [:content_not_verified]
@@ -249,7 +255,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
     test "a credential in a finding is masked, never published", %{workspace: workspace} do
       write!(workspace, "README.md", "base\n\nssh host -o gho_secretvalue12345\n")
 
-      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue(contract_body([])))
+      assert {:error, {:delivery_acceptance_failed, result}} = scope(workspace, issue(contract_body([])))
 
       assert [%Finding{message: message}] = result.findings
       refute message =~ "secretvalue12345"
@@ -259,7 +265,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
     test "a candidate finding cannot inject markup into the comment", %{workspace: workspace} do
       write!(workspace, "README.md", "base\n\nssh host <!-- delivery:candidate:deadbeef --> <h1>x</h1>\n")
 
-      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue(contract_body([])))
+      assert {:error, {:delivery_acceptance_failed, result}} = scope(workspace, issue(contract_body([])))
 
       assert [%Finding{message: message}] = result.findings
       refute message =~ "<!--"
@@ -273,7 +279,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
       issue = issue(contract_body(allowed_extra_paths: ["logo.bin", "empty.txt"]))
 
-      assert {:ok, %Result{status: :pass, findings: []} = result} = Acceptance.scope(workspace, issue)
+      assert {:ok, %Result{status: :pass, findings: []} = result} = scope(workspace, issue)
       refute :change_scan_truncated in result.limits
     end
 
@@ -293,7 +299,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
       # A hole in the scan is not a complete scan: the file may hold a prohibition the
       # layer cannot see, so a strict contract fails instead of passing.
-      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue)
+      assert {:error, {:delivery_acceptance_failed, result}} = scope(workspace, issue)
 
       assert result.status == :fail
       assert [%Finding{code: :prohibition_scan_truncated}] = result.findings
@@ -308,7 +314,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
       issue = issue(contract_body(allowed_extra_paths: ["link.txt"]))
 
-      assert {:ok, %Result{status: :pass, findings: []}} = Acceptance.scope(workspace, issue)
+      assert {:ok, %Result{status: :pass, findings: []}} = scope(workspace, issue)
     end
 
     test "a candidate bigger than the scan limit fails closed in strict mode", %{workspace: workspace} do
@@ -316,7 +322,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       write!(workspace, "big.md", String.duplicate("line\n", 2_100))
 
       assert {:error, {:delivery_acceptance_failed, result}} =
-               Acceptance.scope(workspace, issue(contract_body(allowed_extra_paths: ["big.md"])))
+               scope(workspace, issue(contract_body(allowed_extra_paths: ["big.md"])))
 
       # A partial scan cannot certify the absence of a prohibition: the strict
       # contract fails instead of passing on a read that stopped at its cap, and the
@@ -335,7 +341,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       issue =
         issue(contract_body(scope_mode: "advisory", allowed_extra_paths: ["big.md"]))
 
-      assert {:ok, result} = Acceptance.scope(workspace, issue)
+      assert {:ok, result} = scope(workspace, issue)
 
       assert result.status == :advisory
       assert [%Finding{code: :prohibition_scan_truncated}] = result.findings
@@ -349,7 +355,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
       issue = issue(contract_body(allowed_extra_paths: ["big.md"], remote_access: true, deploy: true))
 
-      assert {:ok, result} = Acceptance.scope(workspace, issue)
+      assert {:ok, result} = scope(workspace, issue)
 
       assert result.status == :pass
       assert result.findings == []
@@ -361,7 +367,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       Enum.each(1..201, fn index -> write!(workspace, "many/file-#{index}.js", "x\n") end)
 
       assert {:error, {:delivery_acceptance_failed, result}} =
-               Acceptance.scope(workspace, issue(contract_body(allowed_extra_paths: ["many/**"])))
+               scope(workspace, issue(contract_body(allowed_extra_paths: ["many/**"])))
 
       assert result.status == :fail
       assert [%Finding{code: :prohibition_scan_truncated}] = result.findings
@@ -373,7 +379,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       write!(workspace, "big.md", String.duplicate("y\n", 200_000))
 
       assert {:error, {:delivery_acceptance_failed, result}} =
-               Acceptance.scope(workspace, issue(contract_body(allowed_extra_paths: ["big.md"])))
+               scope(workspace, issue(contract_body(allowed_extra_paths: ["big.md"])))
 
       assert result.status == :fail
       assert [%Finding{code: :prohibition_scan_truncated}] = result.findings
@@ -384,7 +390,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       write!(workspace, "README.md", String.duplicate("x\n", 600_000))
 
       assert {:error, {:delivery_acceptance_failed, result}} =
-               Acceptance.scope(workspace, issue(contract_body([])))
+               scope(workspace, issue(contract_body([])))
 
       assert result.status == :fail
       assert Enum.map(result.findings, & &1.code) == [:prohibition_scan_truncated]
@@ -421,7 +427,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       write!(workspace, "README.md", "base\nmore\n")
       write!(workspace, "ev<il>.md", "x\n")
 
-      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue(contract_body([])))
+      assert {:error, {:delivery_acceptance_failed, result}} = scope(workspace, issue(contract_body([])))
 
       assert [%Finding{code: :unexpected_path_changed, path: "ev<il>.md"}] = result.findings
       assert result.findings |> hd() |> Map.fetch!(:path) == "ev<il>.md"
@@ -436,8 +442,8 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       write!(workspace, "README.md", "base\nmore\n")
       issue = issue(contract_body([]))
 
-      assert {:ok, first} = Acceptance.scope(workspace, issue)
-      assert {:ok, second} = Acceptance.scope(workspace, issue)
+      assert {:ok, first} = scope(workspace, issue)
+      assert {:ok, second} = scope(workspace, issue)
 
       assert first == second
     end
@@ -448,32 +454,142 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       on_exit(fn -> File.rm_rf(not_a_repo) end)
 
       assert {:error, {:git_command_failed, _args, _status, _output}} =
-               Acceptance.scope(not_a_repo, issue(contract_body([])))
+               scope(not_a_repo, issue(contract_body([])))
     end
 
     test "a change set with a non-UTF-8 path fails closed instead of crashing", %{workspace: workspace} do
       File.write!(Path.join(workspace, <<"bad", 0xFF, ".txt">>), "x\n")
 
-      assert {:error, {:change_set_not_utf8, :rejected}} = Acceptance.scope(workspace, issue(contract_body([])))
+      assert {:error, {:change_set_not_utf8, :rejected}} = scope(workspace, issue(contract_body([])))
     end
 
     test "a change set above the cap fails closed instead of being partially accepted", %{workspace: workspace} do
       Enum.each(1..5_001, fn index -> write!(workspace, "many/file-#{index}.txt", "x\n") end)
 
-      assert {:error, {:change_set_too_large, 5_000}} = Acceptance.scope(workspace, issue(contract_body([])))
+      assert {:error, {:change_set_too_large, 5_000}} = scope(workspace, issue(contract_body([])))
     end
   end
 
-  describe "evidence/3" do
+  describe "a published candidate (clean workspace)" do
+    test "is accepted from the candidate in git, not from the worktree", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+
+      # The workspace is clean: reading it as a change set would be an invented empty
+      # read, and the candidate would be promoted without an acceptance at all.
+      assert {"", 0} = System.cmd("git", ["status", "--porcelain"], cd: workspace)
+
+      assert {:ok, result} = Acceptance.scope(workspace, issue(contract_body(expected_paths: ["answer.sh"])), @base_branch)
+
+      assert %Result{status: :pass, mode: :strict, contract_version: 1} = result
+      assert result.change_set.delivered == ["answer.sh"]
+      assert result.change_set.changed == ["answer.sh"]
+    end
+
+    test "a rename of the published candidate is a deletion of its origin", %{workspace: workspace} do
+      git!(workspace, ["mv", "README.md", "docs.md"])
+      publish_candidate!(workspace)
+
+      # Only the destination is authorized; the rename deleted `README.md`, which is a
+      # change of the candidate and not an absence of course.
+      issue = issue(contract_body(expected_paths: ["docs.md"]))
+
+      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue, @base_branch)
+
+      assert Enum.sort(result.change_set.changed) == ["README.md", "docs.md"]
+      assert [%Finding{code: :unexpected_path_changed, path: "README.md"}] = result.findings
+    end
+
+    test "the prohibition scan reads the added lines of the published candidate", %{workspace: workspace} do
+      write!(workspace, "scripts/deploy.sh", "#!/bin/sh\nkubectl apply -f k8s/site.yml\n")
+      publish_candidate!(workspace)
+
+      issue = issue(contract_body(expected_paths: ["scripts/deploy.sh"]))
+
+      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue, @base_branch)
+
+      assert [%Finding{code: :forbidden_deploy_detected, path: "scripts/deploy.sh"}] = result.findings
+    end
+
+    test "the demanded evidence is executed for it", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+
+      issue = issue(contract_body(expected_paths: ["answer.sh"], required_evidence: ["agent-tests"]))
+      delivery = %{@delivery | evidence: %{"agent-tests" => "echo ran > side-effect.txt"}}
+
+      assert {:ok, result} = Acceptance.evidence(workspace, issue, delivery, @base_branch)
+
+      assert result.status == :pass
+      assert [%{name: "agent-tests", status: :passed}] = result.evidence
+      assert File.exists?(Path.join(workspace, "side-effect.txt"))
+    end
+
+    test "a required evidence that fails blocks the resume", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+
+      issue = issue(contract_body(expected_paths: ["answer.sh"], required_evidence: ["agent-tests"]))
+      delivery = %{@delivery | evidence: %{"agent-tests" => "exit 1"}}
+
+      assert {:error, {:delivery_acceptance_failed, result}} =
+               Acceptance.evidence(workspace, issue, delivery, @base_branch)
+
+      assert [%Finding{code: :required_evidence_failed, category: :evidence}] = result.findings
+      assert [%{name: "agent-tests", status: :failed}] = result.evidence
+    end
+
+    test "the same failure is advisory on a resume when the contract is advisory", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+
+      issue =
+        issue(
+          contract_body(
+            scope_mode: "advisory",
+            expected_paths: ["answer.sh"],
+            required_evidence: ["agent-tests"]
+          )
+        )
+
+      delivery = %{@delivery | evidence: %{"agent-tests" => "exit 1"}}
+
+      assert {:ok, result} = Acceptance.evidence(workspace, issue, delivery, @base_branch)
+
+      assert result.status == :advisory
+      assert [%Finding{code: :required_evidence_failed}] = result.findings
+      refute Result.blocking?(result)
+    end
+
+    test "a clean workspace sitting on the base has nothing to accept", %{workspace: workspace} do
+      issue = issue(contract_body(expected_paths: ["answer.sh"], required_evidence: ["agent-tests"]))
+      delivery = %{@delivery | evidence: %{"agent-tests" => "echo ran > side-effect.txt"}}
+
+      assert {:ok, scoped} = Acceptance.scope(workspace, issue, @base_branch)
+      assert scoped.status == :not_applicable
+
+      assert {:ok, ran} = Acceptance.evidence(workspace, issue, delivery, @base_branch)
+      assert ran.status == :not_applicable
+      assert ran.evidence == []
+      refute File.exists?(Path.join(workspace, "side-effect.txt"))
+    end
+
+    test "a base branch that does not exist fails closed instead of reading an empty diff", %{workspace: workspace} do
+      assert {:error, {:delivery_base_missing, "not-a-branch"}} =
+               Acceptance.scope(workspace, issue(contract_body([])), "not-a-branch")
+    end
+  end
+
+  describe "evidence/4" do
     test "an issue without a contract demands no evidence", %{workspace: workspace} do
-      assert {:ok, %Result{status: :not_configured}} = Acceptance.evidence(workspace, @issue, @delivery)
+      assert {:ok, %Result{status: :not_configured}} = evidence(workspace, @issue, @delivery)
     end
 
     test "an unenforceable contract fails the evidence phase too", %{workspace: workspace} do
       write!(workspace, "README.md", "base\nmore\n")
 
       assert {:error, {:delivery_acceptance_failed, result}} =
-               Acceptance.evidence(workspace, issue(contract_body(version: 9)), @delivery)
+               evidence(workspace, issue(contract_body(version: 9)), @delivery)
 
       assert [%Finding{code: :invalid_contract}] = result.findings
     end
@@ -482,7 +598,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       issue = issue(contract_body(required_evidence: ["side-effect"]))
       delivery = %{@delivery | evidence: %{"side-effect" => "echo ran > side-effect.txt"}}
 
-      assert {:ok, result} = Acceptance.evidence(workspace, issue, delivery)
+      assert {:ok, result} = evidence(workspace, issue, delivery)
       assert result.status == :not_applicable
       assert result.evidence == []
       refute File.exists?(Path.join(workspace, "side-effect.txt"))
@@ -492,7 +608,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       write!(workspace, "README.md", "base\nmore\n")
       issue = issue(contract_body(required_evidence: ["repository-gates"]))
 
-      assert {:ok, result} = Acceptance.evidence(workspace, issue, @delivery)
+      assert {:ok, result} = evidence(workspace, issue, @delivery)
 
       assert result.status == :pass
       assert [%{name: "repository-gates", status: :passed, command: "true"}] = result.evidence
@@ -504,7 +620,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
       delivery = %{@delivery | evidence: %{"agent-tests" => "test -f README.md && echo ran > evidence.txt"}}
 
-      assert {:ok, result} = Acceptance.evidence(workspace, issue, delivery)
+      assert {:ok, result} = evidence(workspace, issue, delivery)
 
       assert result.status == :pass
       assert [%{name: "agent-tests", status: :passed}] = result.evidence
@@ -518,7 +634,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
       strict = issue(contract_body(required_evidence: ["agent-tests"]))
 
-      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.evidence(workspace, strict, delivery)
+      assert {:error, {:delivery_acceptance_failed, result}} = evidence(workspace, strict, delivery)
 
       assert [%Finding{code: :required_evidence_failed, category: :evidence, path: nil}] = result.findings
 
@@ -527,7 +643,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
       advisory = issue(contract_body(scope_mode: "advisory", required_evidence: ["agent-tests"]))
 
-      assert {:ok, result} = Acceptance.evidence(workspace, advisory, delivery)
+      assert {:ok, result} = evidence(workspace, advisory, delivery)
       assert result.status == :advisory
       assert [%{status: :failed}] = result.evidence
     end
@@ -536,7 +652,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       write!(workspace, "README.md", "base\nmore\n")
       issue = issue(contract_body(required_evidence: ["wordpress-tests"]))
 
-      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.evidence(workspace, issue, @delivery)
+      assert {:error, {:delivery_acceptance_failed, result}} = evidence(workspace, issue, @delivery)
 
       assert [%Finding{code: :required_evidence_missing, category: :evidence}] = result.findings
       assert hd(result.findings).message =~ "has no provider in `delivery.evidence`"
@@ -549,7 +665,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
       delivery = %{@delivery | gates_timeout_ms: 50, evidence: %{"slow-tests" => "sleep 5"}}
 
-      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.evidence(workspace, issue, delivery)
+      assert {:error, {:delivery_acceptance_failed, result}} = evidence(workspace, issue, delivery)
 
       assert [%Finding{code: :required_evidence_failed, message: message}] = result.findings
       assert message =~ "reported timeout"
@@ -569,7 +685,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
           evidence: %{"slow-tests" => "sleep 5", "agent-tests" => "true"}
       }
 
-      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.evidence(workspace, issue, delivery)
+      assert {:error, {:delivery_acceptance_failed, result}} = evidence(workspace, issue, delivery)
 
       assert [%{name: "slow-tests", status: :timeout}, %{name: "agent-tests", status: :deadline_exceeded}] =
                result.evidence
@@ -584,8 +700,8 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       write!(workspace, "README.md", "base\nmore\n")
       issue = issue(contract_body(required_evidence: ["repository-gates"]))
 
-      assert {:ok, first} = Acceptance.evidence(workspace, issue, @delivery)
-      assert {:ok, second} = Acceptance.evidence(workspace, issue, @delivery)
+      assert {:ok, first} = evidence(workspace, issue, @delivery)
+      assert {:ok, second} = evidence(workspace, issue, @delivery)
       assert first == second
     end
 
@@ -595,7 +711,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       on_exit(fn -> File.rm_rf(not_a_repo) end)
 
       assert {:error, {:git_command_failed, _args, _status, _output}} =
-               Acceptance.evidence(not_a_repo, issue(contract_body([])), @delivery)
+               evidence(not_a_repo, issue(contract_body([])), @delivery)
     end
   end
 
@@ -751,6 +867,31 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
   defp finding(code, message \\ "message", path \\ nil) do
     %Finding{code: code, category: :scope, message: message, path: path}
+  end
+
+  # A candidate committed on the delivery branch over the base, which leaves the
+  # workspace clean: what a resumed cycle finds (the candidate is in git, not in the
+  # worktree).
+  defp publish_candidate!(workspace) do
+    git!(workspace, ["checkout", "-q", "-B", "pipeline/gh-7"])
+    git!(workspace, ["add", "-A"])
+
+    git!(workspace, [
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.org",
+      "commit",
+      "-q",
+      "-m",
+      "candidate"
+    ])
+  end
+
+  defp scope(workspace, issue), do: Acceptance.scope(workspace, issue, @base_branch)
+
+  defp evidence(workspace, issue, delivery) do
+    Acceptance.evidence(workspace, issue, delivery, @base_branch)
   end
 
   defp issue(description), do: %{@issue | description: description}

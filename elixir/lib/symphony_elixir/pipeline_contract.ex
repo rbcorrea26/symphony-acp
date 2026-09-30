@@ -128,6 +128,11 @@ defmodule SymphonyElixir.PipelineContract do
   @contract_key ~r/(?:^[ \t]*|[{,]\s*)(?:\?[ \t]*)?(?:&[^\s,\[\]{}]+[ \t]+)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/m
   @contract_key_start ~r/^[ \t]*(?:\?[ \t]*)?(?:&[^\s,\[\]{}]+[ \t]+)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/
   @fence ~r/^[ \t]*(`{3,}|~{3,})/
+  # The closing fence, the same marker with **nothing but whitespace after it**: an
+  # info string is allowed on the opening line only, so ` ```not-a-close ` inside a
+  # block is content and cannot end it (a pseudo-close would truncate the block to a
+  # readable prefix and hide every field after it).
+  @closing_fence ~r/^[ \t]*(`{3,}|~{3,})[ \t]*$/
   @evidence_name ~r/^[a-z0-9][a-z0-9._-]*$/
   @max_pattern_length 512
   @max_items 256
@@ -623,16 +628,17 @@ defmodule SymphonyElixir.PipelineContract do
     |> Enum.map(&Enum.join(&1, "\n"))
   end
 
-  defp fence_step(line, {blocks, current, open}) do
-    case fence_delimiter(line) do
-      nil when open == nil ->
-        {blocks, current, nil}
+  defp fence_step(line, {blocks, current, nil}) do
+    case open_fence(line) do
+      nil -> {blocks, current, nil}
+      delimiter -> {blocks, [], delimiter}
+    end
+  end
 
+  defp fence_step(line, {blocks, current, open}) do
+    case close_fence(line) do
       nil ->
         {blocks, [line | current], open}
-
-      delimiter when open == nil ->
-        {blocks, [], delimiter}
 
       delimiter ->
         if closes_fence?(delimiter, open) do
@@ -650,8 +656,19 @@ defmodule SymphonyElixir.PipelineContract do
     :binary.first(delimiter) == :binary.first(open) and byte_size(delimiter) >= byte_size(open)
   end
 
-  defp fence_delimiter(line) do
+  # The opening fence accepts an info string (` ```yaml `); the closing one carries
+  # nothing after the marker but whitespace, so a line such as ` ```not-a-close ` is
+  # **content** and cannot close the block: a pseudo-close would otherwise let the
+  # parser read a valid prefix and ignore every field after it.
+  defp open_fence(line) do
     case Regex.run(@fence, line) do
+      [_match, delimiter] -> delimiter
+      _other -> nil
+    end
+  end
+
+  defp close_fence(line) do
+    case Regex.run(@closing_fence, line) do
       [_match, delimiter] -> delimiter
       _other -> nil
     end

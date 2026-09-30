@@ -170,6 +170,100 @@ defmodule SymphonyElixir.PipelineContractTest do
                Contract.parse(issue_body(@strict) <> issue_body(@advisory))
     end
 
+    test "a closing fence may carry trailing whitespace" do
+      body = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+        expected_paths:
+          - docs/x.md
+      ```   \t
+      The prose after the block is not YAML.
+      """
+
+      assert {:ok, contract} = Contract.parse(body)
+      assert contract.scope_mode == :advisory
+    end
+
+    test "a fence line with text after the marker is content, never a close" do
+      # The pseudo-close used to truncate the block here: the valid prefix was read
+      # and the field after it (`unknown_field`) was never observed.
+      body = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: strict
+        expected_paths: [docs/a.md]
+        ```not-a-close
+        unknown_field: 1
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, _reason}} = Contract.parse(body)
+    end
+
+    test "an info string inside the block does not close it either" do
+      # ` ```yaml ` is an opening fence; inside a block it is content, so the fields
+      # after it are still read (and here the trailing marker is not a valid document).
+      body = "```yaml\npipeline_contract:\n  version: 1\n  scope_mode: strict\n  expected_paths: [docs/a.md]\n```yaml\n```\n"
+
+      assert {:error, {:pipeline_contract_invalid, _reason}} = Contract.parse(body)
+    end
+
+    test "a fence shorter than the opening one does not close the block" do
+      body = """
+      ````yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+        expected_paths: [docs/a.md]
+      ```
+      ````
+      """
+
+      assert {:error, {:pipeline_contract_invalid, _reason}} = Contract.parse(body)
+    end
+
+    test "a declaration after a pseudo-close is observed as a second contract" do
+      body = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: strict
+        expected_paths: [docs/a.md]
+      ```not-a-close
+      ```
+
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:ambiguous_contracts, 2}}} = Contract.parse(body)
+    end
+
+    test "a valid contract with a normal close keeps being accepted" do
+      body = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: strict
+        expected_paths: [docs/a.md]
+      ```
+
+      ```sh
+      echo "the fence below is documentation, not a close"
+      ```
+      """
+
+      assert {:ok, contract} = Contract.parse(body)
+      assert contract.scope_mode == :strict
+      assert contract.expected_paths == ["docs/a.md"]
+    end
+
     test "two contract keys in one block are ambiguous, not silently one of them" do
       body = """
       ```yaml

@@ -381,6 +381,10 @@ defmodule SymphonyElixir.DeliveryTest do
     assert length(state.pulls) == 1
     assert length(state.comments) == 1
     assert FakeGitHub.sha(fake, delivery_branch()) == first.candidate_sha
+
+    # No contract in the issue: the resumed candidate is still not subject to the
+    # acceptance layer (the backward-compatible case).
+    assert second.contract.status == :not_configured
   end
 
   test "a clean workspace with nothing published is not a delivery", %{workspace: workspace} do
@@ -495,18 +499,96 @@ defmodule SymphonyElixir.DeliveryTest do
     # A rename whose origin is missing (a malformed read) does not crash the parse.
     assert Git.change_entries("R  docs.md" <> <<0>>) == {:ok, [%{path: "docs.md", status: "R"}]}
 
-    # A path that is not valid UTF-8 cannot be matched or persisted safely.
-    assert Git.change_entries(<<"?? bad", 0xFF, ".md", 0>>) == :invalid_encoding
+    # A doubled or trailing NUL separates nothing: the empty field is skipped.
+    assert Git.change_entries(<<0>>) == {:ok, []}
 
-    # The change set is bounded: above the cap the read fails closed instead of
-    # producing a partial (and therefore accepted-by-accident) verdict.
-    many = Enum.map_join(1..5_001, <<0>>, &"?? f#{&1}")
-    assert Git.change_entries(many) == :overflow
+    assert Git.change_entries("?? a.md" <> <<0, 0>> <> "?? b.md") ==
+             {:ok, [%{path: "a.md", status: "??"}, %{path: "b.md", status: "??"}]}
+
+    # A field that is not valid UTF-8 cannot be matched or persisted safely, neither as
+    # an entry nor as the origin of a rename.
+    assert Git.change_entries(<<"?? bad", 0xFF, ".md", 0>>) == :invalid_encoding
+    assert Git.change_entries("R  docs.md" <> <<0>> <> <<"bad", 0xFF>> <> <<0>>) == :invalid_encoding
+
+    # Below the cap the change set is complete and at the cap it is still complete.
+    assert {:ok, entries} = Git.change_entries(Enum.map_join(1..4_999, <<0>>, &"?? f#{&1}"))
+    assert length(entries) == 4_999
+    assert {:ok, entries} = Git.change_entries(Enum.map_join(1..5_000, <<0>>, &"?? f#{&1}"))
+    assert length(entries) == 5_000
+    assert hd(entries) == %{path: "f1", status: "??"}
+    assert List.last(entries) == %{path: "f5000", status: "??"}
+
+    # Above the cap the read fails closed instead of producing a partial (and therefore
+    # accepted-by-accident) verdict.
+    assert Git.change_entries(Enum.map_join(1..5_001, <<0>>, &"?? f#{&1}")) == :overflow
 
     # The cap counts what a rename materializes (destination + deletion), not the
     # porcelain fields.
     renames = Enum.map_join(1..2_501, <<0>>, fn index -> "R  new#{index}\0old#{index}" end)
     assert Git.change_entries(renames) == :overflow
+
+    # The scan stops where the cap was exceeded: a large NUL-delimited input is not
+    # materialized as a list before the bound applies, so the bytes after that point are
+    # never read — a non-UTF-8 tail cannot even change the answer (a read that validated
+    # the whole output first reports `:invalid_encoding` here).
+    huge = Enum.map_join(1..200_000, <<0>>, &"?? f#{&1}") <> <<0>> <> <<"?? bad", 0xFF>>
+    assert Git.change_entries(huge) == :overflow
+  end
+
+  test "the change set of a published candidate is read from git against its fork point", %{workspace: workspace} do
+    # A base with a larger file (so git detects the copy) and one to delete.
+    File.write!(Path.join(workspace, "notes.md"), Enum.map_join(1..40, "\n", &"line #{&1}"))
+    File.write!(Path.join(workspace, "gone.md"), "gone\n")
+    git!(workspace, ["add", "-A"])
+    git!(workspace, ["-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-q", "-m", "base files"])
+    git!(workspace, ["push", "-q", "origin", "main"])
+
+    # The candidate: a rename, a file modified and copied and a deletion, all committed
+    # and not present in the worktree any more.
+    git!(workspace, ["checkout", "-q", "-b", delivery_branch()])
+    File.mkdir_p!(Path.join(workspace, "docs"))
+    git!(workspace, ["mv", "answer.sh", "docs/renamed.sh"])
+    File.write!(Path.join(workspace, "notes.md"), Enum.map_join(1..41, "\n", &"line #{&1}"))
+    File.cp!(Path.join(workspace, "notes.md"), Path.join(workspace, "copied.md"))
+    File.rm!(Path.join(workspace, "gone.md"))
+    git!(workspace, ["add", "-A"])
+    git!(workspace, ["-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-q", "-m", "candidate"])
+
+    assert {"", 0} = System.cmd("git", ["status", "--porcelain"], cd: workspace)
+
+    assert {:ok, base} = Git.merge_base(workspace, "main")
+    assert base == String.trim(elem(System.cmd("git", ["-C", workspace, "rev-parse", "origin/main"]), 0))
+
+    assert {:ok, entries} = Git.candidate_change_set(workspace, base)
+
+    # Rename = destination plus the origin as a deletion (the origin is gone), copy = the
+    # destination only (its source stays), and the deletion is reported as itself.
+    assert Enum.sort(entries) ==
+             Enum.sort([
+               %{status: "R", path: "docs/renamed.sh"},
+               %{status: "D", path: "answer.sh"},
+               %{status: "M", path: "notes.md"},
+               %{status: "C", path: "copied.md"},
+               %{status: "D", path: "gone.md"}
+             ])
+
+    # A candidate that is the base itself has no change set at all.
+    assert {:ok, head} = Git.head_sha(workspace)
+    assert {:ok, []} = Git.candidate_change_set(workspace, head)
+
+    # A base branch that does not exist is an error, never an empty (and therefore
+    # accepted) change set.
+    assert {:error, {:delivery_base_missing, "not-a-branch"}} = Git.merge_base(workspace, "not-a-branch")
+  end
+
+  test "a published candidate with a non-UTF-8 path fails closed", %{workspace: workspace} do
+    git!(workspace, ["checkout", "-q", "-b", delivery_branch()])
+    File.write!(Path.join(workspace, <<"bad", 0xFF, ".md">>), "x\n")
+    git!(workspace, ["add", "-A"])
+    git!(workspace, ["-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-q", "-m", "od name"])
+
+    assert {:ok, base} = Git.merge_base(workspace, "main")
+    assert {:error, {:change_set_not_utf8, :rejected}} = Git.candidate_change_set(workspace, base)
   end
 
   test "git refuses to publish without a credential", %{workspace: workspace} do
@@ -693,6 +775,7 @@ defmodule SymphonyElixir.DeliveryTest do
 
     assert {:error, {:git_not_available, _message}} = Git.status(workspace)
     assert {:error, {:git_not_available, _message}} = Git.added_lines(workspace)
+    assert {:error, {:git_not_available, _message}} = Git.merge_base(workspace, "main")
   end
 
   test "a failing diff read is an error, never an empty line scan", %{workspace: _workspace} do
@@ -1035,7 +1118,7 @@ defmodule SymphonyElixir.DeliveryTest do
     assert FakeGitHub.state(fake).requests == []
   end
 
-  test "a second cycle over the published candidate is not failed by the contract", %{workspace: workspace} do
+  test "a second cycle over the published candidate re-evaluates the contract", %{workspace: workspace} do
     configure!([])
     fake = fake!()
     issue = contract_issue(expected_paths: ["answer.sh"])
@@ -1044,11 +1127,89 @@ defmodule SymphonyElixir.DeliveryTest do
     assert {:ok, first} = Delivery.run(workspace, issue, github_opts(fake))
     assert first.contract.status == :pass
 
-    # Nothing new to accept: the candidate was accepted by the cycle that created
-    # it, and the resume cycle only advances the published state.
+    # The workspace is clean because the candidate was committed by the first cycle. The
+    # resume reads that candidate from git (the branch head against its base) and applies
+    # the contract to it again: a clean worktree is not "nothing to accept".
     assert {:ok, second} = Delivery.run(workspace, issue, github_opts(fake))
-    assert second.contract.status == :not_applicable
+    assert second.contract.status == :pass
+    assert second.contract.change_set.delivered == ["answer.sh"]
+    assert second.contract.change_set.changed == ["answer.sh"]
     assert second.candidate_sha == first.candidate_sha
+    assert Enum.count(FakeGitHub.state(fake).comments) == 1
+  end
+
+  test "a resumed candidate runs the evidence of the contract again", %{workspace: workspace} do
+    configure!(evidence: %{"agent-tests" => "true"})
+    fake = fake!()
+    issue = contract_issue(expected_paths: ["answer.sh"], required_evidence: ["agent-tests"])
+    change_answer!(workspace, "42")
+
+    assert {:ok, first} = Delivery.run(workspace, issue, github_opts(fake))
+    assert [%{name: "agent-tests", status: :passed}] = first.contract.evidence
+
+    assert {:ok, second} = Delivery.run(workspace, issue, github_opts(fake))
+
+    assert second.contract.status == :pass
+    assert [%{name: "agent-tests", status: :passed}] = second.contract.evidence
+    assert second.candidate_sha == first.candidate_sha
+    assert Enum.count(FakeGitHub.state(fake).comments) == 1
+  end
+
+  test "a required evidence that fails on the resume does not promote", %{workspace: workspace} do
+    configure!(evidence: %{"agent-tests" => "true"})
+    fake = fake!()
+    issue = contract_issue(expected_paths: ["answer.sh"], required_evidence: ["agent-tests"])
+    change_answer!(workspace, "42")
+
+    assert {:ok, _first} = Delivery.run(workspace, issue, github_opts(fake))
+
+    # The contract in force now demands an evidence whose command fails: the resume is
+    # not promoted on the strength of the acceptance of the cycle that published it.
+    configure!(evidence: %{"agent-tests" => "false"})
+
+    assert {:error, {:delivery_acceptance_failed, result}} = Delivery.run(workspace, issue, github_opts(fake))
+
+    assert result.status == :fail
+    assert [%{code: :required_evidence_failed, category: :evidence}] = result.findings
+    assert Enum.count(FakeGitHub.state(fake).comments) == 1
+  end
+
+  test "evidence added to the contract after the publication is demanded on the resume", %{workspace: workspace} do
+    configure!([])
+    fake = fake!()
+    change_answer!(workspace, "42")
+
+    assert {:ok, first} = Delivery.run(workspace, contract_issue(expected_paths: ["answer.sh"]), github_opts(fake))
+    assert first.contract.status == :pass
+
+    # The issue body was tightened after the publication: the resume evaluates the
+    # contract in force instead of reusing the acceptance of the publication.
+    tightened = contract_issue(expected_paths: ["answer.sh"], required_evidence: ["agent-tests"])
+
+    assert {:error, {:delivery_acceptance_failed, result}} = Delivery.run(workspace, tightened, github_opts(fake))
+
+    assert [%{code: :required_evidence_missing, category: :evidence}] = result.findings
+    assert Enum.count(FakeGitHub.state(fake).comments) == 1
+  end
+
+  test "a contract that changed after the publication is re-evaluated, not reused", %{workspace: workspace} do
+    configure!([])
+    fake = fake!()
+    change_answer!(workspace, "42")
+
+    assert {:ok, first} = Delivery.run(workspace, contract_issue(expected_paths: ["answer.sh"]), github_opts(fake))
+    assert first.contract.status == :pass
+
+    # The new contract expects a path the published candidate does not deliver: the
+    # acceptance of the previous cycle is stale and the resume has to notice it. The
+    # change set comes from the candidate in git, not from the clean worktree (which
+    # would report that nothing was delivered).
+    changed = contract_issue(expected_paths: ["docs/changes/42.md"])
+
+    assert {:error, {:delivery_acceptance_failed, result}} = Delivery.run(workspace, changed, github_opts(fake))
+
+    assert Enum.map(result.findings, & &1.code) == [:expected_path_missing, :unexpected_path_changed]
+    assert result.change_set.changed == ["answer.sh"]
     assert Enum.count(FakeGitHub.state(fake).comments) == 1
   end
 

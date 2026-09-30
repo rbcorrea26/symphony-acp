@@ -168,29 +168,36 @@ do limite `change_scan_truncated`.
   o texto humano tem `<` neutralizado (uma alteração do candidato não reescreve o
   comentário nem forja marcação de handoff).
 
-### 5. Sem candidato novo não há aceite a aplicar
+### 5. Retomada: o candidato publicado é aceito de novo (revisão de 2026-09-30)
 
-Quando o change set está vazio (ciclo `--resume-only` sobre candidato já
-publicado, ou nada a publicar), o relatório diz `not_applicable` em vez de
-reprovar: o candidato que está sendo retomado foi aceito pelo ciclo que o criou.
-O relatório aparece no comentário de handoff e no log; nunca é inventado um
-"aceite verde".
+Quando o change set do **worktree** está vazio, o relatório não conclui "nada a
+aceitar": se o workspace está em um commit do branch de entrega (o candidato
+publicado), o aceite é **recalculado sobre o candidato**, lido do Git —
+`SymphonyElixir.Delivery.Git.candidate_change_set/2` (`HEAD` contra `merge_base/2`,
+a merge base com `delivery.base_branch`) —, com as linhas adicionadas do mesmo diff
+indo para a varredura de proibição e as evidências exigidas pelo contrato em vigor
+executadas de novo. O veredicto anterior **nunca é reusado**: um contrato que ficou
+mais exigente (ou materialmente diferente) depois da publicação é reavaliado de
+forma determinística — ou o candidato satisfaz o contrato novo, ou o run falha sem
+promover nem comentar. `not_applicable` fica reservado ao workspace limpo que
+**está na base** (não há candidato nenhum), e uma branch base que não resolve é erro
+(`delivery_base_missing`), nunca um diff vazio lido como "o candidato não mudou
+nada".
 
-Esse "aceito pelo ciclo que o criou" é **verificado, não assumido**: o candidato do
-run reconciliado é o **HEAD local** do workspace (o conteúdo que este run tem em
-mãos) e o head observado da branch tem de ser exatamente ele. Um push de fora —
-antes ou durante a observação do CI — é recusado com `delivery_candidate_replaced`:
-o run não promove (nem rotula) um commit que ele não aceitou e cujos gates locais
-não rodaram aqui. É a mesma regra do run que publica: o veredicto pertence ao commit
-observado, e o observado tem de ser o aceito.
+Essa reavaliação é **verificada, não assumida**: o candidato do run reconciliado é o
+**HEAD local** do workspace (o conteúdo que este run tem em mãos) e o head observado
+da branch tem de ser exatamente ele. Um push de fora — antes ou durante a observação
+do CI — é recusado com `delivery_candidate_replaced`: o run não promove (nem rotula)
+um commit que ele não aceitou e cujos gates locais não rodaram aqui. É a mesma regra
+do run que publica: o veredicto pertence ao commit observado, e o observado tem de
+ser o aceito.
 
-Limite declarado da retomada: a verificação é sobre o **candidato**, não sobre o
-contrato. Se o corpo da issue ficar **mais exigente** depois da publicação, o run
-retomado reexecuta as evidências exigidas pelo contrato atual, mas o **escopo** novo
-continua `not_applicable` (o diff candidato↔base não está no workspace, e o estágio
-não faz `fetch` no meio da entrega). Fechar isso exige reavaliar o diff contra a base
-ou persistir um fingerprint do contrato aceito — incremento, declarado como tal em
-`../acceptance-contract.md` §6.
+Limite declarado: o sujeito do aceite é o que o run **vai promover**. Com o worktree
+sujo o change set é o delta contra `HEAD` (o que este run commita e publica), e o
+conteúdo dos commits anteriores do mesmo branch não entra nele. A revisão desta
+decisão veio do achado da review do candidato `ad10879`: a versão anterior declarava
+que o escopo novo não era reavaliado na retomada, o que transformava ausência de
+execução em promoção. Detalhe operacional em `../acceptance-contract.md` §6.1.
 
 ### 6. O veredicto é dado estruturado, não booleano
 
@@ -201,7 +208,7 @@ O aceite devolve `SymphonyElixir.Delivery.Acceptance.Result`:
 ```
 
 - `status`: `:pass` | `:fail` | `:advisory` | `:not_configured` (issue sem
-  contrato) | `:not_applicable` (sem change set novo);
+  contrato) | `:not_applicable` (workspace limpo e sem candidato publicado);
 - `findings`: `SymphonyElixir.PipelineContract.Finding` com `code` estável
   (`invalid_contract`, `expected_path_missing`, `unexpected_path_changed`,
   `required_evidence_missing`, `required_evidence_failed`,
@@ -264,15 +271,19 @@ bloqueio fica no log; o estado persistido de bloqueio é escopo da #13).
 - `elixir/lib/symphony_elixir/pipeline_contract.ex` — parser/schema v1, matching de
   glob (o padrão é compilado uma vez por avaliação do change set), achados de escopo
   e de proibição (puros).
-- `elixir/lib/symphony_elixir/delivery/acceptance.ex` — gate impuro: lê o change
-  set, roda as evidências exigidas, decide por modo, resume o relatório e persiste o
-  veredicto cortado por bytes (16 KiB, com `omitted`).
+- `elixir/lib/symphony_elixir/delivery/acceptance.ex` — gate impuro: deriva o sujeito
+  (worktree, ou o candidato publicado lido do Git contra a base quando o worktree está
+  limpo), roda as evidências exigidas sempre que há candidato, decide por modo, resume o
+  relatório e persiste o veredicto cortado por bytes (16 KiB, com `omitted`).
 - `elixir/lib/symphony_elixir/delivery/gates.ex` — runner único de comando com
   timeout, usado por gates e evidências.
-- `elixir/lib/symphony_elixir/delivery/git.ex` — `change_set/1` (porcelain `-z
-  -uall`: rename = destino + origem como deleção, copy só o destino, arquivo não
-  rastreado individual) e `added_lines/1` (leitura limitada do `git diff`, que é
-  encerrado no cap, + não rastreados limitados).
+- `elixir/lib/symphony_elixir/delivery/git.ex` — `change_set/1` (porcelain `-z -uall`:
+  rename = destino + origem como deleção, copy só o destino, arquivo não rastreado
+  individual), `candidate_change_set/2` e `merge_base/2` (o candidato publicado contra a
+  base, no formato `--name-status -z`) e `added_lines/1,2` (leitura limitada do
+  `git diff` de uma revisão, que é encerrado no cap, + não rastreados limitados). O
+  parse dos dois formatos é incremental (um campo NUL-delimited por vez, parando no
+  cap), não uma lista materializada antes do limite.
 - `elixir/lib/symphony_elixir/delivery.ex` — ordem das camadas, `contract` no
   resultado e linha do aceite no comentário de handoff.
 - `elixir/lib/symphony_elixir/config/schema.ex` — bloco `delivery.evidence`

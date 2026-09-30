@@ -29,7 +29,11 @@ defmodule SymphonyElixir.Delivery do
     * state is recovered from GitHub, which is what makes retry and
       reconciliation idempotent: a delivery that finds the open pull request of
       the branch reconciles it instead of creating a second one, and a second
-      run over the same candidate does not repeat the push or the handoff;
+      run over the same candidate does not repeat the push or the handoff. That
+      resumed candidate is **accepted again**, though: the acceptance reads it from
+      git (the branch head against the base branch) and executes the evidence of the
+      contract in force, so a contract that changed after the publication is
+      re-evaluated instead of being reused;
     * the one-shot review is requested **after** the candidate is stable and its
       unavailability is recorded, never fabricated and never a reason to block
       the handoff;
@@ -136,12 +140,17 @@ defmodule SymphonyElixir.Delivery do
     # gets published is the final change set, so it is the final one that is
     # accepted (a gate artifact has to be authorized in allowed_extra_paths, or
     # the run fails).
+    #
+    # `delivery.base_branch` is what the acceptance uses to find the candidate of a
+    # **clean** workspace (a resume): it reads the published candidate from git
+    # instead of reading the empty worktree, and it still executes the evidence the
+    # contract in force requires.
     with {:ok, issue_number} <- issue_number(issue),
          {:ok, github} <- GitHub.context(settings.tracker, github_opts),
-         {:ok, _early} <- Acceptance.scope(workspace, issue),
+         {:ok, _early} <- Acceptance.scope(workspace, issue, delivery.base_branch),
          :ok <- run_gates(workspace, delivery),
-         {:ok, evidence} <- Acceptance.evidence(workspace, issue, delivery),
-         {:ok, scope} <- Acceptance.scope(workspace, issue) do
+         {:ok, evidence} <- Acceptance.evidence(workspace, issue, delivery, delivery.base_branch),
+         {:ok, scope} <- Acceptance.scope(workspace, issue, delivery.base_branch) do
       publish(
         workspace,
         issue,

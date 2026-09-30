@@ -316,7 +316,11 @@ pipeline_contract:
   delivery continues; the architectural review decides.
 - The parser extracts the fenced `pipeline_contract:` block (or an unfenced body that starts
   with the key) and validates version, types and field names: content of the issue is **never
-  executed** (`eval`/`source`/shell are prohibited by design). Whether the body *declares* the
+  executed** (`eval`/`source`/shell are prohibited by design). The block ends on a fence of the
+  **same marker**, at least as long as the opening one and with nothing but whitespace after the
+  marker: an info string is only valid on the opening line, so a line such as ` ```not-a-close `
+  inside the block is content and cannot truncate it to a readable prefix. Whether the body
+  *declares* the
   contract is read from the **YAML parser**, not from a regex: the key may be written plain,
   quoted (`"scope_mode":`, `'scope_mode':`), tagged or with the explicit-key indicator
   (`? key`), and duplicates are counted on the parser nodes, before the decoder collapses equal
@@ -347,17 +351,24 @@ pipeline_contract:
   reported as complete**: it adds the `prohibition_scan_truncated` finding, so a `strict`
   contract fails closed instead of certifying the absence of a prohibition over a partial
   read, while `advisory` reports the divergence and continues.
-- With no candidate change set (a `--resume-only` cycle over an already published candidate,
-  or nothing to publish) the layer reports `not_applicable` instead of failing: that
-  candidate was accepted by the cycle that created it. Declared limit: a contract made
-  *stricter* after that publication is not re-evaluated on resume (the scope needs the
-  candidate diff, which the workspace no longer holds); the demanded *evidence* of the current
-  contract is still executed. `../docs/fork/acceptance-contract.md` §6 declares it.
+- A **clean** workspace is not "nothing to accept": when it holds a published candidate (the
+  branch head a `--resume-only` cycle is resuming), the layer derives the change set from git —
+  `HEAD` against the merge base with `delivery.base_branch` — scans the added lines of that
+  candidate and executes the required evidence of the contract in force, so a contract tightened
+  (or changed) after the publication is re-evaluated instead of reusing the acceptance of the
+  cycle that published it. `not_applicable` is reserved to a clean workspace sitting on the base
+  itself (no candidate at all), and a base branch that cannot be resolved is an error
+  (`delivery_base_missing`), never an empty diff.
+  `../docs/fork/acceptance-contract.md` §6 describes the resume.
 - Candidate reads fail closed: a change set above 5 000 entries
   (`change_set_too_large`) or with a non-UTF-8 path (`change_set_not_utf8`) is an error
   instead of a partial verdict, and every scan bound reached is declared
   (`change_scan_truncated`) — including an untracked regular file that could not be
-  read, which is a hole in the scan rather than a file "without findings". A rename
+  read, which is a hole in the scan rather than a file "without findings". Both change set
+  formats (porcelain and the candidate `--name-status`) are parsed **while they are read**: one
+  NUL-delimited field at a time, stopping at the first entry above the cap, so a candidate with
+  millions of paths never materialises a list of millions of entries before the bound applies. A
+  rename
   counts as two changes — the destination and the origin
   as a deletion, because the rename removed it — so authorizing only the new path does not
   authorize deleting the old one; a copy is only the destination.
@@ -366,8 +377,9 @@ pipeline_contract:
   final one is what gets accepted (a gate artifact has to be authorized in
   `allowed_extra_paths`).
 - The verdict is **structured data**, not a boolean: `status` (`:pass`, `:fail`,
-  `:advisory`, `:not_configured` for an issue without a contract, `:not_applicable` when there
-  is no candidate change set), `contract_version`, `mode`, `findings`, `evidence`,
+  `:advisory`, `:not_configured` for an issue without a contract, `:not_applicable` when the
+  workspace is clean and sits on the base, so there is no candidate), `contract_version`, `mode`,
+  `findings`, `evidence`,
   `change_set` and `limits`. Each finding carries a deterministic `code`
   (`invalid_contract`, `expected_path_missing`, `unexpected_path_changed`,
   `required_evidence_missing`, `required_evidence_failed`, `prohibition_scan_truncated`,
@@ -394,7 +406,8 @@ pipeline_contract:
   head is not the commit the acceptance and the local gates validated, so the run fails
   (`delivery_candidate_replaced`) instead of promoting it with another candidate's verdict.
   A **reconciled** run (a retry of an already published candidate, with no new change set)
-  binds the same way: its candidate is the local HEAD of the workspace, so a branch that
+  binds the same way: its candidate is the local HEAD of the workspace — accepted again from
+  git, with the evidence of the contract in force — so a branch that
   moved (a push from outside) is refused instead of being labeled with this run's verdict.
   No CI at all, a failing check or a timeout blocks the promotion.
 - State comes from GitHub (open pull request, ref, check runs, labels, comments), so a

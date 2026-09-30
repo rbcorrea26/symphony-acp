@@ -60,6 +60,7 @@ Regras do parser (`SymphonyElixir.PipelineContract`):
 | conteúdo de block scalar (`key: \|`, `key: >-`, `- \|`) | é **texto**: a chave ou a âncora escrita dentro dele não conta (o escalar termina na primeira linha menos indentada) |
 | cabeçalho de block scalar com os dois indicadores (`\|2-`, `\|-2`) | as duas ordens valem: o conteúdo é texto nas duas |
 | string com aspas que atravessa linhas físicas | a continuação continua sendo **scalar** (o estado da citação sobrevive ao `\n`), então `&notes` ali não é âncora |
+| cerca de fechamento | mesmo marcador da abertura, comprimento ≥ o da abertura e **nada além de espaços** depois do marcador: uma linha como ` ```not-a-close ` é conteúdo do bloco (não trunca o YAML nem esconde os campos que vêm depois) e uma linha de abertura com info string (` ```yaml `) nunca fecha |
 | cerca de fechamento com o mesmo marcador e mais caracteres que a abertura | fecha o bloco (CommonMark): a prosa seguinte não é lida como YAML |
 | `pipeline_contract:` dentro de um scalar **e** bloco que não pode ser decodificado | a dica de chave roda no texto com o scalar blankado: um scalar não declara o contrato (nem sequer para reprovar), mas um bloco que cita a chave fora de scalar segue falhando fechado |
 | aspas simples escapada (`''`) dentro de scalar | continua sendo **um** scalar (`'docs/it''s &notes.md'` não é scalar + âncora) |
@@ -159,9 +160,14 @@ atingido** (`change_scan_truncated`): 1 MiB de texto de diff (lido do processo f
 e cortado no cap — o `git diff` é encerrado nesse ponto, o diff inteiro nunca é
 capturado na memória), 200 arquivos não rastreados, 262 144 bytes por arquivo não
 rastreado, 2 000 linhas adicionadas, 5 achados por tipo e trecho de 80 caracteres. O
-limite residual declarado: a captura de `git status`/`git ls-files` é proporcional ao
-número de paths do candidato (o change set é limitado a 5 000 entradas); o *parse* e
-as estruturas construídas aqui são limitados.
+limite residual declarado: a captura de `git status`/`git ls-files` (e a do `git diff`
+do candidato publicado) é proporcional ao número de paths do candidato (o change set é
+limitado a 5 000 entradas); o *parse* dos **dois** formatos é limitado **enquanto lê** —
+um campo NUL-delimited por vez, parando na primeira entrada acima do cap, sem
+materializar a lista inteira antes — e as estruturas construídas aqui são limitadas.
+Consequência declarada dessa leitura incremental: um input enorme cujo *tail* não é
+UTF-8 devolve `change_set_too_large` (o tail não chega a ser lido), enquanto um path não
+UTF-8 **dentro** do cap devolve `change_set_not_utf8` — as duas falham fechado.
 
 **Varredura parcial não passa por completa**: quando o cap é atingido (no diff lido,
 nos arquivos ou nas linhas), o veredicto ganha o finding
@@ -182,7 +188,8 @@ apenas "este contrato não proíbe". Quem autoriza deploy é a política da plat
 | Situação | Status do veredicto | Efeito no run |
 |---|---|---|
 | contrato ausente | `:not_configured` | nenhum (comportamento anterior, ADR-0005) |
-| sem change set novo (`--resume-only`, nada a publicar) | `:not_applicable` | nenhum (o candidato publicado foi aceito quando foi criado) — o limite disso está na seção 6 |
+| workspace limpo **e** candidato publicado (HEAD ≠ base) | `:pass` / `:fail` (recalculado do Git) | o candidato é reavaliado antes de promover (seção 6.1) |
+| workspace limpo **e** sem candidato (HEAD na base) | `:not_applicable` | nenhum: não há candidato a aceitar |
 | `strict`, sem achados | `:pass` | segue: gates → evidências → publicação |
 | `strict`, com achados | `:fail` | run falha **sem publicar** (nada de branch/PR/rótulo/comentário) |
 | `strict`, varredura de proibição **truncada** | `:fail` (`prohibition_scan_truncated`) | run falha sem publicar: um scan parcial não certifica ausência de proibição |
@@ -194,19 +201,37 @@ evidência), então repetir o aceite sobre o mesmo candidato dá o mesmo resulta
 retry não publica nada em caso de falha e não duplica o comentário em caso de
 sucesso (o comentário é chaveado pelo SHA do candidato).
 
-### Retomada (`--resume-only`) e contrato alterado (limite declarado)
+### 6.1 Retomada (`--resume-only`) de um candidato publicado
 
-Quando não há change set novo, o escopo é `not_applicable`: o candidato publicado foi
-aceito pelo ciclo que o criou, com o contrato **em vigor naquele momento**, e o run
-de retomada só reexecuta as **evidências** exigidas pelo contrato atual (elas não
-dependem do diff). Limite declarado: se o corpo da issue declarar um contrato **mais
-exigente** depois da publicação e o run for retomado, os requisitos de **escopo**
-novos não são reavaliados — a mudança candidato↔base não está no workspace. Fechar
-isso exigiria reavaliar o diff do candidato contra a base (um `fetch` no meio da
-entrega, que este estágio evita de propósito: a única rede que ele usa é o push) ou
-persistir um fingerprint do contrato aceito; os dois são incremento e não esta
-camada. O que fica auditável é o comentário de handoff, que registra o veredicto
-de então com o SHA do candidato.
+Um workspace **limpo** não é "nada a aceitar". Quando ele está em um commit do branch de
+entrega (o candidato publicado), o aceite é **recalculado sobre o candidato**, lido do
+Git, e o veredicto anterior **nunca é reusado**:
+
+- o change set sai do diff do candidato — `HEAD` contra a merge base com a branch base
+  (`delivery.base_branch`), `git diff --name-status -z` —, não do worktree vazio, que
+  seria um change set inventado;
+- rename continua sendo destino + origem **como deleção** e copy só o destino, aqui como
+  no caminho do porcelain (no formato `--name-status` a origem vem **antes** do destino);
+- a varredura de proibição lê as linhas adicionadas **do candidato** (o mesmo diff contra
+  a base, mais os não rastreados que estiverem no worktree);
+- as evidências exigidas pelo contrato **em vigor** rodam de novo: um contrato que passou
+  a exigir uma evidência nova (ou cujo provider passou a falhar) não é "aceito pelo ciclo
+  que publicou";
+- uma mudança material do contrato depois da publicação (`expected_paths` diferente, uma
+  proibição nova, uma evidência nova) é reavaliada de forma determinística: ou o
+  candidato satisfaz o contrato novo, ou o run falha sem promover nem comentar;
+- `not_applicable` fica reservado ao workspace limpo que **está na base** (não há
+  candidato nenhum), e uma branch base que não resolve é erro (`delivery_base_missing`) —
+  nunca um diff vazio lido como "o candidato não mudou nada";
+- a promoção do run de retomada (reconciliar o candidato já publicado) continua amarrada
+  ao SHA: um head de branch diferente do HEAD local falha com `delivery_candidate_replaced`.
+
+Limite declarado: o sujeito do aceite é o que o run **vai promover**. Com o worktree
+sujo, o change set é o delta do worktree contra `HEAD` — o que este run commita e
+publica —, e o conteúdo dos commits anteriores do mesmo branch não entra nele. Nenhum
+caminho de retomada transforma ausência de execução de evidência em `PASS`: sem candidato
+o status é `not_applicable`, e com candidato as evidências exigidas rodam (falha continua
+fail-closed em `strict` e advisory em `advisory`).
 
 ## 7. Códigos de finding
 

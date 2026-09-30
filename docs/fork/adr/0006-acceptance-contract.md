@@ -74,6 +74,13 @@ Um achado `strict` do escopo falha o run **antes** dos gates, de propósito: um
 candidato fora do escopo não merece o custo de um gate. Nenhuma das três
 camadas substitui a outra.
 
+O escopo é avaliado **duas vezes**: a primeira é o fail-fast descrito acima e a
+segunda acontece depois das evidências, porque gates e comandos de evidência rodam
+**dentro** do workspace e podem criar ou alterar arquivos. O que é publicado é o
+change set final, então é ele que precisa ser aceito: um artefato gerado pelo gate
+tem que estar em `allowed_extra_paths` (ou o run falha com
+`unexpected_path_changed`).
+
 ### 3. Evidência é nomeada: a issue exige o nome, o workflow fornece o comando
 
 `required_evidence` é uma lista de **nomes**, não de comandos (a issue não pode
@@ -125,8 +132,10 @@ convertida em `PASS` silencioso.
 
 - YAML: só decodificação de dados com tipos explícitos; tags recusadas pelo decoder
   (`!foo`, `!ruby/object`, `!!python/...`) e âncoras recusadas pelo parser antes de
-  decodificar (sem alias/expansão, e portanto sem bom de aliases);
-- duplicidade ambígua (dois blocos ou duas chaves) é recusada, nunca "escolhida";
+  decodificar (sem alias/expansão, e portanto sem bomba de aliases);
+- duplicidade ambígua é recusada, nunca "escolhida": dois blocos, duas chaves
+  `pipeline_contract` e uma **mesma chave repetida dentro do mapeamento**
+  (`duplicate_field`) — o decoder YAML manteria uma delas em silêncio;
 - nenhum dado do contrato chega a um shell: o comando executado vem de
   `delivery.gates`/`delivery.evidence` (configuração do projeto) e a issue só
   contribui com **nomes** de evidência;

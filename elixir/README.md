@@ -331,6 +331,10 @@ pipeline_contract:
 - With no candidate change set (a `--resume-only` cycle over an already published candidate,
   or nothing to publish) the layer reports `not_applicable` instead of failing: that
   candidate was accepted by the cycle that created it.
+- The scope is evaluated again **after** the gates and the evidence commands, because they run
+  inside the workspace and may create files: what is published is the final change set, so the
+  final one is what gets accepted (a gate artifact has to be authorized in
+  `allowed_extra_paths`).
 - The verdict is **structured data**, not a boolean: `status` (`:pass`, `:fail`,
   `:advisory`, `:not_configured` for an issue without a contract, `:not_applicable` when there
   is no candidate change set), `contract_version`, `mode`, `findings`, `evidence`,

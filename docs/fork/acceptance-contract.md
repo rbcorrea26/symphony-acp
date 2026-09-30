@@ -54,6 +54,7 @@ Regras do parser (`SymphonyElixir.PipelineContract`):
 | lista vazia em `allowed_extra_paths`/`required_evidence` | válido (é a ausência de autorização/exigência) |
 | path absoluto, com `..`, com `\` ou vazio | `{:invalid_pattern, _, _}` → reprova |
 | dois blocos, ou duas chaves `pipeline_contract` | `{:ambiguous_contracts, n}` / `{:duplicate_contract_key, n}` → reprova |
+| uma mesma chave repetida no mapeamento (bloco ou flow) | `{:duplicate_field, "scope_mode"}` → reprova |
 | tag YAML (`!foo`, `!ruby/object`, `!!python/...`) | `{:invalid_yaml, %{type: :unrecognized_node}}` → reprova |
 | âncora (`&name`) | `{:anchors_not_supported, "&name"}` → reprova (alias/expansão não têm uso no schema) |
 | bloco > 64 KiB, lista > 256 itens, padrão > 512 chars | reprova |
@@ -68,6 +69,13 @@ são comparados (regex ancorada) com o change set, nunca resolvidos no filesyste
 no repositório": a comparação é com o **change set do candidato** (o que será
 publicado), obtido de `git status --porcelain -z -uall`. Um arquivo que já existia
 na base e não foi tocado **não satisfaz** o contrato — foi exatamente o caso #64.
+
+O escopo é avaliado **duas vezes** no run: antes dos gates (fail-fast) e **depois**
+das evidências, porque gates e comandos de evidência rodam dentro do workspace e
+podem criar arquivos. O que é publicado é o change set final, então é ele que
+precisa ser aceito: um artefato (`coverage/`, `evidence.txt`) entra no candidato e
+tem que estar em `allowed_extra_paths` — caso contrário o run falha com
+`unexpected_path_changed`.
 
 | Caso no candidato | Como aparece no change set | `expected_paths` | `allowed_extra_paths` |
 |---|---|---|---|
@@ -110,9 +118,12 @@ contagem de testes, SHA ou saída de comando — só nome, status e comando.
 | conteúdo/qualidade do que foi entregue | **não** | é dos gates, da review e do arquiteto |
 
 Essa distinção é declarada na resposta (`limits`) e no comentário de handoff, em
-vez de virar `PASS` silencioso. A varredura é limitada (200 arquivos não
-rastreados, 2 000 linhas adicionadas, 5 achados por tipo, trecho de 80 caracteres)
-e diz `change_scan_truncated` quando o limite foi atingido.
+vez de virar `PASS` silencioso. A varredura é limitada e **declara cada limite
+atingido** (`change_scan_truncated`): 200 arquivos não rastreados, 262 144 bytes por
+arquivo não rastreado, 1 MiB de texto de diff para parse, 2 000 linhas adicionadas,
+5 achados por tipo e trecho de 80 caracteres. O limite residual declarado: a captura
+do `git diff` em si é proporcional ao diff do candidato (o processo filho é lido
+inteiro); o *parse* e as estruturas construídas é que são limitados.
 
 `deploy: true` / `remote_access: true` **não concedem capacidade**: significam
 apenas "este contrato não proíbe". Quem autoriza deploy é a política da plataforma
@@ -178,8 +189,10 @@ bloqueio persistido no GitHub é escopo da #13.
 - **segredos**: o texto dos findings é mascarado (`gho_*`, `ghp_*`, `github_pat_*`,
   `sk-*`, `x-access-token:`), truncado e sem quebras de linha antes de ir para log
   ou comentário; a saída das evidências não é persistida;
-- **injeção em comentário**: `<` é neutralizado no texto humano, então uma alteração
-  do candidato não consegue reescrever o comentário nem forjar marcação de handoff;
+- **injeção em comentário**: `<` é neutralizado no texto humano (mensagem **e** o
+  path mostrado na prosa), então uma alteração do candidato não consegue reescrever
+  o comentário nem forjar marcação de handoff; o campo `Finding.path` permanece
+  literal para o consumidor de máquina;
 - **comandos**: só vêm de `delivery.gates`/`delivery.evidence` (configuração do
   projeto). A issue contribui com **nomes** de evidência, nunca com comandos.
 

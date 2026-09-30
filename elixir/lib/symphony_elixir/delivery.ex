@@ -154,20 +154,18 @@ defmodule SymphonyElixir.Delivery do
     end
   end
 
-  # The acceptance and the local gates were computed over the workspace content that
-  # `prepare/4` committed and pushed. If the branch head observed at the end is
-  # another commit (a push that landed during the observation), that content was
-  # never accepted: the handoff must not attach this verdict — nor the promotion
-  # labels — to it, so the run fails instead.
-  defp require_accepted_candidate(%{mode: :created, sha: sha}, %{sha: sha}), do: :ok
+  # The candidate that gets promoted must be the commit this run accepted: the one
+  # `prepare/4` committed and pushed (`mode: :created`) or the local HEAD a reconciled
+  # run is resuming (`mode: :reconciled`). A branch head that moved — a push that landed
+  # before or during the observation, so nobody here accepted it — is never promoted
+  # with this verdict, and never labeled.
+  defp require_accepted_candidate(%{sha: sha}, %{sha: sha}), do: :ok
 
-  defp require_accepted_candidate(%{mode: :created, sha: accepted}, %{sha: observed}) do
-    Logger.error("Delivery candidate replaced before the handoff accepted=#{accepted} observed=#{observed}")
+  defp require_accepted_candidate(%{mode: mode, sha: accepted}, %{sha: observed}) do
+    Logger.error("Delivery candidate replaced mode=#{mode} accepted=#{accepted} observed=#{observed}")
 
     {:error, {:delivery_candidate_replaced, accepted, observed}}
   end
-
-  defp require_accepted_candidate(_prepared, _candidate), do: :ok
 
   defp publish(workspace, issue, delivery, github, issue_number, settings, acceptance) do
     with {:ok, prepared} <- prepare(workspace, issue, delivery, github),
@@ -212,13 +210,18 @@ defmodule SymphonyElixir.Delivery do
     end
   end
 
-  # Nothing to publish locally: either the issue was already delivered (the open
-  # pull request of the branch is the record) or the execution produced no change.
-  defp reconcile(branch, github) do
-    case GitHub.open_pull(github, branch) do
-      {:ok, nil} -> {:error, :delivery_no_changes}
-      {:ok, pull} -> {:ok, %{branch: branch, mode: :reconciled, pull: pull, sha: nil}}
-      {:error, reason} -> {:error, reason}
+  # Nothing to publish locally: the open pull request of the branch is the record of a
+  # previous cycle. The candidate of a reconciled run is the **local HEAD** — the
+  # content this workspace holds and this run accepts —, so a branch that moved (a push
+  # nobody accepted here) is refused by `require_accepted_candidate/2` instead of being
+  # promoted with this run's verdict.
+  defp reconcile(workspace, branch, github) do
+    with {:ok, head} <- Git.head_sha(workspace) do
+      case GitHub.open_pull(github, branch) do
+        {:ok, nil} -> {:error, :delivery_no_changes}
+        {:ok, pull} -> {:ok, %{branch: branch, mode: :reconciled, pull: pull, sha: head}}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
@@ -226,7 +229,7 @@ defmodule SymphonyElixir.Delivery do
     branch = branch_name(issue, delivery)
 
     case Git.status(workspace) do
-      {:ok, []} -> reconcile(branch, github)
+      {:ok, []} -> reconcile(workspace, branch, github)
       {:ok, _changed} -> create(workspace, issue, branch, delivery, github)
       {:error, reason} -> {:error, reason}
     end

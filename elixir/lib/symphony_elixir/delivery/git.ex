@@ -432,8 +432,17 @@ defmodule SymphonyElixir.Delivery.Git do
         lines = content |> String.split(~r/\r?\n/, trim: true) |> Enum.flat_map(&added_line(path, &1))
         {lines, partial}
 
-      {:error, _reason} ->
+      # Not a regular file (a symlink, a directory, a device): skipping it is
+      # deliberate and does not make the scan partial — its content is not a line of
+      # the candidate, and following a link could read outside the workspace.
+      {:error, {:not_a_regular_file, _type}} ->
         {[], false}
+
+      # A regular file that could not be read is a **hole in the scan**: it may hold a
+      # prohibition this layer cannot see, so the scan is declared incomplete instead
+      # of complete-without-that-file (strict fails closed, advisory reports it).
+      {:error, _reason} ->
+        {[], true}
     end
   end
 

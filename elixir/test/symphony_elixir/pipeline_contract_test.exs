@@ -491,6 +491,83 @@ defmodule SymphonyElixir.PipelineContractTest do
       assert {:error, {:pipeline_contract_invalid, {:anchors_not_supported, "&paths"}}} = Contract.parse(body)
     end
 
+    test "a block scalar hides its content from the hints and from the anchor scan" do
+      # The content of `notes: |` (and of `>`, and of a sequence entry `- |`) is text:
+      # an indented `pipeline_contract:` there is not a key and an `&anchor` there is
+      # not an indicator, so the body is not a contract and nothing is refused.
+      literal = """
+      ```yaml
+      notes: |
+        pipeline_contract:
+        version: 1
+      ```
+      """
+
+      assert Contract.parse(literal) == :absent
+
+      folded = """
+      ```yaml
+      example: >-
+        &anchor pipeline_contract: 1
+      ```
+      """
+
+      assert Contract.parse(folded) == :absent
+
+      sequence = """
+      ```yaml
+      - |
+        pipeline_contract:
+          version: 1
+          scope_mode: advisory
+      ```
+      """
+
+      assert Contract.parse(sequence) == :absent
+
+      # The scalar ends at the first line that is not more indented: the block *after*
+      # it is read again (the state does not leak).
+      after_scalar = """
+      ```yaml
+      notes: |
+        pipeline_contract: 1
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+      ```
+      """
+
+      assert {:ok, contract} = Contract.parse(after_scalar)
+      assert contract.scope_mode == :advisory
+    end
+
+    test "a doubled apostrophe stays inside the single-quoted scalar" do
+      body = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+        expected_paths:
+          - 'docs/it''s &notes.md'
+      ```
+      """
+
+      assert {:ok, contract} = Contract.parse(body)
+      assert contract.expected_paths == ["docs/it's &notes.md"]
+
+      # ...and a real anchor right after the escaped pair is still structure.
+      anchored = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+        expected_paths: ['', &notes]
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:anchors_not_supported, "&notes"}}} = Contract.parse(anchored)
+    end
+
     test "an anchor whose name is not ASCII is refused too" do
       # YAML's anchor name is any run of characters that is not whitespace and not a
       # flow indicator, so `&çaminho` and `&ação` are anchors: an ASCII-only token

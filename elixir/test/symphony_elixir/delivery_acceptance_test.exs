@@ -266,19 +266,38 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       assert message =~ "&lt;!--"
     end
 
-    test "an untracked binary, an empty file and an unreadable file are skipped", %{workspace: workspace} do
+    test "an untracked binary and an empty file are skipped without making the scan partial", %{workspace: workspace} do
       write!(workspace, "README.md", "base\nmore\n")
       File.write!(Path.join(workspace, "logo.bin"), <<0xFF, 0xFE, 0x00, 0x01>>)
       File.write!(Path.join(workspace, "empty.txt"), "")
+
+      issue = issue(contract_body(allowed_extra_paths: ["logo.bin", "empty.txt"]))
+
+      assert {:ok, %Result{status: :pass, findings: []} = result} = Acceptance.scope(workspace, issue)
+      refute :change_scan_truncated in result.limits
+    end
+
+    test "an untracked regular file that cannot be read makes the scan partial", %{workspace: workspace} do
+      write!(workspace, "README.md", "base\nmore\n")
 
       path = Path.join(workspace, "secret.txt")
       File.write!(path, "ssh prod\n")
       File.chmod!(path, 0o000)
       on_exit(fn -> File.chmod(path, 0o600) end)
 
-      issue = issue(contract_body(allowed_extra_paths: ["logo.bin", "empty.txt", "secret.txt"]))
+      # The suite runs as a regular user (root would read the file): what is asserted
+      # is the fail-closed behavior of the scan, not the permission model.
+      assert {:error, :eacces} = File.read(path)
 
-      assert {:ok, %Result{status: :pass, findings: []}} = Acceptance.scope(workspace, issue)
+      issue = issue(contract_body(allowed_extra_paths: ["secret.txt"]))
+
+      # A hole in the scan is not a complete scan: the file may hold a prohibition the
+      # layer cannot see, so a strict contract fails instead of passing.
+      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue)
+
+      assert result.status == :fail
+      assert [%Finding{code: :prohibition_scan_truncated}] = result.findings
+      assert :change_scan_truncated in result.limits
     end
 
     test "a symlink is not followed by the scan", %{workspace: workspace} do

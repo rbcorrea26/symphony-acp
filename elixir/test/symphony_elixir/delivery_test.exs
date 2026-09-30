@@ -764,6 +764,30 @@ defmodule SymphonyElixir.DeliveryTest do
              Delivery.run(not_a_repo, @issue, github_opts(fake!()))
   end
 
+  test "a reconciled candidate that moved on the remote is not promoted", %{workspace: workspace} do
+    configure!([])
+    fake = fake!()
+    change_answer!(workspace, "42")
+
+    # Cycle one publishes the candidate: the workspace holds it and the branch is it.
+    assert {:ok, first} = Delivery.run(workspace, @issue, github_opts(fake))
+    assert first.candidate_sha == FakeGitHub.sha(fake, delivery_branch())
+
+    # Somebody else pushes to the delivery branch: the new head was never accepted (nor
+    # gated) here, so the reconciled run must not promote it with this run's verdict.
+    push_out_of_band!()
+
+    assert {:error, {:delivery_candidate_replaced, accepted_sha, observed_sha}} =
+             Delivery.run(workspace, @issue, github_opts(fake))
+
+    assert accepted_sha == first.candidate_sha
+    assert observed_sha == FakeGitHub.sha(fake, delivery_branch())
+    assert accepted_sha != observed_sha
+
+    # Only the comment of cycle one exists; the moved head got no handoff.
+    assert length(FakeGitHub.state(fake).comments) == 1
+  end
+
   test "the entry label is removed when it exists", %{workspace: workspace} do
     configure!([])
     fake = fake!(labels: ["pipeline:ready"])
@@ -1111,6 +1135,31 @@ defmodule SymphonyElixir.DeliveryTest do
 
   defp change_answer!(workspace, content) do
     File.write!(Path.join(workspace, "answer.sh"), "#!/usr/bin/env bash\necho \"#{content}\"\n")
+  end
+
+  # A push that does not come from this workspace: a second clone writes its own commit
+  # and pushes it to the delivery branch, so the local HEAD and the branch head differ.
+  defp push_out_of_band! do
+    origin = Process.get(:delivery_origin)
+    other = Path.join(Path.dirname(to_string(origin)), "out-of-band-#{System.unique_integer([:positive])}")
+
+    git!(nil, ["clone", "-q", origin, other])
+    git!(other, ["checkout", "-q", "-B", delivery_branch(), "origin/#{delivery_branch()}"])
+    File.write!(Path.join(other, "answer.sh"), "#!/usr/bin/env bash\necho \"42\"\n# out of band\n")
+    git!(other, ["add", "-A"])
+
+    git!(other, [
+      "-c",
+      "user.name=Other",
+      "-c",
+      "user.email=other@example.org",
+      "commit",
+      "-q",
+      "-m",
+      "out of band"
+    ])
+
+    git!(other, ["push", "-q", "origin", "HEAD:refs/heads/#{delivery_branch()}"])
   end
 
   defp contract_issue(options) do

@@ -145,6 +145,9 @@ defmodule SymphonyElixir.PipelineContract do
   # glob pattern such as `docs/*.md` or `**/x.sh` and an `&` inside a value or a
   # quoted string are untouched.
   @anchor_token ~r/(?:^|[\s:,\[\]{}])&[^\s,\[\]{}]+/m
+  # A block scalar indicator at the end of a line (`key: |`, `key: >-`, `- |2`), where
+  # YAML reads the value as a literal/folded block: the lines under it are text.
+  @block_indicator ~r/(?:^|[:\-])[ \t]*[|>][0-9]*[+\-]?[ \t]*$/
 
   # Fixed rules of `deploy: false`. They run over the *added* lines of the
   # candidate only, so a line that merely documents the pipeline (in an
@@ -497,19 +500,21 @@ defmodule SymphonyElixir.PipelineContract do
     end
   end
 
-  # The block with every comment and every quoted scalar blanked out, so the anchor
-  # scan only sees what YAML reads as structure: inside a scalar or a comment an `&`
-  # is data (`- "docs/R&D &notes.md"`, `# see &notes`), never an indicator. A scalar
-  # or a comment only begins where YAML allows it — after a blank, after
-  # `:`/`[`/`,`/`{` or at the start of a line —, so a quote inside a plain scalar
-  # (`it's`) stays data too. Blanking keeps the position of what is left, which is
-  # what the token class of `@anchor_token` needs around the `&`; it works on bytes,
-  # so a path that is not valid UTF-8 cannot make it crash either.
+  # The block with every comment, quoted scalar and block-scalar content blanked out,
+  # so the text hints and the anchor scan only see what YAML reads as structure: inside
+  # a scalar or a comment an `&` or a `pipeline_contract:` is data
+  # (`- "docs/R&D &notes.md"`, `# see &notes`, `notes: |` with an indented example),
+  # never an indicator or a key. A scalar or a comment only begins where YAML allows it
+  # — after a blank, after `:`/`[`/`,`/`{` or at the start of a line —, so a quote
+  # inside a plain scalar (`it's`) stays data too. Blanking keeps the position of what
+  # is left, which is what the token class of `@anchor_token` needs around the `&`; it
+  # works on bytes, so a path that is not valid UTF-8 cannot make it crash either.
   defp without_scalars(block) do
     block
     |> :binary.bin_to_list()
     |> blank_scalars(:plain, ?\n, [])
     |> :binary.list_to_bin()
+    |> blank_block_scalars()
   end
 
   defp blank_scalars([], _state, _previous, acc), do: Enum.reverse(acc)
@@ -534,11 +539,48 @@ defmodule SymphonyElixir.PipelineContract do
   defp blank_scalars([?\\, _escaped | rest], :double, _previous, acc), do: blank_scalars(rest, :double, ?x, ["  " | acc])
   defp blank_scalars([_character | rest], :double, previous, acc), do: blank_scalars(rest, :double, previous, [" " | acc])
 
+  defp blank_scalars([?', ?' | rest], :single, _previous, acc), do: blank_scalars(rest, :single, ?', ["  " | acc])
   defp blank_scalars([?' | rest], :single, _previous, acc), do: blank_scalars(rest, :plain, ?', [" " | acc])
   defp blank_scalars([_character | rest], :single, previous, acc), do: blank_scalars(rest, :single, previous, [" " | acc])
 
   defp blank_scalars([_character | rest], :comment, previous, acc) do
     blank_scalars(rest, :comment, previous, [" " | acc])
+  end
+
+  # In a single-quoted scalar the escaped quote is `''`, so a lone `'` is the only one
+  # that closes it: `'docs/it''s &notes.md'` is one scalar, not a scalar plus a stray
+  # `&notes`.
+
+  # The content of a block scalar (`key: |`, `key: >-`, `- |2`) is text, not structure:
+  # it is blanked too, so an indented `pipeline_contract:` or `&example` inside it can
+  # neither claim the contract key nor be read as an anchor. `indent` is the
+  # indentation of the line that opened the scalar: every following line that is blank
+  # or more indented belongs to it (YAML ends the scalar at the first line that is
+  # not), and an explicit indentation indicator (`|2`) makes the content narrower than
+  # that bound, so the bound is what is used. Blanking preserves each line's length.
+  defp blank_block_scalars(blanked) do
+    {lines, _indent} =
+      blanked
+      |> String.split("\n")
+      |> Enum.map_reduce(nil, fn line, indent ->
+        if indent != nil and (blank_content?(line) or line_indent(line) > indent) do
+          {String.duplicate(" ", byte_size(line)), indent}
+        else
+          {line, block_scalar_indent(line)}
+        end
+      end)
+
+    Enum.join(lines, "\n")
+  end
+
+  defp blank_content?(line), do: String.trim(line) == ""
+
+  defp block_scalar_indent(line) do
+    if Regex.match?(@block_indicator, line), do: line_indent(line), else: nil
+  end
+
+  defp line_indent(line) do
+    line |> :binary.bin_to_list() |> Enum.take_while(&(&1 in [?\s, ?\t])) |> length()
   end
 
   # A fence that never closes still counts as a block: a malformed code fence must

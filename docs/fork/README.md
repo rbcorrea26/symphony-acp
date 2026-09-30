@@ -74,6 +74,14 @@ comportamento, os limites e a evidência medida em
 [delivery-and-promotion.md](delivery-and-promotion.md). Nada disso é obrigatório: sem
 o bloco `delivery` o comportamento upstream (e o caminho Codex) continua igual.
 
+**Fase 7b — ciclo de vida sob demanda (em implementação).** A plataforma passou a ter um
+dispatcher local ([ADR-0009](https://github.com/rbcorrea26/agentic-dev-environment/blob/main/docs/architecture/adr/0009-execucao-sob-demanda-do-pipeline.md))
+que inicia o Symphony **somente quando há trabalho** e espera que ele **encerre** o ciclo.
+Para isso o fork ganhou `--exit-when-idle`, `--issue <id>`, `--resume-only` e
+`--max-runtime-seconds` (encerramento gracioso, nunca `kill`) — contrato, códigos de saída,
+superfície alterada e o que **ainda falta** (contrato de aceite, máquina de estados da
+review, architect runner) em [lifecycle.md](lifecycle.md).
+
 ## 2. Relação `origin` / `upstream`
 
 | Remote | URL | Papel |

@@ -43,7 +43,15 @@ defmodule SymphonyElixir.AgentRunner do
 
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host),
-               :ok <- run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+               :ok <-
+                 maybe_run_agent_turns(
+                   resume_only?(opts),
+                   workspace,
+                   issue,
+                   codex_update_recipient,
+                   opts,
+                   worker_host
+                 ) do
             deliver(workspace, issue, worker_host)
           end
         after
@@ -65,6 +73,23 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, _result} -> :ok
       {:error, reason} -> {:error, {:delivery_failed, reason}}
     end
+  end
+
+  # `--resume-only`: o ciclo apenas avanca um estado assincrono (CI, review,
+  # arquiteto) do candidato JA publicado. Os turnos do agente nao rodam de novo:
+  # repetir o trabalho gastaria tokens e poderia produzir um candidate novo -- e
+  # portanto uma review nova -- sem que ninguem tenha pedido.
+  defp resume_only?(opts) do
+    Keyword.get(opts, :resume_only, Application.get_env(:symphony_elixir, :resume_only, false)) == true
+  end
+
+  defp maybe_run_agent_turns(true, _workspace, issue, _codex_update_recipient, _opts, _worker_host) do
+    Logger.info("Resume-only cycle for #{issue_context(issue)}: agent turns skipped")
+    :ok
+  end
+
+  defp maybe_run_agent_turns(false, workspace, issue, codex_update_recipient, opts, worker_host) do
+    run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
   end
 
   defp codex_message_handler(recipient, issue) do

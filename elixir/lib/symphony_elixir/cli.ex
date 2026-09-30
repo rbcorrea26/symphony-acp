@@ -140,7 +140,10 @@ defmodule SymphonyElixir.CLI do
       issue == "" ->
         {:error, usage_message()}
 
-      is_integer(max_runtime) and max_runtime < 0 ->
+      # `0` desligaria o teto em silencio (`on_demand_deadline_ms/1` so aceita
+      # valores positivos): sem a flag o ciclo nao tem teto, com ela o pedido tem
+      # que ser explicito.
+      is_integer(max_runtime) and max_runtime <= 0 ->
         {:error, usage_message()}
 
       true ->

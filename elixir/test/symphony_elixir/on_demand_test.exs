@@ -119,6 +119,15 @@ defmodule SymphonyElixir.OnDemandTest do
       refute_received {:run_options, _}
     end
 
+    test "recusa teto de duracao zero (que desligaria o teto em silencio)" do
+      clear_on_demand_env()
+
+      assert {:error, message} = CLI.evaluate([@ack_flag, "--max-runtime-seconds", "0"], cli_deps(self()))
+
+      assert message =~ "Usage: symphony"
+      refute_received {:run_options, _}
+    end
+
     test "recusa identificador de issue vazio" do
       clear_on_demand_env()
       assert {:error, message} = CLI.evaluate([@ack_flag, "--issue", ""], cli_deps(self()))
@@ -177,6 +186,51 @@ defmodule SymphonyElixir.OnDemandTest do
 
       assert_receive {:shutdown, 3}, 5_000
       assert Shutdown.exit_code_for_reason(:shutdown) == 3
+    end
+
+    test "o teto e respeitado sem esperar o proximo poll" do
+      clear_on_demand_env()
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        poll_interval_ms: 30_000
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      Application.put_env(:symphony_elixir, :max_runtime_seconds, 1)
+      shutdown_to_test()
+
+      start_orchestrator()
+
+      # Com poll de 30s, o teto de 1s so e visto se o proximo ciclo for agendado no
+      # vencimento dele (e nao no fim do intervalo de poll).
+      assert_receive {:shutdown, 3}, 3_000
+    end
+
+    test "teto vencido nao inicia trabalho novo" do
+      clear_on_demand_env()
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        poll_interval_ms: 30_000
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      Application.put_env(:symphony_elixir, :max_runtime_seconds, 1)
+      shutdown_to_test()
+
+      start_orchestrator()
+
+      # O item fica despachavel entre o primeiro poll e o vencimento do teto: o ciclo
+      # que cai no teto nao pode iniciar um run que seria abandonado no mesmo instante.
+      Process.sleep(500)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [resume_issue("issue-3", "GH-73")])
+
+      log = capture_log(fn -> assert_receive {:shutdown, 3}, 5_000 end)
+
+      # Controle de que o log do orquestrador (outro processo) foi capturado.
+      assert log =~ "On-demand cycle finished"
+      refute log =~ "Dispatching issue to agent"
     end
   end
 

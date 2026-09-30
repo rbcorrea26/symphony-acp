@@ -128,8 +128,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
-    {state, outcome} = maybe_dispatch(state)
-    state = schedule_tick(state, state.poll_interval_ms)
+    {state, outcome} = maybe_dispatch_within_deadline(state)
+    state = schedule_tick(state, next_tick_delay_ms(state))
     state = %{state | poll_check_in_progress: false}
 
     notify_dashboard()
@@ -1697,17 +1697,41 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp on_demand_outcome(%State{} = state, outcome) do
     cond do
+      # Idle comprovado vence o teto: encerrar com 3 faria o dispatcher repetir um
+      # ciclo que ja terminou.
+      state.exit_when_idle and outcome == :idle_candidate and idle_state?(state) ->
+        {:stop, 0, "nothing left to do (idle)"}
+
       deadline_expired?(state) ->
         {:stop, 3, "runtime cap reached (work may still be pending)"}
 
-      not state.exit_when_idle ->
-        :continue
-
-      outcome == :idle_candidate and idle_state?(state) ->
-        {:stop, 0, "nothing left to do (idle)"}
-
       true ->
         :continue
+    end
+  end
+
+  # `--max-runtime-seconds` e um prazo: um ciclo que comeca depois dele nao despacha
+  # trabalho novo (o processo ja vai encerrar) e vai direto para o desfecho, em vez
+  # de iniciar um item que seria abandonado no mesmo instante.
+  defp maybe_dispatch_within_deadline(%State{} = state) do
+    if deadline_expired?(state) do
+      {state, :not_idle}
+    else
+      maybe_dispatch(state)
+    end
+  end
+
+  # O proximo ciclo acontece no poll normal ou no vencimento do teto, o que vier
+  # primeiro: sem isso um teto curto so seria notado no poll seguinte (30s por
+  # omissao) e o processo passaria do prazo pedido pelo dispatcher.
+  defp next_tick_delay_ms(%State{poll_interval_ms: interval, deadline_ms: nil}), do: interval
+
+  defp next_tick_delay_ms(%State{poll_interval_ms: interval} = state) do
+    if deadline_expired?(state) do
+      # O teto ja venceu: o ciclo vai encerrar, nao ha motivo para apressar o poll.
+      interval
+    else
+      min(interval, max(state.deadline_ms - System.monotonic_time(:millisecond), 0))
     end
   end
 

@@ -170,7 +170,7 @@ aditivas e o encerramento é gracioso (nunca `kill`). Arquivos:
 | `docs/fork/lifecycle.md` | novo | contrato operacional do modo sob demanda (flags, códigos de saída, `resume-only`, o que segue pendente) | não |
 | `elixir/lib/symphony_elixir/shutdown.ex` | novo | ponto único de encerramento gracioso com código de saída significativo (injetável em teste); registra o código pedido antes de parar a VM | não |
 | `elixir/lib/symphony_elixir/cli.ex` | alterado (aditivo) | quatro flags novas publicadas no ambiente da aplicação; o encerramento usa o código registrado pelo ciclo quando existe e mantém o mapeamento residente quando não existe | não (residente idêntico) |
-| `elixir/lib/symphony_elixir/orchestrator.ex` | alterado | ciclo de poll informa se havia algo despachável (para decidir o idle), filtro `--issue` e teto `--max-runtime-seconds` | **sim, mínimo**: só quando as flags são usadas; `maybe_dispatch/1` passa a devolver `{state, resultado}` |
+| `elixir/lib/symphony_elixir/orchestrator.ex` | alterado | ciclo de poll informa se havia algo despachável (para decidir o idle), filtro `--issue` e teto `--max-runtime-seconds` como prazo (o próximo ciclo é agendado no vencimento, o ciclo vencido não despacha trabalho novo e idle comprovado vence o teto) | **sim, mínimo**: só quando as flags são usadas; `maybe_dispatch/1` passa a devolver `{state, resultado}` |
 | `elixir/lib/symphony_elixir/agent_runner.ex` | alterado (aditivo) | `--resume-only` pula os turnos do agente e mantém a etapa de entrega | não |
 | `elixir/test/symphony_elixir/on_demand_test.exs` | novo | suíte determinística e offline do lifecycle (tracker `memory` + shutdown injetado) | não |
 
@@ -178,7 +178,9 @@ O código de saída é decidido no ciclo e **preservado até o fim do processo**
 registra o código antes de pedir a parada graciosa e a CLI (`wait_for_shutdown/0`) usa esse
 registro quando a árvore de supervisão cai (`:shutdown`) — sem ele, o encerramento sob demanda
 herdaria o default residente (`1`) e o dispatcher leria falha onde houve ciclo concluído. Sem
-flag sob demanda não há registro e o mapeamento residente do upstream continua intacto.
+flag sob demanda não há registro e o mapeamento residente do upstream continua intacto. O teto
+é um prazo: o ciclo seguinte é agendado no vencimento dele, um ciclo que já venceu não despacha
+trabalho novo e um ciclo comprovadamente idle encerra com `0` (não `3`).
 
 ## Regras do registro
 

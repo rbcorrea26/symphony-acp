@@ -180,7 +180,7 @@ defmodule SymphonyElixir.Delivery.Acceptance do
     Result.evaluated(
       mode: contract.scope_mode,
       contract_version: contract.version,
-      findings: findings,
+      findings: sanitize(findings),
       evidence: results,
       limits: [:content_not_verified]
     )
@@ -262,7 +262,7 @@ defmodule SymphonyElixir.Delivery.Acceptance do
   end
 
   defp describe_finding(%Finding{message: message, path: nil}), do: message
-  defp describe_finding(%Finding{message: message, path: path}), do: "#{message} [#{path}]"
+  defp describe_finding(%Finding{message: message, path: path}), do: "#{message} [#{safe_text(path)}]"
 
   defp limits_note(%Result{limits: []}), do: ""
 

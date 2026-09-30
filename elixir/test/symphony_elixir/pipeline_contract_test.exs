@@ -189,6 +189,40 @@ defmodule SymphonyElixir.PipelineContractTest do
       assert {:error, {:pipeline_contract_invalid, {:duplicate_contract_key, 2}}} = Contract.parse(body)
     end
 
+    test "a field repeated inside the mapping is ambiguous, in block and flow form" do
+      block = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: strict
+        scope_mode: advisory
+        expected_paths:
+          - a.md
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:duplicate_field, "scope_mode"}}} = Contract.parse(block)
+
+      flow = "```yaml\npipeline_contract: {version: 1, version: 2, scope_mode: advisory}\n```"
+
+      assert {:error, {:pipeline_contract_invalid, {:duplicate_field, "version"}}} = Contract.parse(flow)
+    end
+
+    test "a commented field example is not a duplicate" do
+      body = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory   # alternatively: strict
+        expected_paths:
+          - a.md
+      ```
+      """
+
+      assert {:ok, contract} = Contract.parse(body)
+      assert contract.scope_mode == :advisory
+    end
+
     test "an anchor is refused before decoding" do
       body = """
       ```yaml

@@ -128,11 +128,18 @@ defmodule SymphonyElixir.Delivery do
     # gates then say whether the repository is still valid, and only then the
     # evidence required by the issue is executed (it uses the gates timeout).
     # Green gates never rescue a failed acceptance: the failure comes from here.
+    #
+    # The scope is evaluated again at the end because the gates and the evidence
+    # commands run *inside* the workspace and may create or change files: what
+    # gets published is the final change set, so it is the final one that is
+    # accepted (a gate artifact has to be authorized in allowed_extra_paths, or
+    # the run fails).
     with {:ok, issue_number} <- issue_number(issue),
          {:ok, github} <- GitHub.context(settings.tracker, github_opts),
-         {:ok, scope} <- Acceptance.scope(workspace, issue),
+         {:ok, _early} <- Acceptance.scope(workspace, issue),
          :ok <- run_gates(workspace, delivery),
-         {:ok, evidence} <- Acceptance.evidence(workspace, issue, delivery) do
+         {:ok, evidence} <- Acceptance.evidence(workspace, issue, delivery),
+         {:ok, scope} <- Acceptance.scope(workspace, issue) do
       publish(
         workspace,
         issue,

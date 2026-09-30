@@ -105,7 +105,6 @@ defmodule SymphonyElixir.PipelineContract do
   @contract_key ~r/^[ \t]*pipeline_contract[ \t]*:/m
   @fence ~r/^[ \t]*(`{3,}|~{3,})/
   @evidence_name ~r/^[a-z0-9][a-z0-9._-]*$/
-
   @max_pattern_length 512
   @max_items 256
   @max_evidence_name_length 64
@@ -362,7 +361,10 @@ defmodule SymphonyElixir.PipelineContract do
   # keep one of them silently (it does), so ambiguity is refused instead of
   # guessed. Anchors are refused before decoding, for the reason in @anchor_token.
   defp single_contract(block) do
-    with :ok <- one_contract_key(block), do: reject_anchors(block)
+    with :ok <- one_contract_key(block),
+         :ok <- no_duplicate_field(block) do
+      reject_anchors(block)
+    end
   end
 
   defp one_contract_key(block) do
@@ -370,6 +372,21 @@ defmodule SymphonyElixir.PipelineContract do
       [_only] -> :ok
       many -> {:error, {:duplicate_contract_key, length(many)}}
     end
+  end
+
+  # The decoder also keeps one of two equal keys *inside* the mapping silently, so
+  # a repeated field is refused: the contract is data and ambiguity is not
+  # acceptable. Only key-shaped occurrences count (`^  field:` or `{field:`), so a
+  # commented example inside the block is not a duplicate.
+  defp no_duplicate_field(block) do
+    case Enum.find(@fields, &(length(Regex.scan(field_pattern(&1), block)) > 1)) do
+      nil -> :ok
+      field -> {:error, {:duplicate_field, field}}
+    end
+  end
+
+  defp field_pattern(field) do
+    ~r/(?:^[ \t]*|[{,]\s*)#{field}[ \t]*:/m
   end
 
   defp reject_anchors(block) do

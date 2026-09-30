@@ -250,6 +250,50 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       assert Acceptance.describe(result) =~ "change scan truncated"
     end
 
+    test "more untracked files than the scan limit declares the truncation", %{workspace: workspace} do
+      write!(workspace, "README.md", "base\nmore\n")
+      Enum.each(1..201, fn index -> write!(workspace, "many/file-#{index}.js", "x\n") end)
+
+      assert {:ok, result} = Acceptance.scope(workspace, issue(contract_body(allowed_extra_paths: ["many/**"])))
+
+      assert result.status == :pass
+      assert :change_scan_truncated in result.limits
+    end
+
+    test "an untracked file bigger than the per-file limit declares the truncation", %{workspace: workspace} do
+      write!(workspace, "README.md", "base\nmore\n")
+      write!(workspace, "big.md", String.duplicate("y\n", 200_000))
+
+      assert {:ok, result} = Acceptance.scope(workspace, issue(contract_body(allowed_extra_paths: ["big.md"])))
+
+      assert result.status == :pass
+      assert :change_scan_truncated in result.limits
+    end
+
+    test "a tracked diff bigger than the parse limit declares the truncation", %{workspace: workspace} do
+      write!(workspace, "README.md", String.duplicate("x\n", 600_000))
+
+      assert {:ok, result} = Acceptance.scope(workspace, issue(contract_body([])))
+
+      assert result.status == :pass
+      assert :change_scan_truncated in result.limits
+    end
+
+    test "markup in a path is escaped in the prose and kept literal for machines", %{workspace: workspace} do
+      write!(workspace, "README.md", "base\nmore\n")
+      write!(workspace, "ev<il>.md", "x\n")
+
+      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue(contract_body([])))
+
+      assert [%Finding{code: :unexpected_path_changed, path: "ev<il>.md"}] = result.findings
+      assert result.findings |> hd() |> Map.fetch!(:path) == "ev<il>.md"
+
+      described = Acceptance.describe(result)
+      refute described =~ "ev<il>.md"
+      assert described =~ "ev&lt;il>.md"
+      assert Acceptance.summary_json(result) =~ "ev<il>.md"
+    end
+
     test "the same candidate always produces the same verdict", %{workspace: workspace} do
       write!(workspace, "README.md", "base\nmore\n")
       issue = issue(contract_body([]))

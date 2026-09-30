@@ -950,6 +950,42 @@ defmodule SymphonyElixir.DeliveryTest do
     assert Enum.count(FakeGitHub.state(fake).comments) == 1
   end
 
+  test "an artifact the gates create is not published without acceptance", %{workspace: workspace} do
+    # The gates run inside the workspace and write a file: the candidate that
+    # would be published includes it, so it has to be accepted too.
+    configure!(gates: "echo artifact > gates-artifact.txt")
+    fake = fake!()
+    issue = contract_issue(expected_paths: ["answer.sh"])
+    change_answer!(workspace, "42")
+
+    assert {:error, {:delivery_acceptance_failed, result}} = Delivery.run(workspace, issue, github_opts(fake))
+
+    assert [%{code: :unexpected_path_changed, path: "gates-artifact.txt"}] = result.findings
+    assert result.change_set.unexpected == ["gates-artifact.txt"]
+    assert FakeGitHub.state(fake).pulls == []
+    assert FakeGitHub.sha(fake, delivery_branch()) == nil
+  end
+
+  test "an artifact of a declared evidence is accepted when the contract authorizes it", %{workspace: workspace} do
+    configure!(gates: "true", evidence: %{"agent-tests" => "echo ran > evidence.txt"})
+    fake = fake!()
+
+    issue =
+      contract_issue(
+        expected_paths: ["answer.sh"],
+        required_evidence: ["agent-tests"],
+        allowed_extra_paths: ["evidence.txt"]
+      )
+
+    change_answer!(workspace, "42")
+
+    assert {:ok, result} = Delivery.run(workspace, issue, github_opts(fake))
+
+    assert result.contract.status == :pass
+    assert [%{status: :passed}] = result.contract.evidence
+    assert hd(FakeGitHub.state(fake).comments)["body"] =~ "`strict` passed (1/1 expected path(s) delivered, 1 evidence)"
+  end
+
   defp fake!(attrs \\ []) do
     FakeGitHub.start!(Keyword.put(attrs, :remote, Process.get(:delivery_origin)))
   end

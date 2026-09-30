@@ -32,6 +32,7 @@ defmodule SymphonyElixir.Delivery.Git do
   @max_scanned_files 200
   @max_scanned_lines 2_000
   @max_scanned_bytes 262_144
+  @max_diff_bytes 1_048_576
 
   @type identity :: %{name: String.t(), email: String.t()}
   @type change :: %{path: String.t(), status: String.t()}
@@ -91,9 +92,15 @@ defmodule SymphonyElixir.Delivery.Git do
   def added_lines(workspace) do
     with {:ok, diff} <- run_raw(workspace, ["-c", "core.quotePath=false", "diff", "HEAD", "--no-color", "--unified=0"]),
          {:ok, untracked} <- run_raw(workspace, ["ls-files", "--others", "--exclude-standard", "-z"]) do
-      lines = diff_added_lines(diff) ++ untracked_lines(workspace, untracked)
+      {diff_lines, diff_truncated} = diff_added_lines(diff)
+      {file_lines, files_dropped, bytes_partial} = untracked_lines(workspace, untracked)
+      lines = diff_lines ++ file_lines
 
-      {:ok, %{lines: Enum.take(lines, @max_scanned_lines), truncated: length(lines) > @max_scanned_lines}}
+      {:ok,
+       %{
+         lines: Enum.take(lines, @max_scanned_lines),
+         truncated: diff_truncated or files_dropped or bytes_partial or length(lines) > @max_scanned_lines
+       }}
     end
   end
 
@@ -222,12 +229,25 @@ defmodule SymphonyElixir.Delivery.Git do
   defp rename?(status), do: String.contains?(status, ["R", "C"])
 
   defp diff_added_lines(diff) do
+    {text, truncated} = limit_bytes(diff, @max_diff_bytes)
+
     {lines, _path} =
-      diff
+      text
       |> String.split(~r/\r?\n/)
       |> Enum.reduce({[], nil}, &diff_line/2)
 
-    Enum.reverse(lines)
+    {Enum.reverse(lines), truncated}
+  end
+
+  # The child capture of `git diff` is proportional to the candidate's own diff
+  # (that is a declared limit of the stage); the parse is bounded, so the
+  # structures built here are not, and the verdict says the scan was truncated.
+  defp limit_bytes(binary, limit) do
+    if byte_size(binary) > limit do
+      {binary_part(binary, 0, limit), true}
+    else
+      {binary, false}
+    end
   end
 
   defp diff_line("+++ b/" <> path, {lines, _path}), do: {lines, path |> String.trim_trailing()}
@@ -236,16 +256,21 @@ defmodule SymphonyElixir.Delivery.Git do
   defp diff_line(_line, {lines, path}), do: {lines, path}
 
   defp untracked_lines(workspace, untracked) do
-    untracked
-    |> String.split(<<0>>, trim: true)
-    |> Enum.take(@max_scanned_files)
-    |> Enum.flat_map(&file_lines(workspace, &1))
+    paths = String.split(untracked, <<0>>, trim: true)
+    {scanned, dropped} = Enum.split(paths, @max_scanned_files)
+    results = Enum.map(scanned, &file_lines(workspace, &1))
+
+    {Enum.flat_map(results, &elem(&1, 0)), dropped != [], Enum.any?(results, &elem(&1, 1))}
   end
 
   defp file_lines(workspace, path) do
     case read_limited(Path.join(workspace, path), @max_scanned_bytes) do
-      {:ok, content} -> content |> String.split(~r/\r?\n/, trim: true) |> Enum.flat_map(&added_line(path, &1))
-      {:error, _reason} -> []
+      {:ok, content, partial} ->
+        lines = content |> String.split(~r/\r?\n/, trim: true) |> Enum.flat_map(&added_line(path, &1))
+        {lines, partial}
+
+      {:error, _reason} ->
+        {[], false}
     end
   end
 
@@ -254,9 +279,12 @@ defmodule SymphonyElixir.Delivery.Git do
          :ok <- require_regular(stat),
          {:ok, io} <- File.open(path, [:read, :binary]) do
       try do
-        case IO.binread(io, limit) do
-          :eof -> {:ok, ""}
-          data when is_binary(data) -> {:ok, data}
+        # One byte more than the cap tells whether the file was only partially
+        # scanned, instead of pretending the prefix was the whole content.
+        case IO.binread(io, limit + 1) do
+          :eof -> {:ok, "", false}
+          data when byte_size(data) > limit -> {:ok, binary_part(data, 0, limit), true}
+          data -> {:ok, data, false}
         end
       after
         File.close(io)

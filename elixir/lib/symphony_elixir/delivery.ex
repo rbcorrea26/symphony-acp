@@ -11,6 +11,11 @@ defmodule SymphonyElixir.Delivery do
     * the **project** owns its gates: the command comes from the workflow
       (`delivery.gates`), never from the platform, and a non-zero exit fails the
       run instead of publishing a "almost ready" pull request;
+    * **three independent layers** run before a candidate is promoted: the
+      acceptance contract of the issue (`SymphonyElixir.Delivery.Acceptance`:
+      "was the issue satisfied?"), the repository gates ("is the repository still
+      valid?") and the CI ("did the published candidate pass?"). Green gates do
+      not replace acceptance;
     * the only write the pipeline makes towards the consumer repository is a
       branch plus a **draft** pull request on top of `delivery.base_branch`;
       never a push to the base branch, never a force push, never a merge;
@@ -32,7 +37,7 @@ defmodule SymphonyElixir.Delivery do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, Delivery.Git, Delivery.GitHub}
+  alias SymphonyElixir.{Config, Delivery.Acceptance, Delivery.Gates, Delivery.Git, Delivery.GitHub}
   alias SymphonyElixir.Tracker.Issue
 
   @type result :: %{
@@ -42,7 +47,8 @@ defmodule SymphonyElixir.Delivery do
           pull: GitHub.pull(),
           checks: map(),
           review: :requested | :unavailable | :disabled | :reconciled,
-          issue_number: integer()
+          issue_number: integer(),
+          contract: Acceptance.report()
         }
 
   @spec run(Path.t(), Issue.t(), keyword()) :: :disabled | {:ok, result()} | {:error, term()}
@@ -112,13 +118,33 @@ defmodule SymphonyElixir.Delivery do
   defp deliver(workspace, issue, delivery, nil, github_opts) do
     settings = Config.settings!()
 
+    # Order matters and is deliberate: the acceptance contract decides scope over
+    # the candidate (cheap, and a strict finding must not spend a gates run), the
+    # gates then say whether the repository is still valid, and only then the
+    # evidence required by the issue is executed (it uses the gates timeout).
     with {:ok, issue_number} <- issue_number(issue),
          {:ok, github} <- GitHub.context(settings.tracker, github_opts),
+         {:ok, contract} <- Acceptance.contract(issue),
+         {:ok, scope} <- Acceptance.scope(workspace, contract),
          :ok <- run_gates(workspace, delivery),
-         {:ok, prepared} <- prepare(workspace, issue, delivery, github),
+         {:ok, evidence} <- Acceptance.evidence(workspace, contract, delivery) do
+      publish(
+        workspace,
+        issue,
+        delivery,
+        github,
+        issue_number,
+        settings,
+        Acceptance.summarize(scope, evidence)
+      )
+    end
+  end
+
+  defp publish(workspace, issue, delivery, github, issue_number, settings, acceptance) do
+    with {:ok, prepared} <- prepare(workspace, issue, delivery, github),
          {:ok, candidate} <- GitHub.await_candidate(github, prepared.branch, delivery),
          {:ok, review} <- maybe_request_review(github, prepared, delivery),
-         :ok <- handoff(github, prepared, candidate, review, delivery, issue_number, settings) do
+         :ok <- handoff(github, prepared, candidate, review, delivery, issue_number, settings, acceptance) do
       result = %{
         status: :ready_for_human,
         branch: prepared.branch,
@@ -126,12 +152,14 @@ defmodule SymphonyElixir.Delivery do
         pull: prepared.pull,
         checks: candidate.checks,
         review: review,
-        issue_number: issue_number
+        issue_number: issue_number,
+        contract: acceptance
       }
 
       Logger.info(
         "Delivery ready-for-human branch=#{prepared.branch} candidate=#{candidate.sha} " <>
-          "pull=#{prepared.pull.number} mode=#{prepared.mode} review=#{review}"
+          "pull=#{prepared.pull.number} mode=#{prepared.mode} review=#{review} " <>
+          "contract=#{Acceptance.describe(acceptance)}"
       )
 
       {:ok, result}
@@ -141,18 +169,16 @@ defmodule SymphonyElixir.Delivery do
   # The consumer's gates. A non-zero exit means "the execution failed": nothing is
   # published and the issue goes back to the work cycle through the normal retry.
   defp run_gates(workspace, delivery) do
-    task = Task.async(fn -> System.cmd("sh", ["-lc", delivery.gates], cd: workspace, stderr_to_stdout: true) end)
-
-    case Task.yield(task, delivery.gates_timeout_ms) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {output, 0}} ->
+    case Gates.run(workspace, delivery.gates, delivery.gates_timeout_ms) do
+      {:ok, output} ->
         Logger.info("Delivery gates passed command=#{inspect(delivery.gates)} output=#{inspect(Git.sanitize(output))}")
         :ok
 
-      {:ok, {output, status}} ->
+      {:error, {:command_failed, status, output}} ->
         {:error, {:delivery_gates_failed, status, Git.sanitize(output)}}
 
-      nil ->
-        {:error, {:delivery_gates_timeout, delivery.gates_timeout_ms}}
+      {:error, {:command_timeout, timeout_ms}} ->
+        {:error, {:delivery_gates_timeout, timeout_ms}}
     end
   end
 
@@ -229,14 +255,14 @@ defmodule SymphonyElixir.Delivery do
     end
   end
 
-  defp handoff(github, prepared, candidate, review, delivery, issue_number, settings) do
+  defp handoff(github, prepared, candidate, review, delivery, issue_number, settings, acceptance) do
     with :ok <- GitHub.add_labels(github, issue_number, [delivery.handoff_label]),
          :ok <- remove_entry_labels(github, issue_number, delivery, settings) do
       GitHub.ensure_comment(
         github,
         issue_number,
         marker(candidate.sha),
-        comment_body(prepared, candidate, review, delivery)
+        comment_body(prepared, candidate, review, delivery, acceptance)
       )
     end
   end
@@ -281,7 +307,7 @@ defmodule SymphonyElixir.Delivery do
     """
   end
 
-  defp comment_body(prepared, candidate, review, delivery) do
+  defp comment_body(prepared, candidate, review, delivery, acceptance) do
     """
     #{marker(candidate.sha)}
     ## ready-for-human
@@ -289,6 +315,7 @@ defmodule SymphonyElixir.Delivery do
     - branch: `#{prepared.branch}` (mode: #{prepared.mode})
     - draft pull request: #{prepared.pull.url}
     - candidate stable: `#{candidate.sha}`
+    - acceptance contract: #{Acceptance.describe(acceptance)}
     - local gates: `#{delivery.gates}` exit 0
     - CI: #{candidate.checks.total} check run(s) concluded successfully
     - one-shot review: #{review}

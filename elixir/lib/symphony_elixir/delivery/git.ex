@@ -11,6 +11,12 @@ defmodule SymphonyElixir.Delivery.Git do
   file contains no secret (it echoes an environment variable of its own child
   process), the credential never appears in `argv`, in the workspace or in a log
   line, and the file is removed even when the push fails.
+
+  Reading the candidate (who changed) is this module's other job, and the
+  acceptance contract depends on it: `change_set/1` reports the destination path
+  of renames and every untracked file individually, and `added_lines/1` gives the
+  prohibition scan the added lines with the path they belong to. Both are
+  bounded, so a huge candidate cannot turn the gate into an unbounded scan.
   """
 
   require Logger
@@ -23,8 +29,13 @@ defmodule SymphonyElixir.Delivery.Git do
   """
 
   @max_output_bytes 2_048
+  @max_scanned_files 200
+  @max_scanned_lines 2_000
+  @max_scanned_bytes 262_144
 
   @type identity :: %{name: String.t(), email: String.t()}
+  @type change :: %{path: String.t(), status: String.t()}
+  @type added_line :: %{path: String.t(), text: String.t()}
 
   @spec status(Path.t()) :: {:ok, [String.t()]} | {:error, term()}
   def status(workspace) do
@@ -40,6 +51,50 @@ defmodule SymphonyElixir.Delivery.Git do
     |> String.split("\n", trim: true)
     |> Enum.map(fn line -> line |> String.slice(3..-1//1) |> String.trim() end)
     |> Enum.reject(&(&1 == ""))
+  end
+
+  @doc """
+  The candidate change set: one entry per path the agent changed, with the
+  destination path of a rename.
+
+  `--porcelain -z -uall` is used on purpose. `-z` is unquoted, so a path with a
+  space or a non-ASCII character arrives intact, and `-uall` lists each untracked
+  file instead of a compressed `dir/`, which is what lets an expected path inside
+  a directory the agent just created be matched.
+  """
+  @spec change_set(Path.t()) :: {:ok, [change()]} | {:error, term()}
+  def change_set(workspace) do
+    case run_raw(workspace, ["status", "--porcelain", "-z", "-uall"]) do
+      {:ok, output} -> {:ok, change_entries(output)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Parses a `git status --porcelain -z` output (`XY PATH\\0[ORIGIN\\0]`)."
+  @spec change_entries(String.t()) :: [change()]
+  def change_entries(output) when is_binary(output) do
+    output
+    |> String.split(<<0>>, trim: true)
+    |> parse_entries([])
+  end
+
+  @doc """
+  The added lines of the candidate, with the path they belong to.
+
+  Tracked modifications come from `git diff HEAD` (added lines only, so an
+  untouched line is never scanned) and untracked files are read from disk. The
+  result is bounded by `@max_scanned_files`/`@max_scanned_lines` and reports
+  `truncated: true` when the cap was reached, so the caller can say the scan was
+  incomplete instead of pretending it was exhaustive.
+  """
+  @spec added_lines(Path.t()) :: {:ok, %{lines: [added_line()], truncated: boolean()}} | {:error, term()}
+  def added_lines(workspace) do
+    with {:ok, diff} <- run_raw(workspace, ["-c", "core.quotePath=false", "diff", "HEAD", "--no-color", "--unified=0"]),
+         {:ok, untracked} <- run_raw(workspace, ["ls-files", "--others", "--exclude-standard", "-z"]) do
+      lines = diff_added_lines(diff) ++ untracked_lines(workspace, untracked)
+
+      {:ok, %{lines: Enum.take(lines, @max_scanned_lines), truncated: length(lines) > @max_scanned_lines}}
+    end
   end
 
   @spec checkout_branch(Path.t(), String.t()) :: :ok | {:error, term()}
@@ -125,12 +180,14 @@ defmodule SymphonyElixir.Delivery.Git do
 
   defp run(workspace, args), do: run_with_env(workspace, args, %{})
 
-  defp run_with_env(workspace, args, env) do
+  defp run_raw(workspace, args), do: run_with_env(workspace, args, %{}, & &1)
+
+  defp run_with_env(workspace, args, env, transform \\ &String.trim/1) do
     opts = [cd: workspace, stderr_to_stdout: true] ++ if(env == %{}, do: [], else: [env: env])
 
     case System.cmd("git", args, opts) do
       {output, 0} ->
-        {:ok, String.trim(output)}
+        {:ok, transform.(output)}
 
       {output, status} ->
         sanitized = sanitize(output)
@@ -139,6 +196,72 @@ defmodule SymphonyElixir.Delivery.Git do
     end
   rescue
     error in ErlangError -> {:error, {:git_not_available, Exception.message(error)}}
+  end
+
+  # --- candidate reading --------------------------------------------------
+
+  defp parse_entries([], acc), do: Enum.reverse(acc)
+
+  defp parse_entries([field | rest], acc) do
+    entry = change_entry(field)
+    # In the `-z` format a rename/copy is two fields: the destination (with the
+    # status) followed by the origin, which is not a change of its own.
+    rest = if rename?(entry.status), do: Enum.drop(rest, 1), else: rest
+
+    parse_entries(rest, [entry | acc])
+  end
+
+  defp change_entry(field) do
+    %{status: field |> String.slice(0, 2) |> String.trim(), path: String.slice(field, 3..-1//1)}
+  end
+
+  defp rename?(status), do: String.contains?(status, ["R", "C"])
+
+  defp diff_added_lines(diff) do
+    {lines, _path} =
+      diff
+      |> String.split(~r/\r?\n/)
+      |> Enum.reduce({[], nil}, &diff_line/2)
+
+    Enum.reverse(lines)
+  end
+
+  defp diff_line("+++ b/" <> path, {lines, _path}), do: {lines, path |> String.trim_trailing()}
+  defp diff_line("+++ " <> _other, {lines, _path}), do: {lines, nil}
+  defp diff_line("+" <> text, {lines, path}), do: {added_line(path || "diff", text) ++ lines, path}
+  defp diff_line(_line, {lines, path}), do: {lines, path}
+
+  defp untracked_lines(workspace, untracked) do
+    untracked
+    |> String.split(<<0>>, trim: true)
+    |> Enum.take(@max_scanned_files)
+    |> Enum.flat_map(&file_lines(workspace, &1))
+  end
+
+  defp file_lines(workspace, path) do
+    case read_limited(Path.join(workspace, path), @max_scanned_bytes) do
+      {:ok, content} -> content |> String.split(~r/\r?\n/, trim: true) |> Enum.flat_map(&added_line(path, &1))
+      {:error, _reason} -> []
+    end
+  end
+
+  defp read_limited(path, limit) do
+    with {:ok, io} <- File.open(path, [:read, :binary]) do
+      try do
+        case IO.binread(io, limit) do
+          :eof -> {:ok, ""}
+          data when is_binary(data) -> {:ok, data}
+        end
+      after
+        File.close(io)
+      end
+    end
+  end
+
+  # A binary or non-UTF-8 file is not a line of shell code: it is skipped instead
+  # of crashing the scan.
+  defp added_line(path, text) do
+    if String.valid?(text), do: [%{path: path, text: text}], else: []
   end
 
   defp expect_ok({:ok, _output}), do: :ok

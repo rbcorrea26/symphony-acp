@@ -458,6 +458,18 @@ defmodule SymphonyElixir.DeliveryTest do
     assert Git.changed_paths(" M answer.sh\n?? tests/test_answer.sh\n") == ["answer.sh", "tests/test_answer.sh"]
   end
 
+  test "the change set parser reports the destination of a rename and every untracked file" do
+    output = "R  docs.md" <> <<0>> <> "README.md" <> <<0>> <> " M answer.sh" <> <<0>> <> "?? notes/new.md" <> <<0>>
+
+    assert Git.change_entries(output) == [
+             %{path: "docs.md", status: "R"},
+             %{path: "answer.sh", status: "M"},
+             %{path: "notes/new.md", status: "??"}
+           ]
+
+    assert Git.change_entries("") == []
+  end
+
   test "git refuses to publish without a credential", %{workspace: workspace} do
     assert {:error, :missing_delivery_credential} = Git.push(workspace, delivery_branch(), "")
   end
@@ -542,10 +554,26 @@ defmodule SymphonyElixir.DeliveryTest do
           %{"handoff_label" => ""},
           %{"gates_timeout_ms" => 0},
           %{"ci_timeout_ms" => 0},
-          %{"ci_poll_interval_ms" => 0}
+          %{"ci_poll_interval_ms" => 0},
+          %{"evidence" => "not-a-map"},
+          %{"evidence" => %{"agent-tests" => " "}},
+          %{"evidence" => %{"" => "true"}},
+          %{"evidence" => %{"agent-tests" => 5}}
         ] do
       assert {:error, {:invalid_workflow_config, _message}} = Schema.parse(%{"delivery" => invalid})
     end
+  end
+
+  test "the delivery config carries the named evidences of the acceptance contract" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "delivery" => %{"enabled" => true, "gates" => "true", "evidence" => %{"agent-tests" => "bash tests/agent.sh"}}
+             })
+
+    assert settings.delivery.evidence == %{"agent-tests" => "bash tests/agent.sh"}
+
+    assert {:ok, default} = Schema.parse(%{"delivery" => %{"enabled" => true, "gates" => "true"}})
+    assert default.delivery.evidence == %{}
   end
 
   test "the GitHub surface propagates failures instead of inventing state" do
@@ -701,6 +729,152 @@ defmodule SymphonyElixir.DeliveryTest do
     assert {:error, {:github_request_failed, 500, _body}} = Delivery.run(workspace, @issue, github_opts(fake))
   end
 
+  # --- acceptance contract (pipeline_contract) ------------------------------
+
+  test "a strict contract the candidate does not satisfy blocks publishing", %{workspace: workspace} do
+    # The gates are deliberately red: a strict scope finding has to stop the run
+    # before the gates even execute (the error below is the acceptance one).
+    configure!(gates: "exit 7", evidence: %{"repository-gates" => "true"})
+    fake = fake!()
+
+    issue = contract_issue(expected_paths: ["docs/changes/smoke.md"], required_evidence: ["repository-gates"])
+    change_answer!(workspace, "42")
+
+    assert {:error, {:delivery_acceptance_failed, report}} = Delivery.run(workspace, issue, github_opts(fake))
+
+    assert report.mode == :strict
+    assert Enum.map(report.violations, & &1.kind) == [:expected_path_untouched, :unauthorized_path]
+
+    assert FakeGitHub.state(fake).requests == []
+    assert FakeGitHub.sha(fake, delivery_branch()) == nil
+  end
+
+  test "green gates are not acceptance of the issue (the #64 regression)", %{workspace: workspace} do
+    configure!(gates: "true")
+    fake = fake!()
+
+    issue =
+      contract_issue(
+        expected_paths: ["docs/changes/2026-09-30-pipeline-e2e-smoke.md", "tests/agent/run-tests.sh"],
+        required_evidence: ["repository-gates"]
+      )
+
+    # The issue asked for two files; the candidate delivered one of them and
+    # touched an unrelated one. The repository gates are green.
+    File.mkdir_p!(Path.join(workspace, "docs/changes"))
+    File.write!(Path.join(workspace, "docs/changes/2026-09-30-pipeline-e2e-smoke.md"), "smoke\n")
+    change_answer!(workspace, "unrelated")
+
+    assert {:error, {:delivery_acceptance_failed, report}} = Delivery.run(workspace, issue, github_opts(fake))
+
+    assert Enum.map(report.violations, & &1.kind) == [:expected_path_untouched, :unauthorized_path]
+
+    assert Enum.map(report.violations, & &1.detail) == [
+             "expected path `tests/agent/run-tests.sh` was not delivered by the candidate",
+             "changed path `answer.sh` is outside the contract scope"
+           ]
+
+    state = FakeGitHub.state(fake)
+    assert state.pulls == []
+    assert state.labels == []
+    assert state.comments == []
+    assert FakeGitHub.sha(fake, delivery_branch()) == nil
+  end
+
+  test "an advisory divergence is reported and does not block the handoff", %{workspace: workspace} do
+    configure!([])
+    fake = fake!()
+
+    issue = contract_issue(scope_mode: "advisory", expected_paths: ["docs/x.md"], allowed_extra_paths: ["answer.sh"])
+    change_answer!(workspace, "42")
+
+    assert {:ok, result} = Delivery.run(workspace, issue, github_opts(fake))
+
+    assert result.contract.status == :diverged
+    assert [%{kind: :expected_path_untouched}] = result.contract.violations
+    assert FakeGitHub.state(fake).labels == ["pipeline:ready-for-human"]
+
+    [comment] = FakeGitHub.state(fake).comments
+    assert comment["body"] =~ "- acceptance contract: `advisory` diverged"
+  end
+
+  test "a named evidence proves the required knowledge of the candidate", %{workspace: workspace} do
+    configure!(evidence: %{"agent-tests" => "test -f answer.sh"})
+    fake = fake!()
+
+    issue = contract_issue(expected_paths: ["answer.sh"], required_evidence: ["repository-gates", "agent-tests"])
+    change_answer!(workspace, "42")
+
+    assert {:ok, result} = Delivery.run(workspace, issue, github_opts(fake))
+
+    assert result.contract.status == :passed
+
+    assert Enum.map(result.contract.evidence, &{&1.name, &1.status}) == [
+             {"repository-gates", :passed},
+             {"agent-tests", :passed}
+           ]
+
+    [comment] = FakeGitHub.state(fake).comments
+    assert comment["body"] =~ "- acceptance contract: `strict` passed (1/1 expected path(s) delivered, 2 evidence)"
+  end
+
+  test "a required evidence without a provider blocks a strict candidate", %{workspace: workspace} do
+    configure!([])
+    fake = fake!()
+    issue = contract_issue(expected_paths: ["answer.sh"], required_evidence: ["wordpress-tests"])
+    change_answer!(workspace, "42")
+
+    assert {:error, {:delivery_acceptance_failed, report}} = Delivery.run(workspace, issue, github_opts(fake))
+
+    assert [%{kind: :missing_evidence_provider}] = report.violations
+    assert FakeGitHub.state(fake).pulls == []
+    assert FakeGitHub.sha(fake, delivery_branch()) == nil
+  end
+
+  test "a red evidence blocks a candidate whose gates are green", %{workspace: workspace} do
+    configure!(gates: "true", evidence: %{"agent-tests" => "exit 4"})
+    fake = fake!()
+    issue = contract_issue(expected_paths: ["answer.sh"], required_evidence: ["agent-tests"])
+    change_answer!(workspace, "42")
+
+    assert {:error, {:delivery_acceptance_failed, report}} = Delivery.run(workspace, issue, github_opts(fake))
+
+    assert [%{kind: :evidence_not_passed, detail: detail}] = report.violations
+    assert detail =~ "`agent-tests` (`exit 4`) reported failed"
+    assert FakeGitHub.state(fake).pulls == []
+    assert FakeGitHub.sha(fake, delivery_branch()) == nil
+  end
+
+  test "an unenforceable contract fails the run before anything is published", %{workspace: workspace} do
+    configure!([])
+    fake = fake!()
+
+    issue = %{@issue | description: "```yaml\npipeline_contract:\n  version: 2\n  scope_mode: strict\n```"}
+    change_answer!(workspace, "42")
+
+    assert {:error, {:pipeline_contract_invalid, {:unsupported_version, 2}}} =
+             Delivery.run(workspace, issue, github_opts(fake))
+
+    assert FakeGitHub.state(fake).requests == []
+  end
+
+  test "a second cycle over the published candidate is not failed by the contract", %{workspace: workspace} do
+    configure!([])
+    fake = fake!()
+    issue = contract_issue(expected_paths: ["answer.sh"])
+    change_answer!(workspace, "42")
+
+    assert {:ok, first} = Delivery.run(workspace, issue, github_opts(fake))
+    assert first.contract.status == :passed
+
+    # Nothing new to accept: the candidate was accepted by the cycle that created
+    # it, and the resume cycle only advances the published state.
+    assert {:ok, second} = Delivery.run(workspace, issue, github_opts(fake))
+    assert second.contract.status == :not_applicable
+    assert second.candidate_sha == first.candidate_sha
+    assert Enum.count(FakeGitHub.state(fake).comments) == 1
+  end
+
   defp fake!(attrs \\ []) do
     FakeGitHub.start!(Keyword.put(attrs, :remote, Process.get(:delivery_origin)))
   end
@@ -749,6 +923,28 @@ defmodule SymphonyElixir.DeliveryTest do
   defp change_answer!(workspace, content) do
     File.write!(Path.join(workspace, "answer.sh"), "#!/usr/bin/env bash\necho \"#{content}\"\n")
   end
+
+  defp contract_issue(options) do
+    %{@issue | description: contract_body(options)}
+  end
+
+  defp contract_body(options) do
+    [
+      "```yaml",
+      "pipeline_contract:",
+      "  version: 1",
+      "  scope_mode: #{Keyword.get(options, :scope_mode, "strict")}",
+      "  expected_paths: #{yaml_list(Keyword.get(options, :expected_paths, ["answer.sh"]))}",
+      "  allowed_extra_paths: #{yaml_list(Keyword.get(options, :allowed_extra_paths, []))}",
+      "  required_evidence: #{yaml_list(Keyword.get(options, :required_evidence, []))}",
+      "  remote_access: false",
+      "  deploy: false",
+      "```"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp yaml_list(values), do: "[" <> Enum.map_join(values, ", ", &"\"#{&1}\"") <> "]"
 
   defp git!(dir, args) do
     opts = [stderr_to_stdout: true] ++ if(dir, do: [cd: dir], else: [])

@@ -15,8 +15,15 @@ defmodule SymphonyElixir.Delivery.Git do
   Reading the candidate (who changed) is this module's other job, and the
   acceptance contract depends on it: `change_set/1` reports the destination path
   of renames and every untracked file individually, and `added_lines/1` gives the
-  prohibition scan the added lines with the path they belong to. Both are
-  bounded, so a huge candidate cannot turn the gate into an unbounded scan.
+  prohibition scan the added lines with the path they belong to.
+
+  Both reads are **bounded and fail closed**: the change set is capped
+  (`@max_change_set` entries, non-UTF-8 paths refused) and the added-lines scan
+  stops at its budgets (`@max_diff_bytes`, `@max_scanned_files`,
+  `@max_scanned_bytes`, `@max_scanned_lines`), declaring `truncated` when a bound
+  was reached. The declared residual: the child captures of `git` are proportional
+  to what the candidate produced; the *parse* and the structures built here are
+  limited.
   """
 
   require Logger
@@ -29,6 +36,7 @@ defmodule SymphonyElixir.Delivery.Git do
   """
 
   @max_output_bytes 2_048
+  @max_change_set 5_000
   @max_scanned_files 200
   @max_scanned_lines 2_000
   @max_scanned_bytes 262_144
@@ -59,47 +67,66 @@ defmodule SymphonyElixir.Delivery.Git do
   destination path of a rename.
 
   `--porcelain -z -uall` is used on purpose. `-z` is unquoted, so a path with a
-  space or a non-ASCII character arrives intact, and `-uall` lists each untracked
-  file instead of a compressed `dir/`, which is what lets an expected path inside
-  a directory the agent just created be matched.
+  space arrives intact, and `-uall` lists each untracked file instead of a
+  compressed `dir/`, which is what lets an expected path inside a directory the
+  agent just created be matched.
+
+  The read is **bounded and fails closed**: a change set above `@max_change_set`
+  entries is an error instead of a partial verdict, and a path that is not valid
+  UTF-8 is refused (the entry cannot be matched or persisted safely) instead of
+  crashing the run. The child capture of `git status` is proportional to the
+  number of changes, which is a declared limit of the stage.
   """
   @spec change_set(Path.t()) :: {:ok, [change()]} | {:error, term()}
   def change_set(workspace) do
-    case run_raw(workspace, ["status", "--porcelain", "-z", "-uall"]) do
-      {:ok, output} -> {:ok, change_entries(output)}
-      {:error, reason} -> {:error, reason}
+    with {:ok, output} <- run_raw(workspace, ["status", "--porcelain", "-z", "-uall"]) do
+      case change_entries(output) do
+        {:ok, entries} -> {:ok, entries}
+        :overflow -> {:error, {:change_set_too_large, @max_change_set}}
+        :invalid_encoding -> {:error, {:change_set_not_utf8, :rejected}}
+      end
     end
   end
 
-  @doc "Parses a `git status --porcelain -z` output (`XY PATH\\0[ORIGIN\\0]`)."
-  @spec change_entries(String.t()) :: [change()]
+  @doc """
+  Parses a `git status --porcelain -z` output (`XY PATH\\0[ORIGIN\\0]`).
+
+  At most `@max_change_set + 1` entries are materialized: `:overflow` means the
+  change set is too big to be accepted, and `:invalid_encoding` means a path is
+  not valid UTF-8.
+  """
+  @spec change_entries(String.t()) :: {:ok, [change()]} | :overflow | :invalid_encoding
   def change_entries(output) when is_binary(output) do
-    output
-    |> String.split(<<0>>, trim: true)
-    |> parse_entries([])
+    if String.valid?(output) do
+      output |> String.split(<<0>>, trim: true) |> parse_entries([], 0)
+    else
+      :invalid_encoding
+    end
   end
 
   @doc """
   The added lines of the candidate, with the path they belong to.
 
   Tracked modifications come from `git diff HEAD` (added lines only, so an
-  untouched line is never scanned) and untracked files are read from disk. The
-  result is bounded by `@max_scanned_files`/`@max_scanned_lines` and reports
-  `truncated: true` when the cap was reached, so the caller can say the scan was
-  incomplete instead of pretending it was exhaustive.
+  untouched line is never scanned) and untracked files are read from disk. Every
+  step is bounded (`@max_diff_bytes`, `@max_scanned_files`, `@max_scanned_bytes`,
+  `@max_scanned_lines`) and the collection **stops at the line budget** instead of
+  building everything and truncating afterwards; `truncated: true` says a bound was
+  reached, so the caller can declare the scan incomplete instead of pretending it
+  was exhaustive.
   """
   @spec added_lines(Path.t()) :: {:ok, %{lines: [added_line()], truncated: boolean()}} | {:error, term()}
   def added_lines(workspace) do
     with {:ok, diff} <- run_raw(workspace, ["-c", "core.quotePath=false", "diff", "HEAD", "--no-color", "--unified=0"]),
          {:ok, untracked} <- run_raw(workspace, ["ls-files", "--others", "--exclude-standard", "-z"]) do
       {diff_lines, diff_truncated} = diff_added_lines(diff)
-      {file_lines, files_dropped, bytes_partial} = untracked_lines(workspace, untracked)
-      lines = diff_lines ++ file_lines
+      budget = @max_scanned_lines - length(diff_lines)
+      {file_lines, files_dropped, files_truncated} = untracked_lines(workspace, untracked, budget)
 
       {:ok,
        %{
-         lines: Enum.take(lines, @max_scanned_lines),
-         truncated: diff_truncated or files_dropped or bytes_partial or length(lines) > @max_scanned_lines
+         lines: diff_lines ++ file_lines,
+         truncated: diff_truncated or files_dropped or files_truncated
        }}
     end
   end
@@ -211,32 +238,56 @@ defmodule SymphonyElixir.Delivery.Git do
 
   # --- candidate reading --------------------------------------------------
 
-  defp parse_entries([], acc), do: Enum.reverse(acc)
+  defp parse_entries([], acc, _count), do: {:ok, Enum.reverse(acc)}
 
-  defp parse_entries([field | rest], acc) do
+  defp parse_entries(_fields, _acc, count) when count >= @max_change_set, do: :overflow
+
+  defp parse_entries([field | rest], acc, count) do
     entry = change_entry(field)
     # In the `-z` format a rename/copy is two fields: the destination (with the
     # status) followed by the origin, which is not a change of its own.
     rest = if rename?(entry.status), do: Enum.drop(rest, 1), else: rest
 
-    parse_entries(rest, [entry | acc])
+    parse_entries(rest, [entry | acc], count + 1)
   end
 
-  defp change_entry(field) do
-    %{status: field |> String.slice(0, 2) |> String.trim(), path: String.slice(field, 3..-1//1)}
+  # Binary match on purpose: the status is ASCII and the path is raw bytes (the
+  # output was validated as UTF-8 before this parse, so `String` is safe here).
+  defp change_entry(<<x::binary-size(1), y::binary-size(1), " ", path::binary>>) do
+    %{status: String.trim(x <> y), path: path}
   end
 
   defp rename?(status), do: String.contains?(status, ["R", "C"])
 
   defp diff_added_lines(diff) do
-    {text, truncated} = limit_bytes(diff, @max_diff_bytes)
+    {text, text_truncated} = limit_bytes(diff, @max_diff_bytes)
 
-    {lines, _path} =
+    {lines, _path, truncated} =
       text
       |> String.split(~r/\r?\n/)
-      |> Enum.reduce({[], nil}, &diff_line/2)
+      |> Enum.reduce_while({[], nil, false}, &diff_step/2)
 
-    {Enum.reverse(lines), truncated}
+    {Enum.reverse(lines), text_truncated or truncated}
+  end
+
+  # The collection stops at the documented line budget: the `+`-lines are not all
+  # built to be truncated afterwards.
+  defp diff_step(line, {lines, path, truncated}) do
+    case diff_line(line, path) do
+      {:header, new_path} -> {:cont, {lines, new_path, truncated}}
+      {:added, text, file} -> add_line(added_line(file, text), {lines, path, truncated})
+      :skip -> {:cont, {lines, path, truncated}}
+    end
+  end
+
+  defp add_line([], acc), do: {:cont, acc}
+
+  defp add_line([line], {lines, path, truncated}) do
+    if length(lines) >= @max_scanned_lines do
+      {:halt, {lines, path, true}}
+    else
+      {:cont, {[line | lines], path, truncated}}
+    end
   end
 
   # The child capture of `git diff` is proportional to the candidate's own diff
@@ -250,17 +301,27 @@ defmodule SymphonyElixir.Delivery.Git do
     end
   end
 
-  defp diff_line("+++ b/" <> path, {lines, _path}), do: {lines, path |> String.trim_trailing()}
-  defp diff_line("+++ " <> _other, {lines, _path}), do: {lines, nil}
-  defp diff_line("+" <> text, {lines, path}), do: {added_line(path || "diff", text) ++ lines, path}
-  defp diff_line(_line, {lines, path}), do: {lines, path}
+  defp diff_line("+++ b/" <> path, _path), do: {:header, String.trim_trailing(path)}
+  defp diff_line("+++ " <> _other, _path), do: {:header, nil}
+  defp diff_line("+" <> text, path), do: {:added, text, path || "diff"}
+  defp diff_line(_line, _path), do: :skip
 
-  defp untracked_lines(workspace, untracked) do
+  defp untracked_lines(_workspace, _untracked, budget) when budget <= 0, do: {[], false, true}
+
+  defp untracked_lines(workspace, untracked, budget) do
     paths = String.split(untracked, <<0>>, trim: true)
     {scanned, dropped} = Enum.split(paths, @max_scanned_files)
-    results = Enum.map(scanned, &file_lines(workspace, &1))
 
-    {Enum.flat_map(results, &elem(&1, 0)), dropped != [], Enum.any?(results, &elem(&1, 1))}
+    {lines, partial, exhausted} =
+      Enum.reduce_while(scanned, {[], false, false}, fn path, {lines, partial, _exhausted} ->
+        {file_lines, file_partial} = file_lines(workspace, path)
+        {taken, over} = Enum.split(file_lines, budget - length(lines))
+        acc = {taken ++ lines, partial or file_partial, over != []}
+
+        if over == [], do: {:cont, acc}, else: {:halt, acc}
+      end)
+
+    {lines, dropped != [], partial or exhausted}
   end
 
   defp file_lines(workspace, path) do

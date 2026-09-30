@@ -54,6 +54,7 @@ defmodule SymphonyElixir.Delivery.Acceptance do
   @reserved_evidence "repository-gates"
   @max_summary_findings 3
   @comment_text_limit 300
+  @max_persisted_bytes 16_384
 
   @doc """
   Scope, prohibition and contract findings of the candidate change set.
@@ -61,7 +62,7 @@ defmodule SymphonyElixir.Delivery.Acceptance do
   Returns `{:error, {:delivery_acceptance_failed, result}}` when the verdict
   blocks the delivery; `advisory` findings come back in `{:ok, result}`.
   """
-  @spec scope(Path.t(), Issue.t()) :: {:ok, Result.t()} | {:error, {:delivery_acceptance_failed, Result.t()}}
+  @spec scope(Path.t(), Issue.t()) :: {:ok, Result.t()} | {:error, term()}
   def scope(workspace, %Issue{} = issue) do
     case contract_of(issue) do
       {:ok, :absent} -> {:ok, Result.not_configured()}
@@ -77,7 +78,7 @@ defmodule SymphonyElixir.Delivery.Acceptance do
   through the registry of the workflow (`delivery.evidence`) or the reserved
   `repository-gates`.
   """
-  @spec evidence(Path.t(), Issue.t(), map()) :: {:ok, Result.t()} | {:error, {:delivery_acceptance_failed, Result.t()}}
+  @spec evidence(Path.t(), Issue.t(), map()) :: {:ok, Result.t()} | {:error, term()}
   def evidence(workspace, %Issue{} = issue, delivery) do
     case contract_of(issue) do
       {:ok, :absent} -> {:ok, Result.not_configured()}
@@ -103,7 +104,33 @@ defmodule SymphonyElixir.Delivery.Acceptance do
 
   @doc "Machine-readable view of the verdict, persisted so the next stage can consume the findings."
   @spec summary_json(Result.t()) :: String.t()
-  def summary_json(%Result{} = result), do: Jason.encode!(result)
+  def summary_json(%Result{} = result) do
+    json = Jason.encode!(result)
+
+    if byte_size(json) <= @max_persisted_bytes do
+      json
+    else
+      # The verdict is written into a GitHub comment, which has a size limit, and
+      # the evidence commands (project configuration, unbounded in length) are the
+      # biggest part: they are dropped so the verdict itself always survives, and
+      # the payload says it was compacted.
+      result
+      |> compact_payload()
+      |> Jason.encode!()
+    end
+  end
+
+  defp compact_payload(%Result{} = result) do
+    %{
+      status: result.status,
+      contract_version: result.contract_version,
+      mode: result.mode,
+      findings: result.findings,
+      evidence: Enum.map(result.evidence, &Map.take(&1, [:name, :status])),
+      limits: result.limits,
+      persisted: "compact: the full verdict exceeded #{@max_persisted_bytes} bytes"
+    }
+  end
 
   @doc "Marker of the persisted acceptance block of a candidate."
   @spec comment_marker(String.t()) :: String.t()
@@ -174,7 +201,14 @@ defmodule SymphonyElixir.Delivery.Acceptance do
   end
 
   defp evidence_result(contract, workspace, delivery) do
-    results = Enum.map(contract.required_evidence, &run_evidence(&1, workspace, delivery))
+    # The issue is untrusted input and may demand up to 256 evidences: the phase
+    # has ONE deadline (`delivery.gates_timeout_ms`), not one per command, so a
+    # contract cannot occupy a worker for hours by multiplying it.
+    deadline = System.monotonic_time(:millisecond) + delivery.gates_timeout_ms
+
+    {results, _deadline} =
+      Enum.map_reduce(contract.required_evidence, deadline, &run_evidence(&1, workspace, delivery, &2))
+
     findings = results |> Enum.reject(&(&1.status == :passed)) |> Enum.map(&evidence_finding/1)
 
     Result.evaluated(
@@ -188,30 +222,41 @@ defmodule SymphonyElixir.Delivery.Acceptance do
 
   # The gates stage runs immediately before this phase, and reaching it means the
   # gates passed: the reserved name is the record of that layer, not a new command.
-  defp run_evidence(@reserved_evidence, _workspace, delivery) do
-    %{name: @reserved_evidence, status: :passed, command: delivery.gates}
+  defp run_evidence(@reserved_evidence, _workspace, delivery, deadline) do
+    {%{name: @reserved_evidence, status: :passed, command: delivery.gates}, deadline}
   end
 
-  defp run_evidence(name, workspace, delivery) do
+  defp run_evidence(name, workspace, delivery, deadline) do
     case Map.get(delivery.evidence, name) do
-      nil -> %{name: name, status: :missing_provider, command: nil}
-      command -> run_evidence_command(name, workspace, command, delivery)
+      nil -> {%{name: name, status: :missing_provider, command: nil}, deadline}
+      command -> run_evidence_command(name, workspace, command, deadline)
     end
   end
 
-  defp run_evidence_command(name, workspace, command, delivery) do
-    case Gates.run(workspace, command, delivery.gates_timeout_ms) do
+  defp run_evidence_command(name, workspace, command, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      Logger.warning("Delivery evidence skipped name=#{name} reason=evidence_phase_deadline")
+      {%{name: name, status: :deadline_exceeded, command: command}, deadline}
+    else
+      run_with_budget(name, workspace, command, remaining, deadline)
+    end
+  end
+
+  defp run_with_budget(name, workspace, command, remaining, deadline) do
+    case Gates.run(workspace, command, remaining) do
       {:ok, _output} ->
         Logger.info("Delivery evidence passed name=#{name} command=#{inspect(command)}")
-        %{name: name, status: :passed, command: command}
+        {%{name: name, status: :passed, command: command}, deadline}
 
       {:error, {:command_failed, status, output}} ->
         Logger.warning("Delivery evidence failed name=#{name} status=#{status} output=#{inspect(Git.sanitize(output))}")
-        %{name: name, status: :failed, command: command}
+        {%{name: name, status: :failed, command: command}, deadline}
 
       {:error, {:command_timeout, timeout_ms}} ->
         Logger.warning("Delivery evidence timed out name=#{name} timeout_ms=#{timeout_ms}")
-        %{name: name, status: :timeout, command: command}
+        {%{name: name, status: :timeout, command: command}, deadline}
     end
   end
 
@@ -220,6 +265,14 @@ defmodule SymphonyElixir.Delivery.Acceptance do
       code: :required_evidence_missing,
       category: :evidence,
       message: "required evidence `#{name}` has no provider in `delivery.evidence`"
+    }
+  end
+
+  defp evidence_finding(%{name: name, status: :deadline_exceeded}) do
+    %Finding{
+      code: :required_evidence_failed,
+      category: :evidence,
+      message: "required evidence `#{name}` was not executed: the evidence phase budget was already spent"
     }
   end
 

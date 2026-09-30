@@ -267,15 +267,19 @@ defmodule SymphonyElixir.Delivery do
     end
   end
 
+  # The verdict is persisted *before* the promotion state changes: if writing the
+  # comment fails, the issue must not look promoted without its machine-readable
+  # verdict (the labels are the state the next poll cycle reads).
   defp handoff(github, prepared, candidate, review, delivery, issue_number, settings, acceptance) do
-    with :ok <- GitHub.add_labels(github, issue_number, [delivery.handoff_label]),
-         :ok <- remove_entry_labels(github, issue_number, delivery, settings) do
-      GitHub.ensure_comment(
-        github,
-        issue_number,
-        marker(candidate.sha),
-        comment_body(prepared, candidate, review, delivery, acceptance)
-      )
+    with :ok <-
+           GitHub.ensure_comment(
+             github,
+             issue_number,
+             marker(candidate.sha),
+             comment_body(prepared, candidate, review, delivery, acceptance)
+           ),
+         :ok <- GitHub.add_labels(github, issue_number, [delivery.handoff_label]) do
+      remove_entry_labels(github, issue_number, delivery, settings)
     end
   end
 

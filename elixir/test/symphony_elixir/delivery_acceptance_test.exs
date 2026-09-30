@@ -131,6 +131,21 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       assert result.change_set.changed == ["docs.md"]
     end
 
+    test "an added line with invalid UTF-8 in the diff is skipped, not crashed", %{workspace: workspace} do
+      # No NUL byte, so git treats the file as text and the added line arrives raw.
+      write!(workspace, "latin.txt", <<"a", 0xE9, "\n">>)
+      git!(workspace, ["add", "-A"])
+      git!(workspace, ["-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-q", "-m", "text"])
+      write!(workspace, "latin.txt", <<"b", 0xE9, "\n">>)
+      write!(workspace, "README.md", "base\nmore\n")
+
+      issue = issue(contract_body(allowed_extra_paths: ["latin.txt"]))
+
+      assert {:ok, result} = Acceptance.scope(workspace, issue)
+      assert result.status == :pass
+      assert result.findings == []
+    end
+
     test "a deletion is delivered by its removal and adds no line", %{workspace: workspace} do
       File.rm!(Path.join(workspace, "README.md"))
 
@@ -312,6 +327,18 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       assert {:error, {:git_command_failed, _args, _status, _output}} =
                Acceptance.scope(not_a_repo, issue(contract_body([])))
     end
+
+    test "a change set with a non-UTF-8 path fails closed instead of crashing", %{workspace: workspace} do
+      File.write!(Path.join(workspace, <<"bad", 0xFF, ".txt">>), "x\n")
+
+      assert {:error, {:change_set_not_utf8, :rejected}} = Acceptance.scope(workspace, issue(contract_body([])))
+    end
+
+    test "a change set above the cap fails closed instead of being partially accepted", %{workspace: workspace} do
+      Enum.each(1..5_001, fn index -> write!(workspace, "many/file-#{index}.txt", "x\n") end)
+
+      assert {:error, {:change_set_too_large, 5_000}} = Acceptance.scope(workspace, issue(contract_body([])))
+    end
   end
 
   describe "evidence/3" do
@@ -404,6 +431,30 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       assert [%Finding{code: :required_evidence_failed, message: message}] = result.findings
       assert message =~ "reported timeout"
       assert [%{status: :timeout}] = result.evidence
+    end
+
+    test "the evidence phase has one budget, not one budget per command", %{workspace: workspace} do
+      write!(workspace, "README.md", "base\nmore\n")
+
+      # The issue is untrusted input: 256 evidences multiplied by the per-command
+      # timeout would occupy the worker for hours, so the phase has one deadline.
+      issue = issue(contract_body(required_evidence: ["slow-tests", "agent-tests"]))
+
+      delivery = %{
+        @delivery
+        | gates_timeout_ms: 50,
+          evidence: %{"slow-tests" => "sleep 5", "agent-tests" => "true"}
+      }
+
+      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.evidence(workspace, issue, delivery)
+
+      assert [%{name: "slow-tests", status: :timeout}, %{name: "agent-tests", status: :deadline_exceeded}] =
+               result.evidence
+
+      assert Enum.map(result.findings, & &1.message) == [
+               "required evidence `slow-tests` (`sleep 5`) reported timeout",
+               "required evidence `agent-tests` was not executed: the evidence phase budget was already spent"
+             ]
     end
 
     test "the same candidate always produces the same evidence verdict", %{workspace: workspace} do
@@ -517,6 +568,25 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       refute Map.has_key?(decoded, "change_set")
 
       assert Acceptance.summary_json(result) == json
+    end
+
+    test "an oversized verdict is persisted compacted instead of being lost" do
+      result =
+        Result.evaluated(
+          mode: :strict,
+          contract_version: 1,
+          evidence: [
+            %{name: "huge", status: :passed, command: String.duplicate("x", 20_000)},
+            %{name: "small", status: :passed, command: "true"}
+          ]
+        )
+
+      decoded = Jason.decode!(Acceptance.summary_json(result))
+
+      assert decoded["persisted"] =~ "compact"
+      assert decoded["status"] == "pass"
+      assert [%{"name" => "huge", "status" => "passed"}, %{"name" => "small"}] = decoded["evidence"]
+      assert Enum.all?(decoded["evidence"], &(not Map.has_key?(&1, "command")))
     end
   end
 

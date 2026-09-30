@@ -462,13 +462,23 @@ defmodule SymphonyElixir.DeliveryTest do
   test "the change set parser reports the destination of a rename and every untracked file" do
     output = "R  docs.md" <> <<0>> <> "README.md" <> <<0>> <> " M answer.sh" <> <<0>> <> "?? notes/new.md" <> <<0>>
 
-    assert Git.change_entries(output) == [
-             %{path: "docs.md", status: "R"},
-             %{path: "answer.sh", status: "M"},
-             %{path: "notes/new.md", status: "??"}
-           ]
+    assert Git.change_entries(output) ==
+             {:ok,
+              [
+                %{path: "docs.md", status: "R"},
+                %{path: "answer.sh", status: "M"},
+                %{path: "notes/new.md", status: "??"}
+              ]}
 
-    assert Git.change_entries("") == []
+    assert Git.change_entries("") == {:ok, []}
+
+    # A path that is not valid UTF-8 cannot be matched or persisted safely.
+    assert Git.change_entries(<<"?? bad", 0xFF, ".md", 0>>) == :invalid_encoding
+
+    # The change set is bounded: above the cap the read fails closed instead of
+    # producing a partial (and therefore accepted-by-accident) verdict.
+    many = Enum.map_join(1..5_001, <<0>>, &"?? f#{&1}")
+    assert Git.change_entries(many) == :overflow
   end
 
   test "git refuses to publish without a credential", %{workspace: workspace} do
@@ -719,7 +729,16 @@ defmodule SymphonyElixir.DeliveryTest do
     change_answer!(workspace, "42")
 
     assert {:ok, _result} = Delivery.run(workspace, @issue, github_opts(fake))
-    assert FakeGitHub.state(fake).labels == ["pipeline:ready-for-human"]
+
+    state = FakeGitHub.state(fake)
+    assert state.labels == ["pipeline:ready-for-human"]
+
+    # The verdict is persisted before the promotion state changes: a failure
+    # between the two must not leave the issue promoted without its verdict.
+    comment_at = Enum.find_index(state.requests, &(&1 == :comment_created))
+    labels_at = Enum.find_index(state.requests, &match?({:labels, _}, &1))
+
+    assert comment_at < labels_at
   end
 
   test "a label that cannot be removed fails the delivery instead of being ignored", %{workspace: workspace} do

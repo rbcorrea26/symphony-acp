@@ -37,6 +37,13 @@ codex:
   turn_sandbox_policy:
     type: workspaceWrite
     networkAccess: true
+# delivery:                     # opt-in fork extension: gates -> draft PR -> CI -> handoff.
+#   enabled: true               # default false; requires a GitHub tracker and no remote worker.
+#   gates: "scripts/agent/preflight.sh --gates"   # the project owns its gates.
+#   evidence:                   # named evidences: the issue contract demands the name,
+#     agent-tests: "tests/agent/run-tests.sh"     # this map supplies the command.
+#     wordpress-tests: "tests/wordpress/run-tests.sh"
+#   # repository-gates is reserved: the gates command above satisfies it.
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`

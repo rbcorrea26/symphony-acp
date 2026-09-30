@@ -28,7 +28,7 @@ ela não pode ficar marcada como entregue sem o veredicto legível por máquina 
 #13/#14 vão consumir.
 
 Invariante: *promotion state must not advance if the machine-readable verdict was
-not durably persisted*. Ele é executado em `handoff/7` (o `ensure_comment` precede o
+not durably persisted*. Ele é executado em `handoff/8` (o `ensure_comment` precede o
 `add_labels`) e coberto por teste: uma escrita de comentário que falha deixa a issue
 sem rótulo de handoff, com o rótulo de entrada no lugar e sem comentário.
 

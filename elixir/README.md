@@ -335,11 +335,13 @@ pipeline_contract:
   hours.
 - Prohibitions are detected by scanning the **added lines** of the candidate (the tracked
   `git diff` — read up to its cap, with the child closed at that point so a huge diff is never
-  captured in memory — plus untracked files, both bounded and reported as truncated when a cap
-  is reached) with the fixed rules documented in
+  captured in memory — plus untracked files, both bounded) with the fixed rules documented in
   `../docs/fork/adr/0006-acceptance-contract.md`. A match is a finding for the human, not a
   proof of intent; `remote_access: true`/`deploy: true` in the contract turns the
-  corresponding scan off.
+  corresponding scan off. A scan that reaches its cap (`change_scan_truncated`) is **never
+  reported as complete**: it adds the `prohibition_scan_truncated` finding, so a `strict`
+  contract fails closed instead of certifying the absence of a prohibition over a partial
+  read, while `advisory` reports the divergence and continues.
 - With no candidate change set (a `--resume-only` cycle over an already published candidate,
   or nothing to publish) the layer reports `not_applicable` instead of failing: that
   candidate was accepted by the cycle that created it.
@@ -358,7 +360,8 @@ pipeline_contract:
   is no candidate change set), `contract_version`, `mode`, `findings`, `evidence`,
   `change_set` and `limits`. Each finding carries a deterministic `code`
   (`invalid_contract`, `expected_path_missing`, `unexpected_path_changed`,
-  `required_evidence_missing`, `required_evidence_failed`, `forbidden_deploy_detected`,
+  `required_evidence_missing`, `required_evidence_failed`, `prohibition_scan_truncated`,
+  `forbidden_deploy_detected`,
   `forbidden_remote_access_detected`), a `category`, a human `message` and an optional `path`.
   There is no score and no ranking: the contract `mode` decides whether a finding blocks.
 - `limits` says what the layer did **not** verify — the forbidden-operation check is a pattern

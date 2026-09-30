@@ -157,6 +157,16 @@ limite residual declarado: a captura de `git status`/`git ls-files` é proporcio
 número de paths do candidato (o change set é limitado a 5 000 entradas); o *parse* e
 as estruturas construídas aqui são limitados.
 
+**Varredura parcial não passa por completa**: quando o cap é atingido (no diff lido,
+nos arquivos ou nas linhas), o veredicto ganha o finding
+`prohibition_scan_truncated` — em `strict` o run **falha** (nada é publicado) e em
+`advisory` a divergência é reportada e o handoff continua — além do limite
+`change_scan_truncated`, sempre declarado. Um contrato que desligou as duas
+proibições (`remote_access: true` e `deploy: true`) não tem o que certificar: aí o
+cap é só um limite, sem finding. O teto de **achados** por tipo (`truncated` da
+varredura de regras) é outro caso: ele nunca esconde uma proibição encontrada, só
+limita quantas são listadas.
+
 `deploy: true` / `remote_access: true` **não concedem capacidade**: significam
 apenas "este contrato não proíbe". Quem autoriza deploy é a política da plataforma
 /do projeto — o aceite é declarativo e restritivo, nunca um mecanismo de permissão.
@@ -169,6 +179,7 @@ apenas "este contrato não proíbe". Quem autoriza deploy é a política da plat
 | sem change set novo (`--resume-only`, nada a publicar) | `:not_applicable` | nenhum (o candidato publicado foi aceito quando foi criado) |
 | `strict`, sem achados | `:pass` | segue: gates → evidências → publicação |
 | `strict`, com achados | `:fail` | run falha **sem publicar** (nada de branch/PR/rótulo/comentário) |
+| `strict`, varredura de proibição **truncada** | `:fail` (`prohibition_scan_truncated`) | run falha sem publicar: um scan parcial não certifica ausência de proibição |
 | `advisory`, com achados | `:advisory` | publica normalmente; achados no log e no comentário |
 | contrato inválido | `:fail` (`mode: nil`) | run falha sem publicar (`invalid_contract`) |
 
@@ -186,6 +197,7 @@ sucesso (o comentário é chaveado pelo SHA do candidato).
 | `unexpected_path_changed` | `scope` | path alterado fora de `expected_paths` ∪ `allowed_extra_paths` (inclui a origem de um rename, que é uma deleção) |
 | `required_evidence_missing` | `evidence` | nome exigido sem provider no registry |
 | `required_evidence_failed` | `evidence` | provider com exit ≠ 0, timeout ou orçamento da fase esgotado |
+| `prohibition_scan_truncated` | `forbidden_operation` | a varredura das linhas adicionadas atingiu o cap: ausência de proibição não é certificável sobre um scan parcial (bloqueia em `strict`) |
 | `forbidden_deploy_detected` | `forbidden_operation` | regra de deploy casou em linha adicionada |
 | `forbidden_remote_access_detected` | `forbidden_operation` | regra de acesso remoto casou em linha adicionada |
 

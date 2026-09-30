@@ -131,11 +131,17 @@ aceite nunca libera o que o projeto não tem.
 | paths entregues/autorizados | sim, determinístico | change set do git (`--porcelain -z -uall`) |
 | evidência exigida | sim | exit code do comando declarado no workflow |
 | comando proibido **presente** | sim (positivo) | varredura de padrões das linhas adicionadas |
+| ausência de proibição sobre um scan **parcial** (cap atingido) | não | `prohibition_scan_truncated`: `strict` falha, `advisory` reporta |
 | **ausência** de acesso remoto/deploy na execução | **não** | o fork não observa rede/processos do agente; "sem achado" ≠ prova de ausência |
 | conteúdo/qualidade do entregue | não | gates, review e arquiteto |
 
 A distinção é declarada na resposta (`limits`) e no comentário de handoff, e não
-convertida em `PASS` silencioso.
+convertida em `PASS` silencioso. O mesmo vale para o **scan parcial**: quando a
+varredura atinge o cap declarado (1 MiB de diff, 200 arquivos não rastreados,
+262 144 bytes por arquivo, 2 000 linhas), o veredicto carrega
+`prohibition_scan_truncated` — em `strict` o run falha (não se certifica ausência de
+proibição sobre leitura parcial) e em `advisory` a divergência é reportada — além
+do limite `change_scan_truncated`.
 
 ### Segurança da entrada não confiável
 

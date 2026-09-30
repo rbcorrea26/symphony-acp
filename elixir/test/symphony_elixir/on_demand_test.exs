@@ -59,8 +59,21 @@ defmodule SymphonyElixir.OnDemandTest do
   defp start_orchestrator do
     name = Module.concat(__MODULE__, "Orchestrator#{System.unique_integer([:positive])}")
     {:ok, pid} = Orchestrator.start_link(name: name)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    on_exit(fn -> stop_orchestrator(pid) end)
     pid
+  end
+
+  # O orquestrador e ligado ao processo de teste: quando ele sai, o orquestrador pode
+  # morrer entre o `Process.alive?` e o `GenServer.stop`, que entao falha com
+  # `:noproc` e derruba o `on_exit` (e o teste) por corrida.
+  defp stop_orchestrator(pid) do
+    if Process.alive?(pid) do
+      try do
+        GenServer.stop(pid, :normal, 5_000)
+      catch
+        :exit, _reason -> :ok
+      end
+    end
   end
 
   # Espera um ciclo de poll terminar e o proximo tick ser agendado: um `sleep` fixo

@@ -145,8 +145,12 @@ convertida em `PASS` silencioso.
   âncora ignora comentários e scalars com aspas, onde `&` é dado;
 - duplicidade ambígua é recusada, nunca "escolhida": dois blocos, duas chaves
   `pipeline_contract` e uma **mesma chave repetida dentro do mapeamento**
-  (`duplicate_field`), contando também as formas com aspas e com o indicador
-  explícito — o decoder YAML manteria uma delas em silêncio;
+  (`duplicate_field`). A contagem é feita nos **nós do parser YAML** (chave com
+  aspas, com tag, com âncora ou explícita é a mesma chave; chaves iguais são
+  contadas antes de o decoder colapsá-las), e o texto bruto não decide presença: ele
+  só pode *ampliar* o conjunto de falhas (um bloco que cita a chave e não pode ser
+  decodificado é erro, nunca ausência — e um bloco que só **menciona** a chave dentro
+  de um scalar não é declaração);
 - nenhum dado do contrato chega a um shell: o comando executado vem de
   `delivery.gates`/`delivery.evidence` (configuração do projeto) e a issue só
   contribui com **nomes** de evidência;
@@ -193,7 +197,14 @@ O veredicto aparece no `result` de `Delivery.run/3`, no log
 marcação + JSON (`<!-- acceptance:result:<sha> -->`), que é a interface estável para
 a máquina de estados da review (#13) e para o architect runner (#14). Nada de
 rótulo novo e nada de arquivo de estado: a evidência continua transitória
-(PR/CI/comentário), como decidido no ADR-0006 da plataforma. Limite declarado:
+(PR/CI/comentário), como decidido no ADR-0006 da plataforma.
+
+Invariante operacional do handoff: *promotion state must not advance if the
+machine-readable verdict was not durably persisted* — o comentário (com o JSON) é
+escrito **antes** do rótulo de handoff e da remoção do rótulo de entrada; se a
+escrita falhar, a issue não é promovida e nada de estado avança.
+
+Limite declarado:
 quando o aceite reprova, o run falha e **não** publica nem comenta (a evidência do
 bloqueio fica no log; o estado persistido de bloqueio é escopo da #13).
 

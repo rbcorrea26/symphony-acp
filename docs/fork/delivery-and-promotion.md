@@ -27,6 +27,11 @@ rótulo de entrada. Se a escrita do comentário falhar, a issue **não** é prom
 ela não pode ficar marcada como entregue sem o veredicto legível por máquina que a
 #13/#14 vão consumir.
 
+Invariante: *promotion state must not advance if the machine-readable verdict was
+not durably persisted*. Ele é executado em `handoff/7` (o `ensure_comment` precede o
+`add_labels`) e coberto por teste: uma escrita de comentário que falha deixa a issue
+sem rótulo de handoff, com o rótulo de entrada no lugar e sem comentário.
+
 O **candidato fica amarrado ao que foi aceito**: o aceite e os gates rodam no
 conteúdo do workspace que este run publica. Se o head da branch observado no fim da
 espera do CI for outro commit (um push concorrente), o run falha com

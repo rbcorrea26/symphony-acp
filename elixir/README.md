@@ -314,14 +314,19 @@ pipeline_contract:
   detected prohibition or a required evidence that did not pass **fails the acceptance**, so
   nothing is published. `advisory` reports the divergence (log and handoff comment) and the
   delivery continues; the architectural review decides.
-- The parser only extracts the fenced `pipeline_contract:` block and validates version,
-  types and field names: content of the issue is **never executed** (`eval`/`source`/shell
-  are prohibited by design). The key may be written plain or quoted (`"scope_mode":`, what a
-  template generator produces) and the explicit-key indicator (`? key`) is read too, so a
-  declared contract is never classified as absent because of the key style. An unenforceable
-  contract (unknown version or field, invalid pattern, broken YAML, two contracts, a repeated
-  key) fails the run instead of being ignored; an issue without a contract is simply not
-  subject to this layer.
+- The parser extracts the fenced `pipeline_contract:` block (or an unfenced body that starts
+  with the key) and validates version, types and field names: content of the issue is **never
+  executed** (`eval`/`source`/shell are prohibited by design). Whether the body *declares* the
+  contract is read from the **YAML parser**, not from a regex: the key may be written plain,
+  quoted (`"scope_mode":`, `'scope_mode':`), tagged or with the explicit-key indicator
+  (`? key`), and duplicates are counted on the parser nodes, before the decoder collapses equal
+  keys — so a declared contract is never classified as absent because of the key style and two
+  equal keys are never silently one. An unenforceable contract (unknown version or field,
+  invalid pattern, a pattern that is not valid UTF-8, broken YAML, two contracts, a repeated
+  key, an anchor) fails the run instead of being ignored; an issue without a contract is simply
+  not subject to this layer, and a mention of the key inside a string is data, not a
+  declaration (a block the parser cannot read at all and whose text cites the key is an error,
+  never absence).
 - Evidence is named: `required_evidence` demands names, `delivery.evidence` supplies the
   command. The reserved name `repository-gates` is satisfied by the gates stage itself. A
   demanded name without a provider is a finding, never a silent pass, and the phase has **one

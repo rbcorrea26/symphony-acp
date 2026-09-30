@@ -53,16 +53,28 @@ Regras do parser (`SymphonyElixir.PipelineContract`):
 | `expected_paths` vazio em `strict` | `:strict_requires_expected_paths` → reprova |
 | lista vazia em `allowed_extra_paths`/`required_evidence` | válido (é a ausência de autorização/exigência) |
 | path absoluto, com `..`, com `\` ou vazio | `{:invalid_pattern, _, _}` → reprova |
-| dois blocos, ou duas chaves `pipeline_contract` | `{:ambiguous_contracts, n}` / `{:duplicate_contract_key, n}` → reprova |
-| chave escrita com aspas (`"scope_mode":`) ou com o indicador explícito (`? scope_mode`) | é lida como a **mesma** chave: ausência, escopo e duplicidade continuam sendo verificadas |
-| uma mesma chave repetida no mapeamento (bloco ou flow) | `{:duplicate_field, "scope_mode"}` → reprova |
+| dois blocos, ou duas chaves `pipeline_contract` no mesmo bloco | `{:ambiguous_contracts, n}` / `{:duplicate_contract_key, n}` → reprova (a contagem vem dos **nós do parser YAML**, antes de o decoder colapsar chaves iguais) |
+| chave escrita com aspas (`"scope_mode":`, `'scope_mode':`), com tag (`!!str`), com âncora ou com o indicador explícito (`? scope_mode`) | é a **mesma** chave que o decoder lê: presença, escopo e duplicidade continuam sendo verificadas |
+| uma mesma chave repetida no mapeamento (bloco, flow ou `? chave`) | `{:duplicate_field, "scope_mode"}` → reprova |
+| `pipeline_contract:` **dentro de um scalar** (exemplo em bloco de documentação) | não é declaração: o parser não vê a chave ali, então o corpo segue `:absent`; um bloco que não pode ser decodificado **e** cujo texto cita a chave é erro, nunca ausência |
+| padrão que não é UTF-8 (ex.: um `!!binary`) | `{:invalid_pattern, _, :not_utf8}` → reprova (a comparação de paths é sobre UTF-8) |
 | tag YAML (`!foo`, `!ruby/object`, `!!python/...`) | `{:invalid_yaml, %{type: :unrecognized_node}}` → reprova |
 | âncora (`&name`) | `{:anchors_not_supported, "&name"}` → reprova (alias/expansão não têm uso no schema) |
+| bloco com mais de um documento YAML (`---`) | a chave é contada em todos os documentos do bloco e o decoder lê um deles: um contrato que não esteja no documento decodificado é `:missing_pipeline_contract_key` → reprova (nunca é lido "o contrato errado") |
 | bloco > 64 KiB, lista > 256 itens, padrão > 512 chars | reprova |
 
 O parser **decodifica dados, nunca executa**: sem `eval`, `source`, shell ou
 interpolação do contrato em comando. Nada do contrato chega a um shell; os padrões
 são comparados (regex ancorada) com o change set, nunca resolvidos no filesystem.
+
+Quem decide se o corpo **declara** o contrato é o **parser YAML**, não uma regex:
+a chave é contada nos nós do parser (com `maps_as_keywords`, que preserva chaves
+repetidas e não guarda comentários) *antes* de o decoder colapsar duplicatas, então
+estilo de chave e duplicidade ambígua não dependem de forma textual. A regex de
+chave existe só como **dica textual que amplia o conjunto de falhas**: um bloco que
+cita a chave mas não pode ser decodificado é erro (`invalid_yaml`), nunca ausência;
+e uma âncora estrutural faz o bloco ser recusado **sem** ser parseado (o grafo de
+alias nunca é expandido).
 
 ## 3. Semântica de escopo
 
@@ -213,7 +225,17 @@ ninguém aceitou.
 
 - o contrato é **entrada não confiável** (corpo da issue): decodificação de dados
   com tipos explícitos, tags YAML recusadas, âncoras recusadas, limites de tamanho
-  e de itens, sem `eval`/`source`/shell;
+  e de itens, sem `eval`/`source`/shell; a presença e a duplicidade da chave são
+  contadas nos **nós do parser** (uma chave com aspas, com tag ou explícita é a
+  mesma chave; duas chaves iguais são duas), e o texto bruto só pode *acrescentar*
+  falha, nunca declarar ausência;
+- **globs**: o padrão é transformado em uma fonte de regex cujos literais passam por
+  `Regex.escape` e cujo match é Unicode (`?` é um caractere, não um byte), então a
+  compilação não pode falhar por causa da entrada; um padrão que não é UTF-8 é erro
+  de schema (`:not_utf8`) em vez de estourar no meio da comparação. Cada padrão é
+  compilado **uma vez por avaliação** e reusado no check de entregue e de
+  autorizado — compilar por par path × padrão deixaria um contrato de 256+256
+  padrões com um candidato de 5 000 paths passar de milhões de compilações;
 - **path traversal**: padrões com `/` inicial, `..` ou `\` são erro de schema; a
   comparação é textual e ancorada, sem resolução de filesystem, e symlinks não
   movem o escopo;

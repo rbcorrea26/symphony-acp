@@ -97,8 +97,7 @@ defmodule SymphonyElixir.Delivery.Acceptance do
   end
 
   def describe(%Result{} = result) do
-    "`#{result.mode}" <>
-      "` #{verdict_word(result.status)} (#{length(result.findings)} finding(s)): " <>
+    "`#{result.mode}` #{verdict_word(result.status)} (#{length(result.findings)} finding(s)): " <>
       "#{findings_summary(result.findings)}#{limits_note(result)}"
   end
 

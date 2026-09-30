@@ -89,11 +89,12 @@ ciclo executa apenas a etapa de entrega (`SymphonyElixir.Delivery`) sobre o que 
 
 Implementado e testado aqui: o lifecycle acima (`--exit-when-idle`, `--issue`,
 `--resume-only`, `--max-runtime-seconds`, `SymphonyElixir.Shutdown`), com a suíte offline
-(tracker `memory` + shutdown injetado).
+(tracker `memory` + shutdown injetado); e o **contrato de aceite da issue**
+(`pipeline_contract` em `strict`/`advisory`, com evidências nomeadas e proibições,
+registrado em [adr/0006](adr/0006-acceptance-contract.md) e documentado em
+[delivery-and-promotion.md](delivery-and-promotion.md)).
 
 **Pendente** (não implementado neste incremento — não trate como pronto):
-
-- contrato de aceite (`pipeline_contract`) em `strict`/`advisory`;
 - máquina de estados da review (`waiting-review`/`rework` por *candidate* SHA, findings
   materiais, limite de ciclos) — hoje o estágio de entrega ainda escreve o handoff antigo;
 - architect runner (`ARCHITECT_PASS`/`REWORK`/`BLOCKED`) como gate antes de

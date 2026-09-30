@@ -182,6 +182,31 @@ flag sob demanda não há registro e o mapeamento residente do upstream continua
 é um prazo: o ciclo seguinte é agendado no vencimento dele, um ciclo que já venceu não despacha
 trabalho novo e um ciclo comprovadamente idle encerra com `0` (não `3`).
 
+O **bloco D da fase 7b** (contrato de aceite legível por máquina, issue
+[#12](https://github.com/rbcorrea26/symphony-acp/issues/12), ADR-0009 §4–§5 da plataforma) entra
+pela branch `feat/phase7b-acceptance-contract` e é a primeira extensão do fork que acrescenta
+uma **camada de verificação** ao estágio de entrega: o aceite da issue
+(`pipeline_contract` v1: escopo `strict`/`advisory`, evidências nomeadas e proibições) passa a
+rodar antes de qualquer publicação, **separado** dos gates do repositório e do CI. Arquivos:
+
+| Arquivo | Tipo | Motivo | Comportamento upstream afetado? |
+|---|---|---|---|
+| `docs/fork/adr/0006-acceptance-contract.md` | novo | decisão durável: schema v1 do contrato, política `strict`/`advisory`, evidência nomeada, regras e limites da varredura de proibição | não |
+| `elixir/lib/symphony_elixir/pipeline_contract.ex` | novo | parser/schema do `pipeline_contract` (data da issue, nunca código), matching de glob e achados puros de escopo/proibição | não (só existe com `delivery.enabled`) |
+| `elixir/lib/symphony_elixir/delivery/acceptance.ex` | novo | gate impuro do aceite: lê o change set, roda as evidências exigidas, decide por modo e resume o relatório | não (só existe com `delivery.enabled`) |
+| `elixir/lib/symphony_elixir/delivery/gates.ex` | novo | runner único de comando com timeout, compartilhado por gates e evidências (extraído do `delivery.ex`) | não |
+| `elixir/lib/symphony_elixir/delivery.ex` | alterado (aditivo) | ordem das três camadas (aceite → gates → evidências), `contract` no resultado, linha do aceite no comentário de handoff e `run_gates` delegando a `Delivery.Gates` | não (sem o bloco `delivery` o caminho é o upstream) |
+| `elixir/lib/symphony_elixir/delivery/git.ex` | alterado (aditivo) | `change_set/1` (porcelain `-z -uall`), `added_lines/1` (diff + não rastreados, limitado) e leitura crua de saída do git | não |
+| `elixir/lib/symphony_elixir/config/schema.ex` | alterado (aditivo) | campo `delivery.evidence` (nome → comando) com validação de nome/comando não vazios | não (default `{}`) |
+| `elixir/test/symphony_elixir/pipeline_contract_test.exs` | novo | schema, glob, escopo e proibições do parser | não |
+| `elixir/test/symphony_elixir/delivery_acceptance_test.exs` | novo | gate sobre git real (change set, evidências, resume, limites, arquivo ilegível/binário) | não |
+| `elixir/test/symphony_elixir/delivery_test.exs` | alterado | casos ponta a ponta: bloqueio `strict`, regressão #64/#65, `advisory`, evidência verde/vermelha, contrato inválido e segundo ciclo | não |
+| `elixir/README.md` | alterado | documenta `delivery.evidence` e a camada de aceite | não |
+| `docs/fork/delivery-and-promotion.md` | alterado | fluxo com as três camadas, schema na issue e limites declarados | não |
+| `docs/fork/lifecycle.md` | alterado | o contrato de aceite deixa de ser pendência da fase 7b | não |
+| `docs/fork/README.md` | alterado | status da fase 7b (bloco D implementado) | não |
+| `docs/fork/adr/README.md` | alterado | índice do ADR `0006` | não |
+
 ## Regras do registro
 
 - Toda alteração em arquivo existente do upstream entra aqui **no mesmo PR**,

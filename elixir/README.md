@@ -284,9 +284,56 @@ delivery:
   ci_timeout_ms: 1800000
   ci_poll_interval_ms: 15000
   request_review: true             # one-shot request, only after a stable candidate
+  evidence:                        # named evidences the issue's acceptance contract may require
+    agent-tests: "tests/agent/run-tests.sh"
+    wordpress-tests: "tests/wordpress/run-tests.sh"
 ```
 
 - A non-zero exit from `delivery.gates` fails the run: nothing is published.
+- **Three independent layers decide before a candidate is promoted**: the issue's
+  **acceptance contract** ("was the issue satisfied?"), the repository gates ("is the
+  repository still valid?") and the CI ("did the published candidate pass?"). Green gates do
+  not replace acceptance. The contract is declarative data in the **issue body**:
+
+```yaml
+pipeline_contract:
+  version: 1
+  scope_mode: strict               # strict | advisory
+  expected_paths:                  # glob patterns; each one must be delivered
+    - docs/changes/2026-09-30-pipeline-e2e-smoke.md
+    - tests/agent/run-tests.sh
+  allowed_extra_paths: []          # glob patterns authorized beyond the expected set
+  required_evidence:               # names the candidate must prove
+    - agent-tests
+    - repository-gates
+  remote_access: false             # absent = false (explicit prohibition)
+  deploy: false
+```
+
+- `strict`: an expected path that was not delivered, a changed path nobody authorized, a
+  detected prohibition or a required evidence that did not pass **fails the acceptance**, so
+  nothing is published. `advisory` reports the divergence (log and handoff comment) and the
+  delivery continues; the architectural review decides.
+- The parser only extracts the fenced `pipeline_contract:` block and validates version,
+  types and field names: content of the issue is **never executed** (`eval`/`source`/shell
+  are prohibited by design). An unenforceable contract (unknown version or field, invalid
+  pattern, broken YAML, two contracts) fails the run instead of being ignored; an issue
+  without a contract is simply not subject to this layer.
+- Evidence is named: `required_evidence` demands names, `delivery.evidence` supplies the
+  command (mapped evidence commands use `delivery.gates_timeout_ms`). The reserved name
+  `repository-gates` is satisfied by the gates stage itself. A demanded name without a
+  provider is a finding, never a silent pass.
+- Prohibitions are detected by scanning the **added lines** of the candidate (tracked diff
+  plus untracked files, bounded and reported as truncated when the cap is reached) with the
+  fixed rules documented in `../docs/fork/adr/0006-acceptance-contract.md`. A match is a
+  finding for the human, not a proof of intent; `remote_access: true`/`deploy: true` in the
+  contract turns the corresponding scan off.
+- With no candidate change set (a `--resume-only` cycle over an already published candidate,
+  or nothing to publish) the layer reports `not_applicable` instead of failing: that
+  candidate was accepted by the cycle that created it.
+- The verdict is in the result of `Delivery.run/3`, in the `acceptance contract:` line of the
+  handoff comment and in the log (`Delivery acceptance passed|diverged|failed`). Nothing new
+  is persisted: the evidence stays in the PR/CI/comment.
 - The candidate is the head SHA of the delivery branch that passed the local gates **and**
   whose check runs all concluded successfully **and** that was still the branch head when
   the observation finished. A push that lands during the observation invalidates it and
@@ -298,7 +345,8 @@ delivery:
   review either (the review is one-shot).
 - The entry labels (`tracker.required_labels`) are removed at the handoff, which is what
   stops the next poll from dispatching an issue that was already delivered; the handoff
-  comment carries the candidate SHA, the gates command, the CI result and the review state.
+  comment carries the candidate SHA, the acceptance verdict, the gates command, the CI result
+  and the review state.
 - The credential is never written to `argv`, to the workspace or to a log: the push uses a
   throwaway `GIT_ASKPASS` helper (it holds no secret and is removed even on failure) and
   the REST calls reuse the tracker authentication.

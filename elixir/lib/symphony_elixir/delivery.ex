@@ -37,7 +37,12 @@ defmodule SymphonyElixir.Delivery do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, Delivery.Acceptance, Delivery.Gates, Delivery.Git, Delivery.GitHub}
+  alias SymphonyElixir.Config
+  alias SymphonyElixir.Delivery.Acceptance
+  alias SymphonyElixir.Delivery.Acceptance.Result
+  alias SymphonyElixir.Delivery.Gates
+  alias SymphonyElixir.Delivery.Git
+  alias SymphonyElixir.Delivery.GitHub
   alias SymphonyElixir.Tracker.Issue
 
   @type result :: %{
@@ -48,7 +53,7 @@ defmodule SymphonyElixir.Delivery do
           checks: map(),
           review: :requested | :unavailable | :disabled | :reconciled,
           issue_number: integer(),
-          contract: Acceptance.report()
+          contract: Result.t()
         }
 
   @spec run(Path.t(), Issue.t(), keyword()) :: :disabled | {:ok, result()} | {:error, term()}
@@ -119,15 +124,15 @@ defmodule SymphonyElixir.Delivery do
     settings = Config.settings!()
 
     # Order matters and is deliberate: the acceptance contract decides scope over
-    # the candidate (cheap, and a strict finding must not spend a gates run), the
+    # the candidate (cheap, and a blocking finding must not spend a gates run), the
     # gates then say whether the repository is still valid, and only then the
     # evidence required by the issue is executed (it uses the gates timeout).
+    # Green gates never rescue a failed acceptance: the failure comes from here.
     with {:ok, issue_number} <- issue_number(issue),
          {:ok, github} <- GitHub.context(settings.tracker, github_opts),
-         {:ok, contract} <- Acceptance.contract(issue),
-         {:ok, scope} <- Acceptance.scope(workspace, contract),
+         {:ok, scope} <- Acceptance.scope(workspace, issue),
          :ok <- run_gates(workspace, delivery),
-         {:ok, evidence} <- Acceptance.evidence(workspace, contract, delivery) do
+         {:ok, evidence} <- Acceptance.evidence(workspace, issue, delivery) do
       publish(
         workspace,
         issue,
@@ -135,7 +140,7 @@ defmodule SymphonyElixir.Delivery do
         github,
         issue_number,
         settings,
-        Acceptance.summarize(scope, evidence)
+        Result.merge(scope, evidence)
       )
     end
   end
@@ -320,6 +325,8 @@ defmodule SymphonyElixir.Delivery do
     - CI: #{candidate.checks.total} check run(s) concluded successfully
     - one-shot review: #{review}
     - merge: human decision (the pipeline never merges)
+
+    #{Acceptance.comment_block(acceptance, candidate.sha)}
     """
   end
 end

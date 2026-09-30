@@ -154,7 +154,11 @@ defmodule SymphonyElixir.Delivery.Git do
 
   @spec sanitize(String.t()) :: String.t()
   def sanitize(output) when is_binary(output) do
+    # Git output and candidate paths are bytes, not necessarily UTF-8: replacing
+    # the invalid sequences keeps `String` operations (and the log line) safe
+    # instead of raising while the pipeline is reporting a failure.
     output
+    |> String.replace_invalid()
     |> String.slice(0, @max_output_bytes)
     |> mask_credentials()
   end
@@ -246,7 +250,9 @@ defmodule SymphonyElixir.Delivery.Git do
   end
 
   defp read_limited(path, limit) do
-    with {:ok, io} <- File.open(path, [:read, :binary]) do
+    with {:ok, stat} <- File.lstat(path),
+         :ok <- require_regular(stat),
+         {:ok, io} <- File.open(path, [:read, :binary]) do
       try do
         case IO.binread(io, limit) do
           :eof -> {:ok, ""}
@@ -258,8 +264,15 @@ defmodule SymphonyElixir.Delivery.Git do
     end
   end
 
+  # `lstat` (not `stat`): a symlink is reported as such and refused instead of
+  # being followed to whatever it points at.
+  defp require_regular(%File.Stat{type: :regular}), do: :ok
+  defp require_regular(%File.Stat{type: type}), do: {:error, {:not_a_regular_file, type}}
+
   # A binary or non-UTF-8 file is not a line of shell code: it is skipped instead
-  # of crashing the scan.
+  # of crashing the scan. Symlinks are not followed either (`read_limited/2`
+  # refuses anything that is not a regular file), so a link cannot make the scan
+  # read something outside the workspace.
   defp added_line(path, text) do
     if String.valid?(text), do: [%{path: path, text: text}], else: []
   end

@@ -47,7 +47,58 @@ defmodule SymphonyElixir.PipelineContract do
   rules (`@deploy_rules`/`@remote_access_rules`) bounded by `@max_findings`. A
   match is a finding for the human, never a claim about intent: the rules are
   documented in `docs/fork/adr/0006-acceptance-contract.md`.
+
+  Safety of the extraction (the issue body is untrusted input):
+
+    * YAML is **decoded, never executed**: there is no `eval`/`source`, no shell
+      and no interpolation of contract data into a command anywhere in the fork;
+    * YAML tags are refused: `YamlElixir` only knows the plain types used by the
+      schema, so `!foo`, `!ruby/object` and `!!python/...` fail as unrecognized;
+    * anchors and aliases are refused by this parser (`&name`/`*name`) because the
+      schema needs no indirection and an alias graph can expand exponentially
+      ("billion laughs") from a small document;
+    * the block is bounded (`@max_contract_bytes`) and so are the lists
+      (`@max_items`) and the patterns (`@max_pattern_length`);
+    * a body that declares `pipeline_contract` twice is rejected as ambiguous
+      instead of picking one (both two blocks and two keys in the same block);
+    * patterns are never resolved against the filesystem: an absolute path, a `..`
+      segment or a `\` separator is a schema error, and the match is a pure,
+      anchored comparison against the candidate change set — a symlink cannot
+      move the scope.
   """
+
+  defmodule Finding do
+    @moduledoc """
+    Stable, machine-readable finding of the acceptance layer.
+
+    `code` is deterministic and is the field a consumer (for example the review
+    state machine of the next increment) should switch on; `message` is for the
+    human and carries the detail (path, matched rule, reason). There is no score
+    and no ranking: the `mode` of the contract decides whether the findings block
+    the delivery.
+    """
+
+    @type code ::
+            :invalid_contract
+            | :expected_path_missing
+            | :unexpected_path_changed
+            | :required_evidence_missing
+            | :required_evidence_failed
+            | :forbidden_deploy_detected
+            | :forbidden_remote_access_detected
+
+    @type category :: :contract | :scope | :evidence | :forbidden_operation
+
+    @type t :: %__MODULE__{
+            code: code(),
+            category: category(),
+            message: String.t(),
+            path: String.t() | nil
+          }
+
+    @derive {Jason.Encoder, only: [:code, :category, :message, :path]}
+    defstruct [:code, :category, :message, :path]
+  end
 
   @version 1
   @fields ~w(version scope_mode expected_paths allowed_extra_paths required_evidence remote_access deploy)
@@ -61,6 +112,13 @@ defmodule SymphonyElixir.PipelineContract do
   @max_contract_bytes 65_536
   @max_findings 5
   @max_snippet_length 80
+
+  # An anchor token (`&name`) is refused: the schema needs no indirection, and an
+  # alias graph can expand exponentially from a small document. The token class
+  # only matches an anchor *indicator* (start, whitespace or structural
+  # punctuation before `&`), so a glob pattern such as `docs/*.md` or `**/x.sh`
+  # and an `&` inside a value or a quoted string are untouched.
+  @anchor_token ~r/(?:^|[\s:,\[\]{}])&[A-Za-z0-9_.-]+/m
 
   # Fixed rules of `deploy: false`. They run over the *added* lines of the
   # candidate only, so a line that merely documents the pipeline (in an
@@ -99,19 +157,19 @@ defmodule SymphonyElixir.PipelineContract do
           deploy: boolean()
         }
 
-  @type violation :: %{kind: atom(), detail: String.t()}
+  @type violation :: Finding.t()
 
   @type path_findings :: %{
           expected: [String.t()],
           delivered: [String.t()],
           changed: [String.t()],
-          unauthorized: [String.t()],
-          violations: [violation()],
+          unexpected: [String.t()],
+          findings: [Finding.t()],
           truncated: boolean()
         }
 
   @type prohibition_findings :: %{
-          violations: [violation()],
+          findings: [Finding.t()],
           total: non_neg_integer(),
           truncated: boolean()
         }
@@ -150,6 +208,15 @@ defmodule SymphonyElixir.PipelineContract do
   def strict?(%__MODULE__{scope_mode: scope_mode}), do: scope_mode == :strict
 
   @doc """
+  Whether at least one prohibition is enforced (`remote_access` and/or `deploy`
+  set to `false`), which is what makes the added-lines scan run.
+  """
+  @spec prohibition_scan?(t()) :: boolean()
+  def prohibition_scan?(%__MODULE__{remote_access: false}), do: true
+  def prohibition_scan?(%__MODULE__{deploy: false}), do: true
+  def prohibition_scan?(%__MODULE__{}), do: false
+
+  @doc """
   Scope findings of a candidate change set: expected patterns that were not
   delivered and changed paths nobody authorized.
 
@@ -163,16 +230,16 @@ defmodule SymphonyElixir.PipelineContract do
     delivered =
       Enum.filter(contract.expected_paths, fn pattern -> Enum.any?(changed, &path_match?(pattern, &1)) end)
 
-    unauthorized = Enum.reject(changed, &authorized?(contract, &1))
+    unexpected = Enum.reject(changed, &authorized?(contract, &1))
     missing = contract.expected_paths -- delivered
 
     %{
       expected: contract.expected_paths,
       delivered: delivered,
       changed: changed,
-      unauthorized: unauthorized,
-      violations: missing_violations(missing) ++ unauthorized_violations(unauthorized),
-      truncated: length(missing) > @max_findings or length(unauthorized) > @max_findings
+      unexpected: unexpected,
+      findings: missing_findings(missing) ++ unexpected_findings(unexpected),
+      truncated: length(missing) > @max_findings or length(unexpected) > @max_findings
     }
   end
 
@@ -185,7 +252,7 @@ defmodule SymphonyElixir.PipelineContract do
     findings = contract |> forbidden_kinds() |> Enum.map(&kind_findings(&1, added_lines))
 
     %{
-      violations: Enum.flat_map(findings, & &1.violations),
+      findings: Enum.flat_map(findings, & &1.findings),
       total: Enum.sum(Enum.map(findings, & &1.total)),
       truncated: Enum.any?(findings, & &1.truncated)
     }
@@ -212,7 +279,7 @@ defmodule SymphonyElixir.PipelineContract do
 
     %{
       kind: kind,
-      violations: Enum.take(matches, @max_findings),
+      findings: Enum.take(matches, @max_findings),
       total: length(matches),
       truncated: length(matches) > @max_findings
     }
@@ -221,7 +288,12 @@ defmodule SymphonyElixir.PipelineContract do
   defp match_line(kind, %{path: path, text: text}) do
     Enum.find_value(rules(kind), fn {regex, label} ->
       if Regex.match?(regex, text) do
-        %{kind: kind, detail: "#{label} in #{path}: #{snippet(text)}"}
+        %Finding{
+          code: finding_code(kind),
+          category: :forbidden_operation,
+          path: path,
+          message: "#{label}: #{snippet(text)}"
+        }
       end
     end)
   end
@@ -229,20 +301,37 @@ defmodule SymphonyElixir.PipelineContract do
   defp rules(:deploy), do: @deploy_rules
   defp rules(:remote_access), do: @remote_access_rules
 
+  defp finding_code(:deploy), do: :forbidden_deploy_detected
+  defp finding_code(:remote_access), do: :forbidden_remote_access_detected
+
   defp snippet(text) do
     text |> String.trim() |> String.slice(0, @max_snippet_length)
   end
 
-  defp missing_violations(missing) do
+  defp missing_findings(missing) do
     missing
     |> Enum.take(@max_findings)
-    |> Enum.map(&%{kind: :expected_path_untouched, detail: "expected path `#{&1}` was not delivered by the candidate"})
+    |> Enum.map(
+      &%Finding{
+        code: :expected_path_missing,
+        category: :scope,
+        path: &1,
+        message: "expected path `#{&1}` is not part of the candidate change set"
+      }
+    )
   end
 
-  defp unauthorized_violations(unauthorized) do
-    unauthorized
+  defp unexpected_findings(unexpected) do
+    unexpected
     |> Enum.take(@max_findings)
-    |> Enum.map(&%{kind: :unauthorized_path, detail: "changed path `#{&1}` is outside the contract scope"})
+    |> Enum.map(
+      &%Finding{
+        code: :unexpected_path_changed,
+        category: :scope,
+        path: &1,
+        message: "changed path `#{&1}` is not in expected_paths nor allowed_extra_paths"
+      }
+    )
   end
 
   defp authorized?(contract, path) do
@@ -253,7 +342,7 @@ defmodule SymphonyElixir.PipelineContract do
 
   defp candidate(body) do
     case body |> fenced_blocks() |> Enum.filter(&Regex.match?(@contract_key, &1)) do
-      [only] -> {:ok, only}
+      [only] -> with :ok <- single_contract(only), do: {:ok, only}
       [] -> unfenced(body)
       many -> {:error, {:ambiguous_contracts, length(many)}}
     end
@@ -261,7 +350,33 @@ defmodule SymphonyElixir.PipelineContract do
 
   defp unfenced(body) do
     trimmed = String.trim_leading(body)
-    if Regex.match?(~r/^[ \t]*pipeline_contract[ \t]*:/, trimmed), do: {:ok, trimmed}, else: :absent
+
+    if Regex.match?(~r/^[ \t]*pipeline_contract[ \t]*:/, trimmed) do
+      with :ok <- single_contract(trimmed), do: {:ok, trimmed}
+    else
+      :absent
+    end
+  end
+
+  # Two `pipeline_contract` keys in the same document would let the YAML decoder
+  # keep one of them silently (it does), so ambiguity is refused instead of
+  # guessed. Anchors are refused before decoding, for the reason in @anchor_token.
+  defp single_contract(block) do
+    with :ok <- one_contract_key(block), do: reject_anchors(block)
+  end
+
+  defp one_contract_key(block) do
+    case Regex.scan(@contract_key, block) do
+      [_only] -> :ok
+      many -> {:error, {:duplicate_contract_key, length(many)}}
+    end
+  end
+
+  defp reject_anchors(block) do
+    case Regex.run(@anchor_token, block) do
+      nil -> :ok
+      [match | _rest] -> {:error, {:anchors_not_supported, String.trim(match)}}
+    end
   end
 
   # A fence that never closes still counts as a block: a malformed code fence must

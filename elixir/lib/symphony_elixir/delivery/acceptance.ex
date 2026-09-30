@@ -10,62 +10,117 @@ defmodule SymphonyElixir.Delivery.Acceptance do
 
   This module is the impure side of the contract: `SymphonyElixir.PipelineContract`
   parses the issue body and decides scope over data, while here the candidate
-  change set is read from the workspace, the required evidence is executed and
-  the verdict is logged and reported in the handoff comment.
+  change set is read from the workspace, the required evidence is executed and the
+  verdict is logged, returned as `SymphonyElixir.Delivery.Acceptance.Result` and
+  persisted in the handoff comment.
 
   Policy:
 
-    * the acceptance is checked **before** anything is published: a `strict`
-      finding fails the run, so no branch, no pull request and no label exist;
-    * an `advisory` divergence is reported and the delivery continues — the
-      architectural review decides (`ARCHITECT_PASS`/`REWORK`/`BLOCKED` is the
-      next increment of the phase);
+    * the acceptance is checked **before** the gates and before anything is
+      published: a blocking finding (`strict` mode, or a contract that cannot be
+      enforced) fails the run, so no branch, no pull request and no label exist;
+    * `advisory` findings are reported and the delivery continues — the
+      architectural review decides (`ARCHITECT_PASS`/`REWORK`/`BLOCKED` belongs to
+      the next increment);
     * evidence is **named**: the issue demands names (`required_evidence`), the
       workflow provides the commands (`delivery.evidence`). The name
       `repository-gates` is reserved and is satisfied by the gates stage itself,
-      which runs immediately before this phase;
+      which runs immediately before this phase; a demanded name without a provider
+      is a finding, never an invented pass;
+    * an issue without a contract is **not configured**, not implicitly strict;
     * there is no candidate change set to accept (a `--resume-only` cycle over an
-      already published candidate, or nothing to publish): the report says
+      already published candidate, or nothing to publish): the verdict is
       `not_applicable` instead of failing, because the candidate being resumed was
-      validated by the cycle that created it;
+      accepted by the cycle that created it;
     * both phases read the change set from the workspace; the read is cheap, has
-      no state and keeps the two phases independently testable.
+      no state and keeps the two phases independently testable, which is also why
+      a retry over the same candidate produces the same verdict.
+
+  What this layer does **not** verify is declared instead of assumed: the
+  forbidden-operation check is a pattern scan of the added lines of the candidate,
+  so "no finding" is not a proof of absence, and the contents/quality of what was
+  delivered belong to the gates, the review and the architect — see the `limits`
+  of the result and `docs/fork/acceptance-contract.md`.
   """
 
   require Logger
 
+  alias SymphonyElixir.Delivery.Acceptance.Result
   alias SymphonyElixir.Delivery.{Gates, Git}
   alias SymphonyElixir.PipelineContract
+  alias SymphonyElixir.PipelineContract.Finding
   alias SymphonyElixir.Tracker.Issue
 
   @reserved_evidence "repository-gates"
   @max_summary_findings 3
-  @severity %{absent: 0, not_applicable: 1, passed: 2, diverged: 3}
-
-  @type status :: :absent | :not_applicable | :passed | :diverged
-
-  @type evidence_result :: %{name: String.t(), status: atom(), command: String.t() | nil}
-
-  @type report :: %{
-          mode: :strict | :advisory | :absent,
-          status: status(),
-          paths: %{expected: [String.t()], delivered: [String.t()], changed: [String.t()], unauthorized: [String.t()]},
-          evidence: [evidence_result()],
-          violations: [PipelineContract.violation()],
-          truncated: boolean()
-        }
+  @comment_text_limit 300
 
   @doc """
-  The contract of the issue, read from its body.
+  Scope, prohibition and contract findings of the candidate change set.
 
-  `{:ok, :absent}` means the issue declares no contract (the layer does not
-  apply). A declared contract that cannot be enforced — unsupported version,
-  unknown field, invalid pattern, invalid YAML — is an error: the delivery fails
-  without publishing instead of ignoring a contract the pipeline does not
-  understand.
+  Returns `{:error, {:delivery_acceptance_failed, result}}` when the verdict
+  blocks the delivery; `advisory` findings come back in `{:ok, result}`.
   """
-  @spec contract(Issue.t()) :: {:ok, :absent | PipelineContract.t()} | {:error, term()}
-  def contract(%Issue{description: description}) do
+  @spec scope(Path.t(), Issue.t()) :: {:ok, Result.t()} | {:error, {:delivery_acceptance_failed, Result.t()}}
+  def scope(workspace, %Issue{} = issue) do
+    case contract_of(issue) do
+      {:ok, :absent} -> {:ok, Result.not_configured()}
+      {:error, reason} -> Result.invalid_contract(reason) |> decide(:scope)
+      {:ok, contract} -> scope_phase(workspace, contract)
+    end
+  end
+
+  @doc """
+  Evidence required by the contract for this candidate.
+
+  Only the names demanded by the issue are executed, and each one is resolved
+  through the registry of the workflow (`delivery.evidence`) or the reserved
+  `repository-gates`.
+  """
+  @spec evidence(Path.t(), Issue.t(), map()) :: {:ok, Result.t()} | {:error, {:delivery_acceptance_failed, Result.t()}}
+  def evidence(workspace, %Issue{} = issue, delivery) do
+    case contract_of(issue) do
+      {:ok, :absent} -> {:ok, Result.not_configured()}
+      {:error, reason} -> Result.invalid_contract(reason) |> decide(:evidence)
+      {:ok, contract} -> evidence_phase(workspace, contract, delivery)
+    end
+  end
+
+  @doc "One-line, human-readable acceptance summary (log and handoff comment)."
+  @spec describe(Result.t()) :: String.t()
+  def describe(%Result{status: :not_configured}), do: "not declared in the issue body (acceptance not configured)"
+  def describe(%Result{status: :not_applicable}), do: "not applicable (no candidate change set to accept)"
+
+  def describe(%Result{status: :pass} = result) do
+    "`#{result.mode}` passed (#{length(result.change_set.delivered)}/#{length(result.change_set.expected)} expected path(s) delivered, " <>
+      "#{length(result.evidence)} evidence)#{limits_note(result)}"
+  end
+
+  def describe(%Result{} = result) do
+    "`#{result.mode}" <>
+      "` #{verdict_word(result.status)} (#{length(result.findings)} finding(s)): " <>
+      "#{findings_summary(result.findings)}#{limits_note(result)}"
+  end
+
+  @doc "Machine-readable view of the verdict, persisted so the next stage can consume the findings."
+  @spec summary_json(Result.t()) :: String.t()
+  def summary_json(%Result{} = result), do: Jason.encode!(result)
+
+  @doc "Marker of the persisted acceptance block of a candidate."
+  @spec comment_marker(String.t()) :: String.t()
+  def comment_marker(candidate_sha), do: "<!-- acceptance:result:#{candidate_sha} -->"
+
+  @doc """
+  The persisted acceptance block of the handoff comment: a marker plus the JSON
+  of the verdict, so the findings survive the process and a later stage can read
+  them without parsing prose.
+  """
+  @spec comment_block(Result.t(), String.t()) :: String.t()
+  def comment_block(%Result{} = result, candidate_sha) do
+    "#{comment_marker(candidate_sha)}\n```json\n#{summary_json(result)}\n```"
+  end
+
+  defp contract_of(%Issue{description: description}) do
     case PipelineContract.parse(description) do
       :absent -> {:ok, :absent}
       {:ok, contract} -> {:ok, contract}
@@ -73,117 +128,63 @@ defmodule SymphonyElixir.Delivery.Acceptance do
     end
   end
 
-  @doc """
-  Scope and prohibition findings of the candidate change set.
-
-  Returns `{:error, {:delivery_acceptance_failed, report}}` when a `strict`
-  contract has findings; in `advisory` the findings are reported and the delivery
-  continues.
-  """
-  @spec scope(Path.t(), :absent | PipelineContract.t()) :: {:ok, report()} | {:error, term()}
-  def scope(_workspace, :absent), do: {:ok, absent_report()}
-
-  def scope(workspace, %PipelineContract{} = contract) do
+  defp scope_phase(workspace, contract) do
     with {:ok, changed} <- Git.change_set(workspace),
          {:ok, %{lines: lines, truncated: truncated}} <- Git.added_lines(workspace) do
       case changed do
-        [] -> {:ok, not_applicable_report(contract)}
-        _changed -> decide(contract, scope_report(contract, changed, lines, truncated), :scope)
+        [] -> {:ok, result_not_applicable(contract)}
+        _changed -> scope_result(contract, changed, lines, truncated) |> decide(:scope)
       end
     end
   end
 
-  @doc """
-  Evidence required by the contract for this candidate.
-
-  Only the names demanded by the issue are executed: the workflow maps each name
-  to a command (`delivery.evidence`) and a name without a provider is a finding.
-  """
-  @spec evidence(Path.t(), :absent | PipelineContract.t(), map()) :: {:ok, report()} | {:error, term()}
-  def evidence(_workspace, :absent, _delivery), do: {:ok, absent_report()}
-
-  def evidence(workspace, %PipelineContract{} = contract, delivery) do
+  defp evidence_phase(workspace, contract, delivery) do
     case Git.change_set(workspace) do
-      {:ok, []} -> {:ok, not_applicable_report(contract)}
-      {:ok, _changed} -> decide(contract, evidence_report(contract, workspace, delivery), :evidence)
+      {:ok, []} -> {:ok, result_not_applicable(contract)}
+      {:ok, _changed} -> evidence_result(contract, workspace, delivery) |> decide(:evidence)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  @doc "Merges the two phases into the single acceptance report of the delivery."
-  @spec summarize(report(), report()) :: report()
-  def summarize(scope, evidence) do
-    %{
-      mode: scope.mode,
-      status: worst_status(scope.status, evidence.status),
-      paths: scope.paths,
-      evidence: evidence.evidence,
-      violations: scope.violations ++ evidence.violations,
-      truncated: scope.truncated or evidence.truncated
-    }
+  defp result_not_applicable(contract) do
+    Result.not_applicable(mode: contract.scope_mode, contract_version: contract.version)
   end
 
-  @doc "One-line, human-readable acceptance summary (log and handoff comment)."
-  @spec describe(report()) :: String.t()
-  def describe(%{status: :absent}), do: "not declared in the issue body"
-  def describe(%{status: :not_applicable}), do: "not applicable (no candidate change set to accept)"
-
-  def describe(%{mode: mode, status: :passed, paths: paths, evidence: evidence}) do
-    "`#{mode}` passed (#{length(paths.delivered)}/#{length(paths.expected)} expected path(s) delivered, #{length(evidence)} evidence)"
-  end
-
-  def describe(%{mode: mode, violations: violations}) do
-    "`#{mode}` diverged (#{length(violations)} finding(s)): " <> findings_summary(violations)
-  end
-
-  defp decide(contract, report, stage) do
-    cond do
-      report.violations == [] ->
-        Logger.info("Delivery acceptance passed stage=#{stage} mode=#{report.mode}")
-        {:ok, report}
-
-      PipelineContract.strict?(contract) ->
-        Logger.error("Delivery acceptance failed stage=#{stage} mode=strict findings=#{findings_summary(report.violations)}")
-        {:error, {:delivery_acceptance_failed, report}}
-
-      true ->
-        Logger.warning("Delivery acceptance diverged stage=#{stage} mode=advisory findings=#{findings_summary(report.violations)}")
-        {:ok, report}
-    end
-  end
-
-  defp scope_report(contract, changed, lines, truncated) do
+  defp scope_result(contract, changed, lines, truncated) do
     paths = PipelineContract.path_findings(contract, Enum.map(changed, & &1.path))
     prohibitions = PipelineContract.prohibition_findings(contract, lines)
-    violations = paths.violations ++ prohibitions.violations
 
-    %{
+    Result.evaluated(
       mode: contract.scope_mode,
-      status: status(violations),
-      paths: %{
+      contract_version: contract.version,
+      findings: sanitize(paths.findings ++ prohibitions.findings),
+      change_set: %{
         expected: paths.expected,
         delivered: paths.delivered,
         changed: paths.changed,
-        unauthorized: paths.unauthorized
+        unexpected: paths.unexpected
       },
-      evidence: [],
-      violations: sanitize(violations),
-      truncated: paths.truncated or prohibitions.truncated or truncated
-    }
+      limits: limits(contract, truncated or paths.truncated or prohibitions.truncated)
+    )
   end
 
-  defp evidence_report(contract, workspace, delivery) do
-    results = Enum.map(contract.required_evidence, &run_evidence(&1, workspace, delivery))
-    violations = results |> Enum.reject(&(&1.status == :passed)) |> Enum.map(&violation_of/1)
+  defp limits(contract, truncated) do
+    heuristic = if PipelineContract.prohibition_scan?(contract), do: [:prohibition_scan_is_heuristic], else: []
+    capped = if truncated, do: [:change_scan_truncated], else: []
+    heuristic ++ capped ++ [:content_not_verified]
+  end
 
-    %{
+  defp evidence_result(contract, workspace, delivery) do
+    results = Enum.map(contract.required_evidence, &run_evidence(&1, workspace, delivery))
+    findings = results |> Enum.reject(&(&1.status == :passed)) |> Enum.map(&evidence_finding/1)
+
+    Result.evaluated(
       mode: contract.scope_mode,
-      status: status(violations),
-      paths: %{expected: [], delivered: [], changed: [], unauthorized: []},
+      contract_version: contract.version,
+      findings: findings,
       evidence: results,
-      violations: violations,
-      truncated: false
-    }
+      limits: [:content_not_verified]
+    )
   end
 
   # The gates stage runs immediately before this phase, and reaching it means the
@@ -215,47 +216,77 @@ defmodule SymphonyElixir.Delivery.Acceptance do
     end
   end
 
-  defp violation_of(%{name: name, status: :missing_provider}) do
-    %{kind: :missing_evidence_provider, detail: "required evidence `#{name}` has no provider in `delivery.evidence`"}
+  defp evidence_finding(%{name: name, status: :missing_provider}) do
+    %Finding{
+      code: :required_evidence_missing,
+      category: :evidence,
+      message: "required evidence `#{name}` has no provider in `delivery.evidence`"
+    }
   end
 
-  defp violation_of(%{name: name, status: status, command: command}) do
-    %{kind: :evidence_not_passed, detail: "required evidence `#{name}` (`#{command}`) reported #{status}"}
+  defp evidence_finding(%{name: name, status: status, command: command}) do
+    %Finding{
+      code: :required_evidence_failed,
+      category: :evidence,
+      message: "required evidence `#{name}` (`#{command}`) reported #{status}"
+    }
   end
 
-  defp status([]), do: :passed
-  defp status(_violations), do: :diverged
+  defp decide(result, stage) do
+    cond do
+      result.status == :pass ->
+        Logger.info("Delivery acceptance passed stage=#{stage} mode=#{result.mode} " <> verdict_log(result))
+        {:ok, result}
 
-  defp worst_status(left, right) do
-    if Map.fetch!(@severity, left) >= Map.fetch!(@severity, right), do: left, else: right
+      Result.blocking?(result) ->
+        Logger.error("Delivery acceptance failed stage=#{stage} mode=#{result.mode || :unknown} " <> verdict_log(result))
+        {:error, {:delivery_acceptance_failed, result}}
+
+      true ->
+        Logger.warning("Delivery acceptance diverged stage=#{stage} mode=advisory " <> verdict_log(result))
+        {:ok, result}
+    end
   end
 
-  # The findings end up in a log line and in a GitHub comment: the details carry a
-  # snippet of the candidate's own lines, so they are masked the same way the git
-  # output is.
-  defp sanitize(violations), do: Enum.map(violations, &%{&1 | detail: Git.sanitize(&1.detail)})
+  defp verdict_log(result) do
+    "findings=#{length(result.findings)}#{limits_note(result)}"
+  end
 
-  defp findings_summary(violations) do
-    details = violations |> Enum.take(@max_summary_findings) |> Enum.map_join("; ", & &1.detail)
-    extra = length(violations) - @max_summary_findings
+  defp verdict_word(:fail), do: "failed"
+  defp verdict_word(_status), do: "diverged"
+
+  defp findings_summary(findings) do
+    details = findings |> Enum.take(@max_summary_findings) |> Enum.map_join("; ", &describe_finding/1)
+    extra = length(findings) - @max_summary_findings
 
     if extra > 0, do: details <> " (+#{extra} more)", else: details
   end
 
-  defp absent_report do
-    %{mode: :absent, status: :absent, paths: empty_paths(), evidence: [], violations: [], truncated: false}
+  defp describe_finding(%Finding{message: message, path: nil}), do: message
+  defp describe_finding(%Finding{message: message, path: path}), do: "#{message} [#{path}]"
+
+  defp limits_note(%Result{limits: []}), do: ""
+
+  defp limits_note(%Result{limits: limits}) do
+    " [limits: #{Enum.map_join(limits, ", ", &limit_label/1)}]"
   end
 
-  defp not_applicable_report(contract) do
-    %{
-      mode: contract.scope_mode,
-      status: :not_applicable,
-      paths: empty_paths(),
-      evidence: [],
-      violations: [],
-      truncated: false
-    }
-  end
+  defp limit_label(:prohibition_scan_is_heuristic), do: "prohibition scan is heuristic, not a proof of absence"
+  defp limit_label(:change_scan_truncated), do: "change scan truncated at the documented cap"
+  defp limit_label(:content_not_verified), do: "content/quality not verified by this layer"
 
-  defp empty_paths, do: %{expected: [], delivered: [], changed: [], unauthorized: []}
+  # Findings carry text taken from the candidate (paths and added lines) and end up
+  # in a log line and in a GitHub comment: credentials are masked, HTML is
+  # neutralized (a change cannot rewrite the comment) and whitespace collapsed (a
+  # newline cannot forge a log line). The `path` field stays literal for machine
+  # consumers; the prose is the escaped one.
+  defp sanitize(findings), do: Enum.map(findings, &%{&1 | message: safe_text(&1.message)})
+
+  defp safe_text(text) do
+    text
+    |> Git.sanitize()
+    |> String.replace("<", "&lt;")
+    |> String.replace(~r/\s+/, " ")
+    |> String.slice(0, @comment_text_limit)
+  end
 end

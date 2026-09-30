@@ -158,6 +158,32 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       assert result.findings == []
     end
 
+    test "an added line that looks like a diff header is content, not a header", %{workspace: workspace} do
+      write!(workspace, "docs/run.sh", "#!/bin/sh\n")
+      git!(workspace, ["add", "-A"])
+
+      git!(workspace, [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.org",
+        "commit",
+        "-q",
+        "-m",
+        "add script"
+      ])
+
+      # The added line `++ b/decoy.sh` arrives in the diff as `+++ b/decoy.sh`: read as
+      # a file header it would be dropped from the scan and would steal the path of
+      # every line after it.
+      write!(workspace, "docs/run.sh", "#!/bin/sh\n++ b/decoy.sh\nssh prod.example.com\n")
+
+      assert {:error, {:delivery_acceptance_failed, result}} =
+               Acceptance.scope(workspace, issue(contract_body(expected_paths: ["docs/run.sh"])))
+
+      assert [%Finding{code: :forbidden_remote_access_detected, path: "docs/run.sh"}] = result.findings
+    end
+
     test "a deletion is delivered by its removal and adds no line", %{workspace: workspace} do
       File.rm!(Path.join(workspace, "README.md"))
 

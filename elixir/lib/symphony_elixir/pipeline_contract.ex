@@ -405,10 +405,53 @@ defmodule SymphonyElixir.PipelineContract do
   end
 
   defp reject_anchors(block) do
-    case Regex.run(@anchor_token, block) do
+    case Regex.run(@anchor_token, without_scalars(block)) do
       nil -> :ok
       [match | _rest] -> {:error, {:anchors_not_supported, String.trim(match)}}
     end
+  end
+
+  # The block with every comment and every quoted scalar blanked out, so the anchor
+  # scan only sees what YAML reads as structure: inside a scalar or a comment an `&`
+  # is data (`- "docs/R&D &notes.md"`, `# see &notes`), never an indicator. A scalar
+  # or a comment only begins where YAML allows it — after a blank, after
+  # `:`/`[`/`,`/`{` or at the start of a line —, so a quote inside a plain scalar
+  # (`it's`) stays data too. Blanking keeps the position of what is left, which is
+  # what the token class of `@anchor_token` needs around the `&`.
+  defp without_scalars(block) do
+    block
+    |> String.to_charlist()
+    |> blank_scalars(:plain, ?\n, [])
+    |> List.to_string()
+  end
+
+  defp blank_scalars([], _state, _previous, acc), do: Enum.reverse(acc)
+
+  defp blank_scalars([?\n | rest], _state, _previous, acc), do: blank_scalars(rest, :plain, ?\n, [?\n | acc])
+
+  defp blank_scalars([character | rest], :plain, previous, acc)
+       when previous in [?\s, ?\t, ?\n, ?:, ?[, ?,, ?{] do
+    case character do
+      ?" -> blank_scalars(rest, :double, ?", [" " | acc])
+      ?' -> blank_scalars(rest, :single, ?', [" " | acc])
+      ?# -> blank_scalars(rest, :comment, ?#, [" " | acc])
+      other -> blank_scalars(rest, :plain, other, [other | acc])
+    end
+  end
+
+  defp blank_scalars([character | rest], :plain, _previous, acc) do
+    blank_scalars(rest, :plain, character, [character | acc])
+  end
+
+  defp blank_scalars([?" | rest], :double, _previous, acc), do: blank_scalars(rest, :plain, ?", [" " | acc])
+  defp blank_scalars([?\\, _escaped | rest], :double, _previous, acc), do: blank_scalars(rest, :double, ?x, ["  " | acc])
+  defp blank_scalars([_character | rest], :double, previous, acc), do: blank_scalars(rest, :double, previous, [" " | acc])
+
+  defp blank_scalars([?' | rest], :single, _previous, acc), do: blank_scalars(rest, :plain, ?', [" " | acc])
+  defp blank_scalars([_character | rest], :single, previous, acc), do: blank_scalars(rest, :single, previous, [" " | acc])
+
+  defp blank_scalars([_character | rest], :comment, previous, acc) do
+    blank_scalars(rest, :comment, previous, [" " | acc])
   end
 
   # A fence that never closes still counts as a block: a malformed code fence must
@@ -576,11 +619,14 @@ defmodule SymphonyElixir.PipelineContract do
 
   # --- glob matching ------------------------------------------------------
 
+  # `u` (Unicode) is not optional: without it `?` would match one **byte** and a
+  # documented "one character" would fail on a UTF-8 path (`docs/?.md` vs
+  # `docs/é.md`), and both the patterns and the paths are UTF-8.
   defp glob_regex(pattern) do
     pattern
     |> String.replace_suffix("/", "/**")
     |> glob_source()
-    |> Regex.compile!()
+    |> Regex.compile!("u")
   end
 
   defp glob_source(pattern) do

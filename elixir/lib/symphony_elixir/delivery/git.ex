@@ -145,6 +145,14 @@ defmodule SymphonyElixir.Delivery.Git do
     end
   end
 
+  @doc """
+  The SHA of the local `HEAD` of the workspace, right after `create_candidate/4`
+  committed it: it is the content the acceptance and the local gates validated, so
+  the delivery can tell whether the observed candidate is still that commit.
+  """
+  @spec head_sha(Path.t()) :: {:ok, String.t()} | {:error, term()}
+  def head_sha(workspace), do: run(workspace, ["rev-parse", "HEAD"])
+
   @spec checkout_branch(Path.t(), String.t()) :: :ok | {:error, term()}
   def checkout_branch(workspace, branch) do
     expect_ok(run(workspace, ["checkout", "-B", branch]))
@@ -291,32 +299,38 @@ defmodule SymphonyElixir.Delivery.Git do
   defp rename?(status), do: String.contains?(status, "R")
   defp copy?(status), do: String.contains?(status, "C")
 
+  # The parse keeps the state of the file: `+++ b/path` is a header **only** outside a
+  # hunk (before the first `@@`), so an added source line that starts with `++ b/`
+  # cannot be mistaken for one — taking it as a header would both drop it from the
+  # scan and steal the path of every line after it.
   defp diff_added_lines(diff) do
-    {lines, _path, truncated} =
+    {lines, _path, _state, truncated} =
       diff
       |> String.split(~r/\r?\n/)
-      |> Enum.reduce_while({[], nil, false}, &diff_step/2)
+      |> Enum.reduce_while({[], nil, :header, false}, &diff_step/2)
 
     {Enum.reverse(lines), truncated}
   end
 
   # The collection stops at the documented line budget: the `+`-lines are not all
   # built to be truncated afterwards.
-  defp diff_step(line, {lines, path, truncated}) do
-    case diff_line(line, path) do
-      {:header, new_path} -> {:cont, {lines, new_path, truncated}}
-      {:added, text, file} -> add_line(added_line(file, text), {lines, path, truncated})
-      :skip -> {:cont, {lines, path, truncated}}
+  defp diff_step(line, {lines, path, state, truncated}) do
+    case diff_line(line, state) do
+      :file -> {:cont, {lines, nil, :header, truncated}}
+      {:header, new_path} -> {:cont, {lines, new_path, :header, truncated}}
+      :hunk -> {:cont, {lines, path, :hunk, truncated}}
+      {:added, text} -> add_line(added_line(path || "diff", text), {lines, path, :hunk, truncated})
+      :skip -> {:cont, {lines, path, state, truncated}}
     end
   end
 
   defp add_line([], acc), do: {:cont, acc}
 
-  defp add_line([line], {lines, path, truncated}) do
+  defp add_line([line], {lines, path, state, truncated}) do
     if length(lines) >= @max_scanned_lines do
-      {:halt, {lines, path, true}}
+      {:halt, {lines, path, state, true}}
     else
-      {:cont, {[line | lines], path, truncated}}
+      {:cont, {[line | lines], path, state, truncated}}
     end
   end
 
@@ -385,10 +399,14 @@ defmodule SymphonyElixir.Delivery.Git do
 
   defp to_binary(chunks), do: chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
-  defp diff_line("+++ b/" <> path, _path), do: {:header, String.trim_trailing(path)}
-  defp diff_line("+++ " <> _other, _path), do: {:header, nil}
-  defp diff_line("+" <> text, path), do: {:added, text, path || "diff"}
-  defp diff_line(_line, _path), do: :skip
+  # A unified diff line is classified with the state of the parse: `+++ b/path` is a
+  # header only outside a hunk, and `diff --git` is what opens a new file.
+  defp diff_line("diff --git " <> _rest, _state), do: :file
+  defp diff_line("+++ b/" <> path, :header), do: {:header, String.trim_trailing(path)}
+  defp diff_line("+++ " <> _other, :header), do: {:header, nil}
+  defp diff_line("@@" <> _rest, _state), do: :hunk
+  defp diff_line("+" <> text, _state), do: {:added, text}
+  defp diff_line(_line, _state), do: :skip
 
   defp untracked_lines(_workspace, _untracked, budget) when budget <= 0, do: {[], false, true}
 

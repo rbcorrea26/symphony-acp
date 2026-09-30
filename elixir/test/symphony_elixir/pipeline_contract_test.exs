@@ -309,6 +309,24 @@ defmodule SymphonyElixir.PipelineContractTest do
       assert flow_contract.scope_mode == :advisory
     end
 
+    test "an ampersand inside a scalar or a comment is data, not an anchor" do
+      body = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+        expected_paths:
+          - "docs/R&D &notes.md"
+          - 'docs/Q&A &notes.md'
+          - docs/a&b.md
+        # see &notes for the schema
+      ```
+      """
+
+      assert {:ok, contract} = Contract.parse(body)
+      assert contract.expected_paths == ["docs/R&D &notes.md", "docs/Q&A &notes.md", "docs/a&b.md"]
+    end
+
     test "an anchor is refused before decoding" do
       body = """
       ```yaml
@@ -429,6 +447,12 @@ defmodule SymphonyElixir.PipelineContractTest do
   end
 
   describe "path_match?/2" do
+    test "a `?` matches one character, not one byte" do
+      assert Contract.path_match?("docs/?.md", "docs/é.md")
+      refute Contract.path_match?("docs/?.md", "docs/éé.md")
+      assert Contract.path_match?("docs/*.md", "docs/é.md")
+    end
+
     test "a pattern spans segments only with **" do
       assert Contract.path_match?("docs/changes/*.md", "docs/changes/2026-09-30-x.md")
       refute Contract.path_match?("docs/*.md", "docs/changes/2026-09-30-x.md")

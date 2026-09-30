@@ -303,7 +303,7 @@ defmodule SymphonyElixir.DeliveryTest do
     assert FakeGitHub.state(fake).comments == []
   end
 
-  test "a push during the observation invalidates the candidate and the new head is verified", %{
+  test "a push during the observation is not handed off with the accepted verdict", %{
     workspace: workspace
   } do
     configure!([])
@@ -338,16 +338,23 @@ defmodule SymphonyElixir.DeliveryTest do
         end
       end
 
-    # The first check of the first push can only be observed after the delivery
-    # published the branch, so the SHA captured here is the published one.
-    assert {:ok, result} = Delivery.run(workspace, @issue, github_opts(fake, checks))
-    assert_received {:first_checked_sha, observed_sha}
+    # The acceptance and the local gates belong to the commit this run published; the
+    # branch head moved to a commit nobody accepted, so the delivery fails instead of
+    # promoting the moved head with the verdict of another candidate.
+    assert {:error, {:delivery_candidate_replaced, accepted_sha, observed_sha}} =
+             Delivery.run(workspace, @issue, github_opts(fake, checks))
 
+    assert_received {:first_checked_sha, checked_sha}
     moved_sha = FakeGitHub.sha(fake, delivery_branch())
 
-    assert observed_sha != moved_sha
-    assert result.candidate_sha == moved_sha, "the candidate must be the verified head, not the invalidated one"
-    assert Enum.count(FakeGitHub.state(fake).requests, &match?({:checks, _, _}, &1)) >= 2
+    assert accepted_sha == checked_sha
+    assert observed_sha == moved_sha
+    assert accepted_sha != observed_sha
+
+    state = FakeGitHub.state(fake)
+    assert state.comments == []
+    assert state.labels == []
+    refute Enum.any?(state.requests, &match?({:review_requested, _}, &1))
   end
 
   test "a retry reconciles the published candidate instead of duplicating it", %{workspace: workspace} do

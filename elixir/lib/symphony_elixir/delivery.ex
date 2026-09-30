@@ -20,10 +20,12 @@ defmodule SymphonyElixir.Delivery do
       branch plus a **draft** pull request on top of `delivery.base_branch`;
       never a push to the base branch, never a force push, never a merge;
     * **candidate stable** is derived, never invented: it is the head SHA of the
-      delivery branch whose local gates passed, whose CI check runs all
-      concluded successfully and which was still the branch head when the
-      observation finished. A push that lands during the observation invalidates
-      the candidate and the observation restarts on the new SHA;
+      delivery branch whose local gates passed, whose CI check runs all concluded
+      successfully and which was still the branch head when the observation
+      finished. A push that lands during the observation invalidates the candidate:
+      the new head is not the commit the acceptance and the local gates validated,
+      so the run fails (`delivery_candidate_replaced`) instead of attaching the
+      verdict of one candidate to another;
     * state is recovered from GitHub, which is what makes retry and
       reconciliation idempotent: a delivery that finds the open pull request of
       the branch reconciles it instead of creating a second one, and a second
@@ -152,9 +154,25 @@ defmodule SymphonyElixir.Delivery do
     end
   end
 
+  # The acceptance and the local gates were computed over the workspace content that
+  # `prepare/4` committed and pushed. If the branch head observed at the end is
+  # another commit (a push that landed during the observation), that content was
+  # never accepted: the handoff must not attach this verdict — nor the promotion
+  # labels — to it, so the run fails instead.
+  defp require_accepted_candidate(%{mode: :created, sha: sha}, %{sha: sha}), do: :ok
+
+  defp require_accepted_candidate(%{mode: :created, sha: accepted}, %{sha: observed}) do
+    Logger.error("Delivery candidate replaced before the handoff accepted=#{accepted} observed=#{observed}")
+
+    {:error, {:delivery_candidate_replaced, accepted, observed}}
+  end
+
+  defp require_accepted_candidate(_prepared, _candidate), do: :ok
+
   defp publish(workspace, issue, delivery, github, issue_number, settings, acceptance) do
     with {:ok, prepared} <- prepare(workspace, issue, delivery, github),
          {:ok, candidate} <- GitHub.await_candidate(github, prepared.branch, delivery),
+         :ok <- require_accepted_candidate(prepared, candidate),
          {:ok, review} <- maybe_request_review(github, prepared, delivery),
          :ok <- handoff(github, prepared, candidate, review, delivery, issue_number, settings, acceptance) do
       result = %{
@@ -199,7 +217,7 @@ defmodule SymphonyElixir.Delivery do
   defp reconcile(branch, github) do
     case GitHub.open_pull(github, branch) do
       {:ok, nil} -> {:error, :delivery_no_changes}
-      {:ok, pull} -> {:ok, %{branch: branch, mode: :reconciled, pull: pull}}
+      {:ok, pull} -> {:ok, %{branch: branch, mode: :reconciled, pull: pull, sha: nil}}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -215,9 +233,9 @@ defmodule SymphonyElixir.Delivery do
   end
 
   defp create(workspace, issue, branch, delivery, github) do
-    with :ok <- create_candidate(workspace, issue, branch, delivery, github),
+    with {:ok, sha} <- create_candidate(workspace, issue, branch, delivery, github),
          {:ok, pull} <- ensure_pull(github, branch, delivery, issue) do
-      {:ok, %{branch: branch, mode: :created, pull: pull}}
+      {:ok, %{branch: branch, mode: :created, pull: pull, sha: sha}}
     end
   end
 
@@ -226,8 +244,9 @@ defmodule SymphonyElixir.Delivery do
 
     with :ok <- Git.checkout_branch(workspace, branch),
          :ok <- Git.add_all(workspace),
-         :ok <- Git.commit(workspace, commit_message(issue), identity) do
-      Git.push(workspace, branch, github.token)
+         :ok <- Git.commit(workspace, commit_message(issue), identity),
+         :ok <- Git.push(workspace, branch, github.token) do
+      Git.head_sha(workspace)
     end
   end
 

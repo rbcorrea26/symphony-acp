@@ -43,6 +43,11 @@ despachado depois do prazo — mas o ciclo ainda avalia a carga, para que um cic
 comprovadamente idle termine com `0` em vez de `3` (com `3` o dispatcher repetiria um ciclo que
 já terminou).
 
+Limite declarado: a checagem do prazo acontece **entre** ciclos. Um ciclo que fica bloqueado
+dentro do cliente do tracker (conexão sem resposta até o timeout do próprio cliente) atrasa o
+encerramento por essa duração — tornar o poll assíncrono para reagir durante a chamada está
+**fora** deste incremento.
+
 ## 3. Códigos de saída
 
 | Código | Significado |

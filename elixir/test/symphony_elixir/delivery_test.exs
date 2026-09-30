@@ -459,18 +459,26 @@ defmodule SymphonyElixir.DeliveryTest do
     assert Git.changed_paths(" M answer.sh\n?? tests/test_answer.sh\n") == ["answer.sh", "tests/test_answer.sh"]
   end
 
-  test "the change set parser reports the destination of a rename and every untracked file" do
+  test "the change set parser reports a rename as destination plus deletion, and a copy as destination only" do
     output = "R  docs.md" <> <<0>> <> "README.md" <> <<0>> <> " M answer.sh" <> <<0>> <> "?? notes/new.md" <> <<0>>
 
     assert Git.change_entries(output) ==
              {:ok,
               [
                 %{path: "docs.md", status: "R"},
+                %{path: "README.md", status: "D"},
                 %{path: "answer.sh", status: "M"},
                 %{path: "notes/new.md", status: "??"}
               ]}
 
     assert Git.change_entries("") == {:ok, []}
+
+    # A copy leaves its origin in place: only the destination is a change.
+    copy = "C  docs/copy.md" <> <<0>> <> "README.md" <> <<0>>
+    assert Git.change_entries(copy) == {:ok, [%{path: "docs/copy.md", status: "C"}]}
+
+    # A rename whose origin is missing (a malformed read) does not crash the parse.
+    assert Git.change_entries("R  docs.md" <> <<0>>) == {:ok, [%{path: "docs.md", status: "R"}]}
 
     # A path that is not valid UTF-8 cannot be matched or persisted safely.
     assert Git.change_entries(<<"?? bad", 0xFF, ".md", 0>>) == :invalid_encoding
@@ -479,6 +487,11 @@ defmodule SymphonyElixir.DeliveryTest do
     # producing a partial (and therefore accepted-by-accident) verdict.
     many = Enum.map_join(1..5_001, <<0>>, &"?? f#{&1}")
     assert Git.change_entries(many) == :overflow
+
+    # The cap counts what a rename materializes (destination + deletion), not the
+    # porcelain fields.
+    renames = Enum.map_join(1..2_501, <<0>>, fn index -> "R  new#{index}\0old#{index}" end)
+    assert Git.change_entries(renames) == :overflow
   end
 
   test "git refuses to publish without a credential", %{workspace: workspace} do
@@ -664,6 +677,19 @@ defmodule SymphonyElixir.DeliveryTest do
     on_exit(fn -> System.put_env("PATH", path) end)
 
     assert {:error, {:git_not_available, _message}} = Git.status(workspace)
+    assert {:error, {:git_not_available, _message}} = Git.added_lines(workspace)
+  end
+
+  test "a failing diff read is an error, never an empty line scan", %{workspace: _workspace} do
+    fresh = Path.join(System.tmp_dir!(), "delivery-no-commit-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(fresh)
+    on_exit(fn -> File.rm_rf(fresh) end)
+    git!(fresh, ["init", "-q", "-b", "main"])
+
+    # Nothing is committed yet, so `git diff HEAD` fails (exit 128): the read reports
+    # the failure instead of reporting a clean (and therefore empty) scan.
+    assert {:error, {:git_command_failed, _args, 128, output}} = Git.added_lines(fresh)
+    assert output =~ "HEAD"
   end
 
   test "an unavailable askpass helper fails the push instead of leaking the credential", %{workspace: workspace} do

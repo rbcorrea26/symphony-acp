@@ -102,7 +102,17 @@ defmodule SymphonyElixir.Delivery.Acceptance do
       "#{findings_summary(result.findings)}#{limits_note(result)}"
   end
 
-  @doc "Machine-readable view of the verdict, persisted so the next stage can consume the findings."
+  @doc """
+  Machine-readable view of the verdict, persisted so the next stage can consume the
+  findings.
+
+  The payload is **bounded by construction** (`@max_persisted_bytes`): it goes into
+  a GitHub comment, which has a size limit, and the contract allows 256 evidence
+  names with commands the project declares. A verdict above the cap is compacted —
+  the evidence commands are dropped first, then the arrays are cut to what still
+  fits — and the omitted counts say what was left out, so a consumer can tell a
+  short verdict from a truncated one.
+  """
   @spec summary_json(Result.t()) :: String.t()
   def summary_json(%Result{} = result) do
     json = Jason.encode!(result)
@@ -110,26 +120,58 @@ defmodule SymphonyElixir.Delivery.Acceptance do
     if byte_size(json) <= @max_persisted_bytes do
       json
     else
-      # The verdict is written into a GitHub comment, which has a size limit, and
-      # the evidence commands (project configuration, unbounded in length) are the
-      # biggest part: they are dropped so the verdict itself always survives, and
-      # the payload says it was compacted.
-      result
-      |> compact_payload()
-      |> Jason.encode!()
+      result |> compact_payload() |> Jason.encode!()
     end
   end
 
   defp compact_payload(%Result{} = result) do
-    %{
+    payload = %{
       status: result.status,
       contract_version: result.contract_version,
       mode: result.mode,
-      findings: result.findings,
-      evidence: Enum.map(result.evidence, &Map.take(&1, [:name, :status])),
+      findings: [],
+      evidence: [],
+      # The upper bounds are the totals on purpose: the payload measured while
+      # items are added is never smaller than the one written at the end, so the
+      # cap holds after the real counts replace them.
+      omitted: %{findings: length(result.findings), evidence: length(result.evidence)},
       limits: result.limits,
       persisted: "compact: the full verdict exceeded #{@max_persisted_bytes} bytes"
     }
+
+    {findings, omitted_findings, payload} = fit(result.findings, :findings, payload)
+
+    # The evidence commands (project configuration, and the biggest part of the
+    # payload) are the first thing dropped: the name and the status of what was
+    # observed survive.
+    {evidence, omitted_evidence, payload} =
+      fit(Enum.map(result.evidence, &Map.take(&1, [:name, :status])), :evidence, payload)
+
+    %{
+      payload
+      | findings: findings,
+        evidence: evidence,
+        omitted: %{findings: omitted_findings, evidence: omitted_evidence}
+    }
+  end
+
+  # Items are added while the **encoded** payload still fits: the size is measured,
+  # not estimated, so the guarantee is the size of the JSON that is really
+  # persisted. The first item that does not fit and every item after it are counted
+  # as omitted.
+  defp fit(items, key, payload) do
+    {kept, _omitted, payload} =
+      Enum.reduce_while(items, {[], 0, payload}, fn item, {kept, omitted, payload} ->
+        attempt = %{payload | key => kept ++ [item]}
+
+        if byte_size(Jason.encode!(attempt)) <= @max_persisted_bytes do
+          {:cont, {kept ++ [item], omitted, attempt}}
+        else
+          {:halt, {kept, omitted, payload}}
+        end
+      end)
+
+    {kept, length(items) - length(kept), payload}
   end
 
   @doc "Marker of the persisted acceptance block of a candidate."

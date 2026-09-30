@@ -60,7 +60,9 @@ defmodule SymphonyElixir.PipelineContract do
     * the block is bounded (`@max_contract_bytes`) and so are the lists
       (`@max_items`) and the patterns (`@max_pattern_length`);
     * a body that declares `pipeline_contract` twice is rejected as ambiguous
-      instead of picking one (both two blocks and two keys in the same block);
+      instead of picking one (both two blocks and two keys in the same block), and a
+      key repeated inside the mapping is rejected too — the key may be written
+      plain or quoted, and it is read the same way the YAML decoder reads it;
     * patterns are never resolved against the filesystem: an absolute path, a `..`
       segment or a `\` separator is a schema error, and the match is a pure,
       anchored comparison against the candidate change set — a symlink cannot
@@ -102,7 +104,16 @@ defmodule SymphonyElixir.PipelineContract do
 
   @version 1
   @fields ~w(version scope_mode expected_paths allowed_extra_paths required_evidence remote_access deploy)
-  @contract_key ~r/^[ \t]*pipeline_contract[ \t]*:/m
+  # One key of the contract document. YAML accepts the plain form, a quoted scalar
+  # (`"pipeline_contract":`, what a template or a JSON-ish generator produces), a tag
+  # before the key and the explicit-key indicator (`? key`, with its `:` on the same
+  # line or on the next one). All of them are recognized, so the checks look at the
+  # same keys the decoder looks at: a declared contract is never reported as
+  # `absent` because of the key style, and a repeated key is never collapsed in
+  # silence. The tag token excludes whitespace and `:`, so a value is never read as
+  # a tag.
+  @contract_key ~r/(?:^[ \t]*|[{,]\s*)(?:\?[ \t]*)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/m
+  @contract_key_start ~r/^[ \t]*(?:\?[ \t]*)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/
   @fence ~r/^[ \t]*(`{3,}|~{3,})/
   @evidence_name ~r/^[a-z0-9][a-z0-9._-]*$/
   @max_pattern_length 512
@@ -220,16 +231,19 @@ defmodule SymphonyElixir.PipelineContract do
   delivered and changed paths nobody authorized.
 
   Pure: it only compares data, so the same change set always produces the same
-  findings.
+  findings. The patterns are compiled **once per call** and reused for both the
+  delivered and the authorized comparison: recompiling a pattern per path would let
+  a contract (256 expected and 256 allowed patterns) and a large candidate (5,000
+  paths) spend millions of compilations on a single no-match case.
   """
   @spec path_findings(t(), [String.t()]) :: path_findings()
   def path_findings(%__MODULE__{} = contract, changed_paths) when is_list(changed_paths) do
     changed = changed_paths |> Enum.map(&String.replace_prefix(&1, "./", "")) |> Enum.uniq()
+    expected = Enum.map(contract.expected_paths, &{&1, glob_regex(&1)})
+    authorized = Enum.map(contract.expected_paths ++ contract.allowed_extra_paths, &glob_regex/1)
 
-    delivered =
-      Enum.filter(contract.expected_paths, fn pattern -> Enum.any?(changed, &path_match?(pattern, &1)) end)
-
-    unexpected = Enum.reject(changed, &authorized?(contract, &1))
+    delivered = expected |> Enum.filter(&delivered?(&1, changed)) |> Enum.map(&elem(&1, 0))
+    unexpected = Enum.reject(changed, fn path -> Enum.any?(authorized, &Regex.match?(&1, path)) end)
     missing = contract.expected_paths -- delivered
 
     %{
@@ -241,6 +255,8 @@ defmodule SymphonyElixir.PipelineContract do
       truncated: length(missing) > @max_findings or length(unexpected) > @max_findings
     }
   end
+
+  defp delivered?({_pattern, regex}, changed), do: Enum.any?(changed, &Regex.match?(regex, &1))
 
   @doc """
   Prohibition findings (`remote_access: false` / `deploy: false`) over the added
@@ -261,7 +277,8 @@ defmodule SymphonyElixir.PipelineContract do
   Whether a pattern matches a repository-relative path.
 
   `*` matches inside one segment, `**` spans segments, `?` matches one character
-  and a trailing `/` means `/**`.
+  and a trailing `/` means `/**`. A whole change set goes through `path_findings/2`,
+  which compiles each pattern once; this is the single-comparison form.
   """
   @spec path_match?(String.t(), String.t()) :: boolean()
   def path_match?(pattern, path) when is_binary(pattern) and is_binary(path) do
@@ -333,10 +350,6 @@ defmodule SymphonyElixir.PipelineContract do
     )
   end
 
-  defp authorized?(contract, path) do
-    Enum.any?(contract.expected_paths ++ contract.allowed_extra_paths, fn pattern -> path_match?(pattern, path) end)
-  end
-
   # --- extraction ---------------------------------------------------------
 
   defp candidate(body) do
@@ -350,7 +363,7 @@ defmodule SymphonyElixir.PipelineContract do
   defp unfenced(body) do
     trimmed = String.trim_leading(body)
 
-    if Regex.match?(~r/^[ \t]*pipeline_contract[ \t]*:/, trimmed) do
+    if Regex.match?(@contract_key_start, trimmed) do
       with :ok <- single_contract(trimmed), do: {:ok, trimmed}
     else
       :absent
@@ -376,8 +389,9 @@ defmodule SymphonyElixir.PipelineContract do
 
   # The decoder also keeps one of two equal keys *inside* the mapping silently, so
   # a repeated field is refused: the contract is data and ambiguity is not
-  # acceptable. Only key-shaped occurrences count (`^  field:` or `{field:`), so a
-  # commented example inside the block is not a duplicate.
+  # acceptable. Only key-shaped occurrences count (`^  field:`, `{field:` or the
+  # quoted form `"field":`), so a commented example inside the block is not a
+  # duplicate.
   defp no_duplicate_field(block) do
     case Enum.find(@fields, &(length(Regex.scan(field_pattern(&1), block)) > 1)) do
       nil -> :ok
@@ -385,8 +399,9 @@ defmodule SymphonyElixir.PipelineContract do
     end
   end
 
+  # The same key shape as `@contract_key`, for one field of the mapping.
   defp field_pattern(field) do
-    ~r/(?:^[ \t]*|[{,]\s*)#{field}[ \t]*:/m
+    ~r/(?:^[ \t]*|[{,]\s*)(?:\?[ \t]*)?(?:!!?[^\s:,]+[ \t]+)?["']?#{field}["']?[ \t]*(?::|$)/m
   end
 
   defp reject_anchors(block) do

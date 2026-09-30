@@ -223,6 +223,92 @@ defmodule SymphonyElixir.PipelineContractTest do
       assert contract.scope_mode == :advisory
     end
 
+    test "a quoted key is the same key: the contract is read, never reported as absent" do
+      body = """
+      ```yaml
+      "pipeline_contract":
+        "version": 1
+        "scope_mode": "advisory"
+        "expected_paths":
+          - docs/x.md
+      ```
+      """
+
+      assert {:ok, contract} = Contract.parse(body)
+      assert contract.scope_mode == :advisory
+      assert contract.expected_paths == ["docs/x.md"]
+    end
+
+    test "a quoted key in an unfenced body is read too" do
+      assert {:ok, contract} = Contract.parse(~s["pipeline_contract":\n  version: 1\n  scope_mode: advisory])
+      assert contract.scope_mode == :advisory
+    end
+
+    test "a quoted duplicate field is ambiguous, not silently collapsed by the decoder" do
+      body = """
+      ```yaml
+      pipeline_contract:
+        "version": 1
+        "version": 2
+        "scope_mode": advisory
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:duplicate_field, "version"}}} = Contract.parse(body)
+    end
+
+    test "two quoted contract keys are ambiguous: in one block and in two blocks" do
+      one_block = """
+      ```yaml
+      "pipeline_contract":
+        version: 1
+        scope_mode: advisory
+        expected_paths:
+          - a.md
+      'pipeline_contract':
+        version: 1
+        scope_mode: strict
+        expected_paths:
+          - b.md
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:duplicate_contract_key, 2}}} = Contract.parse(one_block)
+
+      quoted = """
+      ```yaml
+      "pipeline_contract":
+        version: 1
+        scope_mode: advisory
+      ```
+
+      ```yaml
+      "pipeline_contract":
+        version: 1
+        scope_mode: advisory
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:ambiguous_contracts, 2}}} = Contract.parse(quoted)
+    end
+
+    test "the explicit key and the flow form with quotes are the same mapping" do
+      explicit = """
+      ```yaml
+      ? pipeline_contract
+      : {version: 1, scope_mode: advisory}
+      ```
+      """
+
+      assert {:ok, explicit_contract} = Contract.parse(explicit)
+      assert explicit_contract.scope_mode == :advisory
+
+      flow = ~s[```yaml\n{"pipeline_contract": {"version": 1, "scope_mode": "advisory"}}\n```]
+
+      assert {:ok, flow_contract} = Contract.parse(flow)
+      assert flow_contract.scope_mode == :advisory
+    end
+
     test "an anchor is refused before decoding" do
       body = """
       ```yaml

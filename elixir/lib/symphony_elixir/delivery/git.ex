@@ -13,17 +13,21 @@ defmodule SymphonyElixir.Delivery.Git do
   line, and the file is removed even when the push fails.
 
   Reading the candidate (who changed) is this module's other job, and the
-  acceptance contract depends on it: `change_set/1` reports the destination path
-  of renames and every untracked file individually, and `added_lines/1` gives the
+  acceptance contract depends on it: `change_set/1` reports a rename as the
+  destination **plus the origin as a deletion** (the rename removed it, so a scope
+  that authorized only the destination must not be able to delete an unrelated
+  file) and every untracked file individually, and `added_lines/1` gives the
   prohibition scan the added lines with the path they belong to.
 
   Both reads are **bounded and fail closed**: the change set is capped
   (`@max_change_set` entries, non-UTF-8 paths refused) and the added-lines scan
-  stops at its budgets (`@max_diff_bytes`, `@max_scanned_files`,
+  stops at its budgets (`@max_diff_bytes`, enforced while the `git diff` child is
+  still running so the whole diff is never captured; `@max_scanned_files`,
   `@max_scanned_bytes`, `@max_scanned_lines`), declaring `truncated` when a bound
-  was reached. The declared residual: the child captures of `git` are proportional
-  to what the candidate produced; the *parse* and the structures built here are
-  limited.
+  was reached. The declared residual: the captures of `git status` and
+  `git ls-files` are proportional to the number of paths the candidate produced
+  (the change set is capped at `@max_change_set`); the *parse* and the structures
+  built here are limited.
   """
 
   require Logger
@@ -63,13 +67,18 @@ defmodule SymphonyElixir.Delivery.Git do
   end
 
   @doc """
-  The candidate change set: one entry per path the agent changed, with the
-  destination path of a rename.
+  The candidate change set: one entry per change the agent made.
 
-  `--porcelain -z -uall` is used on purpose. `-z` is unquoted, so a path with a
-  space arrives intact, and `-uall` lists each untracked file instead of a
-  compressed `dir/`, which is what lets an expected path inside a directory the
-  agent just created be matched.
+  A rename is two entries — the destination with the status `R` and the origin
+  with the status `D` — because the rename **deleted the origin**: a `strict`
+  contract that authorized only the destination would otherwise be a way to remove
+  an unauthorized path. A copy is only the destination; its origin stays.
+
+  `--porcelain -z -uall` is used on purpose. `-z` is unquoted (and reports the
+  destination of a rename before its origin), so a path with a space arrives
+  intact, and `-uall` lists each untracked file instead of a compressed `dir/`,
+  which is what lets an expected path inside a directory the agent just created be
+  matched.
 
   The read is **bounded and fails closed**: a change set above `@max_change_set`
   entries is an error instead of a partial verdict, and a path that is not valid
@@ -91,9 +100,10 @@ defmodule SymphonyElixir.Delivery.Git do
   @doc """
   Parses a `git status --porcelain -z` output (`XY PATH\\0[ORIGIN\\0]`).
 
-  At most `@max_change_set + 1` entries are materialized: `:overflow` means the
-  change set is too big to be accepted, and `:invalid_encoding` means a path is
-  not valid UTF-8.
+  The status `R` (rename) yields two entries — the destination and the origin as a
+  deletion — while `C` (copy) yields only the destination. At most
+  `@max_change_set` entries are materialized: `:overflow` means the change set is
+  too big to be accepted, and `:invalid_encoding` means a path is not valid UTF-8.
   """
   @spec change_entries(String.t()) :: {:ok, [change()]} | :overflow | :invalid_encoding
   def change_entries(output) when is_binary(output) do
@@ -110,23 +120,27 @@ defmodule SymphonyElixir.Delivery.Git do
   Tracked modifications come from `git diff HEAD` (added lines only, so an
   untouched line is never scanned) and untracked files are read from disk. Every
   step is bounded (`@max_diff_bytes`, `@max_scanned_files`, `@max_scanned_bytes`,
-  `@max_scanned_lines`) and the collection **stops at the line budget** instead of
-  building everything and truncating afterwards; `truncated: true` says a bound was
-  reached, so the caller can declare the scan incomplete instead of pretending it
-  was exhaustive.
+  `@max_scanned_lines`) and the collection **stops at the budget it reached**
+  instead of building everything and truncating afterwards; `truncated: true` says
+  a bound was reached, so the caller can declare the scan incomplete instead of
+  pretending it was exhaustive.
+
+  The `git diff` child is read **bounded**: the reader stops at `@max_diff_bytes`
+  and closes the port (which kills `git`), so a huge diff is never captured in the
+  memory of the worker — see `diff_output/1`.
   """
   @spec added_lines(Path.t()) :: {:ok, %{lines: [added_line()], truncated: boolean()}} | {:error, term()}
   def added_lines(workspace) do
-    with {:ok, diff} <- run_raw(workspace, ["-c", "core.quotePath=false", "diff", "HEAD", "--no-color", "--unified=0"]),
+    with {:ok, diff, diff_truncated} <- diff_output(workspace),
          {:ok, untracked} <- run_raw(workspace, ["ls-files", "--others", "--exclude-standard", "-z"]) do
-      {diff_lines, diff_truncated} = diff_added_lines(diff)
+      {diff_lines, parse_truncated} = diff_added_lines(diff)
       budget = @max_scanned_lines - length(diff_lines)
       {file_lines, files_dropped, files_truncated} = untracked_lines(workspace, untracked, budget)
 
       {:ok,
        %{
          lines: diff_lines ++ file_lines,
-         truncated: diff_truncated or files_dropped or files_truncated
+         truncated: diff_truncated or parse_truncated or files_dropped or files_truncated
        }}
     end
   end
@@ -243,13 +257,30 @@ defmodule SymphonyElixir.Delivery.Git do
   defp parse_entries(_fields, _acc, count) when count >= @max_change_set, do: :overflow
 
   defp parse_entries([field | rest], acc, count) do
-    entry = change_entry(field)
-    # In the `-z` format a rename/copy is two fields: the destination (with the
-    # status) followed by the origin, which is not a change of its own.
-    rest = if rename?(entry.status), do: Enum.drop(rest, 1), else: rest
+    {rest, entries} = entries_of(change_entry(field), rest)
+    materialized = count + length(entries)
 
-    parse_entries(rest, [entry | acc], count + 1)
+    if materialized > @max_change_set do
+      :overflow
+    else
+      parse_entries(rest, Enum.reverse(entries) ++ acc, materialized)
+    end
   end
+
+  # In the `-z` format a rename/copy is two fields: the destination (which carries
+  # the status) followed by the origin. A rename **removed** the origin, so the
+  # origin is reported as a deletion of its own — otherwise a candidate could
+  # rename an unauthorized path into an authorized one and delete the origin with
+  # no finding at all. A copy leaves the origin in place and is not a deletion.
+  defp entries_of(%{status: status} = entry, [origin | rest]) do
+    cond do
+      copy?(status) -> {rest, [entry]}
+      rename?(status) -> {rest, [entry, %{status: "D", path: origin}]}
+      true -> {[origin | rest], [entry]}
+    end
+  end
+
+  defp entries_of(entry, rest), do: {rest, [entry]}
 
   # Binary match on purpose: the status is ASCII and the path is raw bytes (the
   # output was validated as UTF-8 before this parse, so `String` is safe here).
@@ -257,17 +288,16 @@ defmodule SymphonyElixir.Delivery.Git do
     %{status: String.trim(x <> y), path: path}
   end
 
-  defp rename?(status), do: String.contains?(status, ["R", "C"])
+  defp rename?(status), do: String.contains?(status, "R")
+  defp copy?(status), do: String.contains?(status, "C")
 
   defp diff_added_lines(diff) do
-    {text, text_truncated} = limit_bytes(diff, @max_diff_bytes)
-
     {lines, _path, truncated} =
-      text
+      diff
       |> String.split(~r/\r?\n/)
       |> Enum.reduce_while({[], nil, false}, &diff_step/2)
 
-    {Enum.reverse(lines), text_truncated or truncated}
+    {Enum.reverse(lines), truncated}
   end
 
   # The collection stops at the documented line budget: the `+`-lines are not all
@@ -290,16 +320,70 @@ defmodule SymphonyElixir.Delivery.Git do
     end
   end
 
-  # The child capture of `git diff` is proportional to the candidate's own diff
-  # (that is a declared limit of the stage); the parse is bounded, so the
-  # structures built here are not, and the verdict says the scan was truncated.
-  defp limit_bytes(binary, limit) do
-    if byte_size(binary) > limit do
-      {binary_part(binary, 0, limit), true}
-    else
-      {binary, false}
+  # The diff of a candidate can be arbitrarily big, so the child is read
+  # **bounded**: the reader stops at `@max_diff_bytes`, closes the port (which kills
+  # `git`) and reports the truncation. `System.cmd/3` — what `run_raw/2` uses —
+  # would capture the whole diff in the memory of the worker first. The port is
+  # owned by a task on purpose: the bytes the child had already sent die with that
+  # process, so no later read can see the tail of another candidate's diff.
+  defp diff_output(workspace) do
+    args = ["-c", "core.quotePath=false", "diff", "HEAD", "--no-color", "--unified=0"]
+
+    case System.find_executable("git") do
+      nil ->
+        {:error, {:git_not_available, "git executable not found"}}
+
+      git ->
+        Task.async(fn -> read_bounded(git, workspace, args, @max_diff_bytes) end)
+        |> Task.await(:infinity)
     end
   end
+
+  defp read_bounded(git, workspace, args, limit) do
+    port =
+      Port.open({:spawn_executable, String.to_charlist(git)}, [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        args: args,
+        cd: workspace
+      ])
+
+    collect(port, args, limit)
+  end
+
+  defp collect(port, args, limit), do: collect(port, args, limit, [], 0)
+
+  defp collect(port, args, limit, chunks, size) do
+    receive do
+      {^port, {:data, data}} ->
+        {kept, truncated} = take_chunk(data, limit - size)
+
+        if truncated do
+          Port.close(port)
+          {:ok, to_binary([kept | chunks]), true}
+        else
+          collect(port, args, limit, [kept | chunks], size + byte_size(kept))
+        end
+
+      {^port, {:exit_status, 0}} ->
+        {:ok, to_binary(chunks), false}
+
+      {^port, {:exit_status, status}} ->
+        output = chunks |> to_binary() |> sanitize()
+
+        Logger.warning("Delivery git command failed args=#{inspect(args)} status=#{status} output=#{inspect(output)}")
+        {:error, {:git_command_failed, args, status, output}}
+    end
+  end
+
+  defp take_chunk(data, remaining) when byte_size(data) > remaining do
+    {binary_part(data, 0, remaining), true}
+  end
+
+  defp take_chunk(data, _remaining), do: {data, false}
+
+  defp to_binary(chunks), do: chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
   defp diff_line("+++ b/" <> path, _path), do: {:header, String.trim_trailing(path)}
   defp diff_line("+++ " <> _other, _path), do: {:header, nil}

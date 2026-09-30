@@ -11,6 +11,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
   alias SymphonyElixir.Delivery.Acceptance
   alias SymphonyElixir.Delivery.Acceptance.Result
+  alias SymphonyElixir.Delivery.Git
   alias SymphonyElixir.PipelineContract.Finding
   alias SymphonyElixir.Tracker.Issue
 
@@ -122,13 +123,24 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       assert result.change_set.delivered == ["docs.md"]
     end
 
-    test "a rename is the destination path, not the origin", %{workspace: workspace} do
+    test "a rename delivers the destination and reports the origin as a deletion", %{workspace: workspace} do
       git!(workspace, ["mv", "README.md", "docs.md"])
-      issue = issue(contract_body(expected_paths: ["docs.md"]))
+
+      # Only the destination is authorized: the rename **removed** README.md, so
+      # authorizing the new path is not authorizing the deletion of the old one.
+      assert {:error, {:delivery_acceptance_failed, result}} =
+               Acceptance.scope(workspace, issue(contract_body(expected_paths: ["docs.md"])))
+
+      assert Enum.map(result.findings, &{&1.code, &1.path}) == [{:unexpected_path_changed, "README.md"}]
+      assert result.change_set.changed == ["docs.md", "README.md"]
+      assert result.change_set.unexpected == ["README.md"]
+
+      # Both ends authorized: the rename is the delivery.
+      issue = issue(contract_body(expected_paths: ["docs.md", "README.md"]))
 
       assert {:ok, result} = Acceptance.scope(workspace, issue)
       assert result.status == :pass
-      assert result.change_set.changed == ["docs.md"]
+      assert result.change_set.delivered == ["docs.md", "README.md"]
     end
 
     test "an added line with invalid UTF-8 in the diff is skipped, not crashed", %{workspace: workspace} do
@@ -292,6 +304,32 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
       assert result.status == :pass
       assert :change_scan_truncated in result.limits
+    end
+
+    test "a tracked diff above the byte budget is read bounded, not captured whole", %{workspace: workspace} do
+      write!(workspace, "big.txt", "base\n")
+      git!(workspace, ["add", "-A"])
+
+      git!(workspace, [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.org",
+        "commit",
+        "-q",
+        "-m",
+        "base big"
+      ])
+
+      # ~1.5 MiB of diff in 500 added lines: above the byte budget of the read and
+      # below the line budget of the parse, so the truncation can only come from the
+      # read that stops at the cap (and kills the child).
+      write!(workspace, "big.txt", Enum.map_join(1..500, "\n", &("line #{&1} " <> String.duplicate("x", 3_000))) <> "\n")
+
+      assert {:ok, %{lines: lines, truncated: true}} = Git.added_lines(workspace)
+
+      assert length(lines) < 500
+      assert Enum.all?(lines, &(&1.path == "big.txt"))
     end
 
     test "markup in a path is escaped in the prose and kept literal for machines", %{workspace: workspace} do
@@ -586,6 +624,42 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       assert decoded["persisted"] =~ "compact"
       assert decoded["status"] == "pass"
       assert [%{"name" => "huge", "status" => "passed"}, %{"name" => "small"}] = decoded["evidence"]
+      assert Enum.all?(decoded["evidence"], &(not Map.has_key?(&1, "command")))
+    end
+
+    test "the compacted verdict is bounded even with findings and evidences at the limits" do
+      findings =
+        Enum.map(1..300, fn index ->
+          finding(:unexpected_path_changed, "changed path `f#{index}.md` is not authorized", "f#{index}.md")
+        end)
+
+      evidence =
+        Enum.map(1..256, fn index ->
+          %{name: "evidence-#{index}", status: :failed, command: String.duplicate("c", 300)}
+        end)
+
+      result =
+        Result.evaluated(
+          mode: :strict,
+          contract_version: 1,
+          findings: findings,
+          evidence: evidence,
+          limits: [:change_scan_truncated, :content_not_verified]
+        )
+
+      json = Acceptance.summary_json(result)
+      decoded = Jason.decode!(json)
+
+      # The payload goes into a GitHub comment: it is capped by construction, and it
+      # says how much was left out instead of losing the verdict.
+      assert byte_size(json) <= 16_384
+      assert decoded["persisted"] =~ "compact"
+      assert decoded["status"] == "fail"
+      assert decoded["limits"] == ["change_scan_truncated", "content_not_verified"]
+      assert length(decoded["findings"]) + decoded["omitted"]["findings"] == 300
+      assert decoded["omitted"]["findings"] > 0
+      assert length(decoded["evidence"]) + decoded["omitted"]["evidence"] == 256
+      assert decoded["omitted"]["evidence"] > 0
       assert Enum.all?(decoded["evidence"], &(not Map.has_key?(&1, "command")))
     end
   end

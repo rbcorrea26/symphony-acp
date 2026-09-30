@@ -316,27 +316,34 @@ pipeline_contract:
   delivery continues; the architectural review decides.
 - The parser only extracts the fenced `pipeline_contract:` block and validates version,
   types and field names: content of the issue is **never executed** (`eval`/`source`/shell
-  are prohibited by design). An unenforceable contract (unknown version or field, invalid
-  pattern, broken YAML, two contracts) fails the run instead of being ignored; an issue
-  without a contract is simply not subject to this layer.
+  are prohibited by design). The key may be written plain or quoted (`"scope_mode":`, what a
+  template generator produces) and the explicit-key indicator (`? key`) is read too, so a
+  declared contract is never classified as absent because of the key style. An unenforceable
+  contract (unknown version or field, invalid pattern, broken YAML, two contracts, a repeated
+  key) fails the run instead of being ignored; an issue without a contract is simply not
+  subject to this layer.
 - Evidence is named: `required_evidence` demands names, `delivery.evidence` supplies the
   command. The reserved name `repository-gates` is satisfied by the gates stage itself. A
   demanded name without a provider is a finding, never a silent pass, and the phase has **one
   budget** (`delivery.gates_timeout_ms` shared by every command), because the demanded names
   come from the untrusted issue and multiplying a timeout per name would occupy the worker for
   hours.
-- Prohibitions are detected by scanning the **added lines** of the candidate (tracked diff
-  plus untracked files, bounded and reported as truncated when the cap is reached) with the
-  fixed rules documented in `../docs/fork/adr/0006-acceptance-contract.md`. A match is a
-  finding for the human, not a proof of intent; `remote_access: true`/`deploy: true` in the
-  contract turns the corresponding scan off.
+- Prohibitions are detected by scanning the **added lines** of the candidate (the tracked
+  `git diff` — read up to its cap, with the child closed at that point so a huge diff is never
+  captured in memory — plus untracked files, both bounded and reported as truncated when a cap
+  is reached) with the fixed rules documented in
+  `../docs/fork/adr/0006-acceptance-contract.md`. A match is a finding for the human, not a
+  proof of intent; `remote_access: true`/`deploy: true` in the contract turns the
+  corresponding scan off.
 - With no candidate change set (a `--resume-only` cycle over an already published candidate,
   or nothing to publish) the layer reports `not_applicable` instead of failing: that
   candidate was accepted by the cycle that created it.
 - Candidate reads fail closed: a change set above 5 000 entries
   (`change_set_too_large`) or with a non-UTF-8 path (`change_set_not_utf8`) is an error
   instead of a partial verdict, and every scan bound reached is declared
-  (`change_scan_truncated`).
+  (`change_scan_truncated`). A rename counts as two changes — the destination and the origin
+  as a deletion, because the rename removed it — so authorizing only the new path does not
+  authorize deleting the old one; a copy is only the destination.
 - The scope is evaluated again **after** the gates and the evidence commands, because they run
   inside the workspace and may create files: what is published is the final change set, so the
   final one is what gets accepted (a gate artifact has to be authorized in
@@ -356,10 +363,13 @@ pipeline_contract:
 - The verdict is in the result of `Delivery.run/3`, in the log
   (`Delivery acceptance passed|diverged|failed`) and in the handoff comment as a
   `<!-- acceptance:result:<sha> -->` marker plus JSON, which is the stable interface for the
-  review state machine and the architect runner (next increments). A rejected candidate is not
-  published and not commented: the evidence of the block lives in the run log.
-  `../docs/fork/acceptance-contract.md` documents the schema, the semantics per diff case, the
-  codes and every declared limit.
+  review state machine and the architect runner (next increments). The persisted JSON is
+  **bounded by construction** (16 KiB): above the cap the evidence commands are dropped and
+  the arrays are cut to fit, with `omitted` saying how much was left out, and the comment is
+  written **before** the labels — so a failed write cannot leave an issue promoted without its
+  verdict. A rejected candidate is not published and not commented: the evidence of the block
+  lives in the run log. `../docs/fork/acceptance-contract.md` documents the schema, the
+  semantics per diff case, the codes and every declared limit.
 - The candidate is the head SHA of the delivery branch that passed the local gates **and**
   whose check runs all concluded successfully **and** that was still the branch head when
   the observation finished. A push that lands during the observation invalidates it and

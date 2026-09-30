@@ -54,6 +54,7 @@ Regras do parser (`SymphonyElixir.PipelineContract`):
 | lista vazia em `allowed_extra_paths`/`required_evidence` | válido (é a ausência de autorização/exigência) |
 | path absoluto, com `..`, com `\` ou vazio | `{:invalid_pattern, _, _}` → reprova |
 | dois blocos, ou duas chaves `pipeline_contract` | `{:ambiguous_contracts, n}` / `{:duplicate_contract_key, n}` → reprova |
+| chave escrita com aspas (`"scope_mode":`) ou com o indicador explícito (`? scope_mode`) | é lida como a **mesma** chave: ausência, escopo e duplicidade continuam sendo verificadas |
 | uma mesma chave repetida no mapeamento (bloco ou flow) | `{:duplicate_field, "scope_mode"}` → reprova |
 | tag YAML (`!foo`, `!ruby/object`, `!!python/...`) | `{:invalid_yaml, %{type: :unrecognized_node}}` → reprova |
 | âncora (`&name`) | `{:anchors_not_supported, "&name"}` → reprova (alias/expansão não têm uso no schema) |
@@ -87,10 +88,16 @@ tem que estar em `allowed_extra_paths` — caso contrário o run falha com
 | add (arquivo novo) | `?? path` (individual, `-uall`) | satisfaz se casar | autoriza se casar |
 | modify | ` M path` | satisfaz se casar | autoriza se casar |
 | delete | ` D path` | satisfaz (a remoção é a entrega) | autoriza |
-| rename | `R  destino` (o destino é o path; a origem não é um change) | satisfaz pelo destino | autoriza pelo destino |
+| rename | `R  destino` **e** `D  origem` | satisfaz pelo destino; a origem removida precisa estar autorizada | autoriza destino e origem |
+| copy | `C  destino` (a origem permanece) | satisfaz pelo destino | autoriza pelo destino |
 
 Divergências: path esperado não entregue → `expected_path_missing`; path alterado
 fora de `expected_paths` ∪ `allowed_extra_paths` → `unexpected_path_changed`.
+
+O rename aparece como **duas** mudanças de propósito: o git removeu a origem, e um
+contrato `strict` que autorizasse apenas o destino seria um caminho para apagar um
+arquivo não autorizado (renomeando-o para um path autorizado) sem nenhum achado. O
+`copy`, que deixa a origem no lugar, não gera deleção nenhuma.
 
 Globs (`*` dentro do segmento, `**` atravessando, `?` um caractere, `/` no fim =
 `/**`) existem porque o escopo real raramente é um único arquivo (documentação por
@@ -130,11 +137,13 @@ faltou executar é `required_evidence_failed` com o status `deadline_exceeded`
 
 Essa distinção é declarada na resposta (`limits`) e no comentário de handoff, em
 vez de virar `PASS` silencioso. A varredura é limitada e **declara cada limite
-atingido** (`change_scan_truncated`): 200 arquivos não rastreados, 262 144 bytes por
-arquivo não rastreado, 1 MiB de texto de diff para parse, 2 000 linhas adicionadas,
-5 achados por tipo e trecho de 80 caracteres. O limite residual declarado: a captura
-do `git diff` em si é proporcional ao diff do candidato (o processo filho é lido
-inteiro); o *parse* e as estruturas construídas é que são limitados.
+atingido** (`change_scan_truncated`): 1 MiB de texto de diff (lido do processo filho
+e cortado no cap — o `git diff` é encerrado nesse ponto, o diff inteiro nunca é
+capturado na memória), 200 arquivos não rastreados, 262 144 bytes por arquivo não
+rastreado, 2 000 linhas adicionadas, 5 achados por tipo e trecho de 80 caracteres. O
+limite residual declarado: a captura de `git status`/`git ls-files` é proporcional ao
+número de paths do candidato (o change set é limitado a 5 000 entradas); o *parse* e
+as estruturas construídas aqui são limitados.
 
 `deploy: true` / `remote_access: true` **não concedem capacidade**: significam
 apenas "este contrato não proíbe". Quem autoriza deploy é a política da plataforma
@@ -162,7 +171,7 @@ sucesso (o comentário é chaveado pelo SHA do candidato).
 |---|---|---|
 | `invalid_contract` | `contract` | o contrato existe e não é fiscalizável (versão/campo/tipo/duplicidade/âncora/YAML) |
 | `expected_path_missing` | `scope` | path esperado não faz parte do change set do candidato |
-| `unexpected_path_changed` | `scope` | path alterado fora de `expected_paths` ∪ `allowed_extra_paths` |
+| `unexpected_path_changed` | `scope` | path alterado fora de `expected_paths` ∪ `allowed_extra_paths` (inclui a origem de um rename, que é uma deleção) |
 | `required_evidence_missing` | `evidence` | nome exigido sem provider no registry |
 | `required_evidence_failed` | `evidence` | provider com exit ≠ 0, timeout ou orçamento da fase esgotado |
 | `forbidden_deploy_detected` | `forbidden_operation` | regra de deploy casou em linha adicionada |
@@ -183,14 +192,16 @@ persistido no comentário de handoff como marcação + JSON:
 
 O JSON é a interface estável para a máquina de estados da review (#13) e para o
 architect runner (#14): eles leem `status`, `findings[].code`/`category`/`path` e
-`limits`, sem parsear prosa. O payload é **limitado a 16 KiB**: acima disso ele é
-persistido de forma compacta (sem os comandos de evidência, que é a parte maior) com
-o campo `persisted` dizendo que foi compactado — perder o texto do comando é melhor
-que perder o veredicto, e o comentário do GitHub tem limite de tamanho. O comentário
-é escrito **antes** dos rótulos de promoção, para que uma falha de escrita não deixe
-a issue promovida sem o veredicto. Limite declarado: quando o aceite **reprova**, o
-run falha e **não** publica nem comenta (a evidência fica no log do run) — o estado
-de bloqueio persistido no GitHub é escopo da #13.
+`limits`, sem parsear prosa. O payload é **limitado a 16 KiB por construção**: acima
+disso ele é persistido de forma compacta — os comandos de evidência (a parte maior)
+saem primeiro e depois os arrays de findings/evidências são cortados até caber no cap,
+medido no JSON de verdade (não estimado) — e o campo `omitted` diz quantos ficaram de
+fora, com `persisted` marcando a compactação. Perder o texto do comando (ou o
+excedente dos arrays) é melhor que perder o veredicto, e o comentário do GitHub tem
+limite de tamanho. O comentário é escrito **antes** dos rótulos de promoção, para que
+uma falha de escrita não deixe a issue promovida sem o veredicto. Limite declarado:
+quando o aceite **reprova**, o run falha e **não** publica nem comenta (a evidência
+fica no log do run) — o estado de bloqueio persistido no GitHub é escopo da #13.
 
 ## 9. Segurança
 

@@ -54,6 +54,11 @@ pipeline_contract:
   `/` no fim significa `/**`; padrão absoluto, com `..` ou com `\` é erro de
   schema (o padrão nunca é resolvido no filesystem, só comparado com o change
   set);
+- a chave pode ser escrita **plana ou com aspas** (`pipeline_contract:`,
+  `"scope_mode":`, o que um gerador de template produz) e o indicador explícito
+  (`? chave`) também é lido: o parser enxerga as mesmas chaves que o decoder YAML
+  enxerga, então um contrato declarado nunca é classificado como ausente por causa
+  do estilo da chave e uma chave repetida nunca é colapsada em silêncio;
 - `strict` sem `expected_paths`, `version` diferente de `1`, `scope_mode`
   inválido, YAML quebrado, dois blocos de contrato no mesmo corpo, bloco acima de
   64 KiB e campo desconhecido **falham o run sem publicar** — contrato que não dá
@@ -100,7 +105,8 @@ declarado, e um nome sem provider é reprovação, não execução implícita.
 
 `remote_access: false` e `deploy: false` são proibições explícitas do default. A
 detecção é uma **varredura das linhas adicionadas pelo candidato** (`git diff HEAD`
-de arquivos rastreados + conteúdo de arquivos não rastreados, ambos limitados), com
+de arquivos rastreados — o processo filho é lido até o cap e encerrado nele, o diff
+inteiro nunca é capturado — + conteúdo de arquivos não rastreados, ambos limitados), com
 regras fixas e versionadas neste fork: `kubectl apply/create/...`, `terraform
 apply/destroy`, `helm upgrade/install/...`, `ansible-playbook`, `docker push`,
 `npm/yarn/pnpm publish`, `gh release create/upload`, `aws deploy|cloudformation
@@ -135,7 +141,8 @@ convertida em `PASS` silencioso.
   decodificar (sem alias/expansão, e portanto sem bomba de aliases);
 - duplicidade ambígua é recusada, nunca "escolhida": dois blocos, duas chaves
   `pipeline_contract` e uma **mesma chave repetida dentro do mapeamento**
-  (`duplicate_field`) — o decoder YAML manteria uma delas em silêncio;
+  (`duplicate_field`), contando também as formas com aspas e com o indicador
+  explícito — o decoder YAML manteria uma delas em silêncio;
 - nenhum dado do contrato chega a um shell: o comando executado vem de
   `delivery.gates`/`delivery.evidence` (configuração do projeto) e a issue só
   contribui com **nomes** de evidência;
@@ -177,7 +184,7 @@ O aceite devolve `SymphonyElixir.Delivery.Acceptance.Result`:
   varredura truncada, conteúdo não avaliado), para que um `pass` não seja lido como
   prova.
 
-O veredicto aparace no `result` de `Delivery.run/3`, no log
+O veredicto aparece no `result` de `Delivery.run/3`, no log
 (`Delivery acceptance passed|diverged|failed`) e no comentário de handoff como
 marcação + JSON (`<!-- acceptance:result:<sha> -->`), que é a interface estável para
 a máquina de estados da review (#13) e para o architect runner (#14). Nada de
@@ -218,14 +225,17 @@ bloqueio fica no log; o estado persistido de bloqueio é escopo da #13).
 ## Implementação
 
 - `elixir/lib/symphony_elixir/pipeline_contract.ex` — parser/schema v1, matching de
-  glob, achados de escopo e de proibição (puros).
+  glob (o padrão é compilado uma vez por avaliação do change set), achados de escopo
+  e de proibição (puros).
 - `elixir/lib/symphony_elixir/delivery/acceptance.ex` — gate impuro: lê o change
-  set, roda as evidências exigidas, decide por modo e resume o relatório.
+  set, roda as evidências exigidas, decide por modo, resume o relatório e persiste o
+  veredicto cortado por bytes (16 KiB, com `omitted`).
 - `elixir/lib/symphony_elixir/delivery/gates.ex` — runner único de comando com
   timeout, usado por gates e evidências.
 - `elixir/lib/symphony_elixir/delivery/git.ex` — `change_set/1` (porcelain `-z
-  -uall`: rename pelo destino, arquivo não rastreado individual) e `added_lines/1`
-  (diff + não rastreados, limitado).
+  -uall`: rename = destino + origem como deleção, copy só o destino, arquivo não
+  rastreado individual) e `added_lines/1` (leitura limitada do `git diff`, que é
+  encerrado no cap, + não rastreados limitados).
 - `elixir/lib/symphony_elixir/delivery.ex` — ordem das camadas, `contract` no
   resultado e linha do aceite no comentário de handoff.
 - `elixir/lib/symphony_elixir/config/schema.ex` — bloco `delivery.evidence`

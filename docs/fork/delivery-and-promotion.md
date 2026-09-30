@@ -18,8 +18,14 @@ AgentRunner (turnos)            # executor selecionado por executor.kind (acp)
        6. observa check runs do head SHA                                     # CI obrigatório
        7. candidate stable = SHA com gates + CI verdes                       # invalida se o head mudar
        8. review one-shot (se disponível)                                    # depois do candidato
-       9. handoff: rótulo + remoção do rótulo de entrada + comentário        # inclui o aceite
+       9. handoff: comentário (com o veredicto) e depois rótulos                # veredicto antes da promoção
 ```
+
+O handoff é o único ponto que muda o estado da issue, e ele tem ordem fixa: o
+**comentário com o veredicto é escrito antes** do rótulo de handoff e da remoção do
+rótulo de entrada. Se a escrita do comentário falhar, a issue **não** é promovida —
+ela não pode ficar marcada como entregue sem o veredicto legível por máquina que a
+#13/#14 vão consumir.
 
 ## As três camadas de verificação
 
@@ -103,8 +109,9 @@ presente. Qualquer outro caso falha o dispatch em vez de rodar um worker inútil
   estado; não existe arquivo de candidato no Symphony (o relatório do aceite
   também não é persistido — ele vive no log e no comentário de handoff);
 - **o aceite é declarativo e heurístico**: o contrato é data da issue (nunca
-  código), o escopo é comparado com o change set (rename conta pelo destino,
-  arquivos novos entram individualmente) e a proibição é uma varredura limitada
+  código), o escopo é comparado com o change set (rename conta pelo destino **e**
+  pela origem, que é uma deleção, e arquivos novos entram individualmente) e a
+  proibição é uma varredura limitada
   das linhas adicionadas. Contrato inválido (versão desconhecida, campo
   desconhecido, padrão absoluto/`..`, YAML quebrado) falha o run em vez de ser
   ignorado; a varredura de proibição pode ter falso positivo e o relatório marca

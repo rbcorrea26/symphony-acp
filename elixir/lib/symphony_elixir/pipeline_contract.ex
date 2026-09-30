@@ -146,8 +146,14 @@ defmodule SymphonyElixir.PipelineContract do
   # quoted string are untouched.
   @anchor_token ~r/(?:^|[\s:,\[\]{}])&[^\s,\[\]{}]+/m
   # A block scalar indicator at the end of a line (`key: |`, `key: >-`, `- |2`), where
-  # YAML reads the value as a literal/folded block: the lines under it are text.
-  @block_indicator ~r/(?:^|[:\-])[ \t]*[|>][0-9]*[+\-]?[ \t]*$/
+  # YAML reads the value as a literal/folded block: the lines under it are text. The
+  # header accepts both orders of the optional indicators (`|2-` and `|-2` are both
+  # valid), so a valid scalar is never scanned as structure.
+  @block_indicator ~r/(?:^|[:\-])[ \t]*[|>](?:[0-9]+[+\-]?|[+\-][0-9]+|[+\-]|[0-9]+)?[ \t]*$/
+  # A contract key written as a quoted scalar in **key position** (start of a line or
+  # after a flow separator): it is a key, not a value, so it is unquoted before the
+  # scalar scan and stays visible to the claim hint.
+  @quoted_contract_key ~r/(^[ \t]*|[{,]\s*)(\?[ \t]*)?(&[^\s,\[\]{}]+[ \t]+)?(!!?[^\s:,]+[ \t]+)?["']pipeline_contract["']([ \t]*:)/
 
   # Fixed rules of `deploy: false`. They run over the *added* lines of the
   # candidate only, so a line that merely documents the pipeline (in an
@@ -489,9 +495,23 @@ defmodule SymphonyElixir.PipelineContract do
 
   defp mapping_pairs(_other), do: []
 
-  defp claimed?(block), do: Regex.match?(@contract_key, block)
+  # The claim hint runs on the text with the **scalar content blanked** (comments, quoted
+  # values, block scalars), so a `pipeline_contract:` written inside a scalar cannot claim
+  # the contract or route the block to the anchor refusal. A quoted key in key position is
+  # unquoted first: `"pipeline_contract":` is a key, not a value, and stays visible.
+  defp claimed?(block), do: Regex.match?(@contract_key, claim_text(block))
 
-  defp claimed_start?(block), do: Regex.match?(@contract_key_start, block)
+  defp claimed_start?(block), do: Regex.match?(@contract_key_start, claim_text(block))
+
+  defp claim_text(block) do
+    block
+    |> unquote_contract_key()
+    |> without_scalars()
+  end
+
+  defp unquote_contract_key(block) do
+    Regex.replace(@quoted_contract_key, block, "\\1\\2\\3\\4pipeline_contract\\5")
+  end
 
   defp anchor(block) do
     case Regex.run(@anchor_token, without_scalars(block)) do
@@ -519,7 +539,12 @@ defmodule SymphonyElixir.PipelineContract do
 
   defp blank_scalars([], _state, _previous, acc), do: Enum.reverse(acc)
 
-  defp blank_scalars([?\n | rest], _state, _previous, acc), do: blank_scalars(rest, :plain, ?\n, [?\n | acc])
+  defp blank_scalars([?\n | rest], :comment, _previous, acc), do: blank_scalars(rest, :plain, ?\n, [?\n | acc])
+
+  # A quoted scalar may span physical lines, so the quote state survives the newline
+  # (only a comment ends at it): the continuation of `key: "line one\n  line two"` is
+  # scalar content, never structure.
+  defp blank_scalars([?\n | rest], state, _previous, acc), do: blank_scalars(rest, state, ?\n, [?\n | acc])
 
   defp blank_scalars([character | rest], :plain, previous, acc)
        when previous in [?\s, ?\t, ?\n, ?:, ?[, ?,, ?{] do
@@ -599,13 +624,30 @@ defmodule SymphonyElixir.PipelineContract do
   end
 
   defp fence_step(line, {blocks, current, open}) do
-    case {fence_delimiter(line), open} do
-      {nil, nil} -> {blocks, current, nil}
-      {nil, marker} -> {blocks, [line | current], marker}
-      {delimiter, delimiter} -> {[Enum.reverse(current) | blocks], [], nil}
-      {delimiter, nil} -> {blocks, [], delimiter}
-      {_other, marker} -> {blocks, [line | current], marker}
+    case fence_delimiter(line) do
+      nil when open == nil ->
+        {blocks, current, nil}
+
+      nil ->
+        {blocks, [line | current], open}
+
+      delimiter when open == nil ->
+        {blocks, [], delimiter}
+
+      delimiter ->
+        if closes_fence?(delimiter, open) do
+          {[Enum.reverse(current) | blocks], [], nil}
+        else
+          {blocks, [line | current], open}
+        end
     end
+  end
+
+  # CommonMark: the closing fence is the same marker kind and is at least as long as the
+  # opening one, so ` ``` ` opened with three backticks and closed with four closes the
+  # block instead of leaving it open (which would feed the following prose to YAML).
+  defp closes_fence?(delimiter, open) do
+    :binary.first(delimiter) == :binary.first(open) and byte_size(delimiter) >= byte_size(open)
   end
 
   defp fence_delimiter(line) do

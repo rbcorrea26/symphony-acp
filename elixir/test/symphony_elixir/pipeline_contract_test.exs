@@ -442,6 +442,67 @@ defmodule SymphonyElixir.PipelineContractTest do
       assert contract.scope_mode == :advisory
     end
 
+    test "a block scalar with the chomping indicator before the indentation is text too" do
+      # YAML accepts both orders of the optional header indicators (`|2-` and `|-2`), and
+      # the content of the scalar is text in either of them.
+      for header <- ["|+2", "|-2", ">2+", ">+2"] do
+        body = """
+        ```yaml
+        notes: #{header}
+          pipeline_contract:
+          &anchor
+        ```
+        """
+
+        assert Contract.parse(body) == :absent
+      end
+    end
+
+    test "an unrelated anchored block whose scalar mentions the key is not the contract" do
+      # `&defaults` is structural, but the block claims nothing: the only mention of the
+      # key is inside `notes: |`, which is text, so nothing is refused (and nothing is
+      # read as a contract).
+      body = """
+      ```yaml
+      defaults: &defaults
+        timeout: 5
+      notes: |
+        pipeline_contract:
+      ```
+      """
+
+      assert Contract.parse(body) == :absent
+    end
+
+    test "a quoted scalar that spans lines keeps its continuation out of the scan" do
+      body = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+        expected_paths:
+          - "docs/a.md
+            &notes.md"
+      ```
+      """
+
+      assert {:ok, contract} = Contract.parse(body)
+      assert contract.expected_paths == ["docs/a.md &notes.md"]
+    end
+
+    test "a closing fence may be longer than the opening one" do
+      body = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+      ````
+      """
+
+      assert {:ok, contract} = Contract.parse(body)
+      assert contract.scope_mode == :advisory
+    end
+
     test "the explicit key and the flow form with quotes are the same mapping" do
       explicit = """
       ```yaml

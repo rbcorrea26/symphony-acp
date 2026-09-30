@@ -1,0 +1,212 @@
+# Contrato de aceite (issue → `pipeline_contract`)
+
+Documento operacional da camada de **aceite da issue** do estágio de entrega. A
+decisão está em [adr/0006](adr/0006-acceptance-contract.md); aqui ficam o schema,
+a semântica, os códigos, o que é verificável e o que **não** é.
+
+> `acceptance PASS` ≠ `repository gates PASS` ≠ `CI PASS` ≠ `review PASS` ≠ `architect PASS`.
+> São cinco coisas diferentes, medidas por cinco agentes diferentes, e nenhuma
+> substitui a outra. Este documento trata só da primeira.
+
+## 1. As três camadas do run de entrega
+
+| # | Camada | Pergunta | Quem responde | Quando |
+|---|---|---|---|---|
+| 1 | **aceite** (`pipeline_contract`) | a **issue** foi satisfeita? | `Delivery.Acceptance` + `PipelineContract` | antes dos gates (escopo) e depois deles (evidências) |
+| 2 | **gates do repositório** | o **repositório** continua válido? | `delivery.gates` (comando do projeto) | antes de publicar |
+| 3 | **CI** | o **candidato publicado** passou no CI? | check runs do head SHA | depois de publicar |
+
+A review (`waiting-review`/`rework`) e o `architect runner` são as camadas
+seguintes e **ainda não existem** (issues #13 e #14 deste repositório). O handoff
+atual continua sendo o do ADR-0005.
+
+## 2. Schema v1
+
+O contrato é um bloco no **corpo da issue** (bloco fenced que declare
+`pipeline_contract:`, ou um corpo que comece com a chave):
+
+```yaml
+pipeline_contract:
+  version: 1                 # obrigatório; outra versão é recusada
+  scope_mode: strict         # obrigatório: strict | advisory
+  expected_paths:            # obrigatório em strict; globs relativos ao repo
+    - docs/changes/2026-09-30-pipeline-e2e-smoke.md
+    - tests/agent/run-tests.sh
+  allowed_extra_paths: []    # globs autorizados além dos esperados
+  required_evidence:         # nomes; o workflow fornece os comandos
+    - agent-tests
+    - repository-gates
+  remote_access: false       # ausente = false (proibição explícita)
+  deploy: false              # ausente = false
+```
+
+Regras do parser (`SymphonyElixir.PipelineContract`):
+
+| Entrada | Comportamento |
+|---|---|
+| sem contrato no corpo | `:absent` → camada **não configurada** (comportamento anterior preservado) |
+| YAML inválido | erro determinístico `{:invalid_yaml, _}` → reprova o run |
+| `version` ≠ 1 | `{:unsupported_version, v}` → reprova |
+| campo desconhecido | `{:unknown_fields, [...]}` → reprova |
+| tipo errado (lista/escalar/flags) | `{:invalid_field, ...}` / `{:invalid_flag, ...}` → reprova |
+| `scope_mode` ausente/desconhecido | `{:invalid_scope_mode, v}` → reprova |
+| `expected_paths` vazio em `strict` | `:strict_requires_expected_paths` → reprova |
+| lista vazia em `allowed_extra_paths`/`required_evidence` | válido (é a ausência de autorização/exigência) |
+| path absoluto, com `..`, com `\` ou vazio | `{:invalid_pattern, _, _}` → reprova |
+| dois blocos, ou duas chaves `pipeline_contract` | `{:ambiguous_contracts, n}` / `{:duplicate_contract_key, n}` → reprova |
+| tag YAML (`!foo`, `!ruby/object`, `!!python/...`) | `{:invalid_yaml, %{type: :unrecognized_node}}` → reprova |
+| âncora (`&name`) | `{:anchors_not_supported, "&name"}` → reprova (alias/expansão não têm uso no schema) |
+| bloco > 64 KiB, lista > 256 itens, padrão > 512 chars | reprova |
+
+O parser **decodifica dados, nunca executa**: sem `eval`, `source`, shell ou
+interpolação do contrato em comando. Nada do contrato chega a um shell; os padrões
+são comparados (regex ancorada) com o change set, nunca resolvidos no filesystem.
+
+## 3. Semântica de escopo
+
+`expected_paths` significa **"o candidato entrega este path"**, não "o path existe
+no repositório": a comparação é com o **change set do candidato** (o que será
+publicado), obtido de `git status --porcelain -z -uall`. Um arquivo que já existia
+na base e não foi tocado **não satisfaz** o contrato — foi exatamente o caso #64.
+
+| Caso no candidato | Como aparece no change set | `expected_paths` | `allowed_extra_paths` |
+|---|---|---|---|
+| add (arquivo novo) | `?? path` (individual, `-uall`) | satisfaz se casar | autoriza se casar |
+| modify | ` M path` | satisfaz se casar | autoriza se casar |
+| delete | ` D path` | satisfaz (a remoção é a entrega) | autoriza |
+| rename | `R  destino` (o destino é o path; a origem não é um change) | satisfaz pelo destino | autoriza pelo destino |
+
+Divergências: path esperado não entregue → `expected_path_missing`; path alterado
+fora de `expected_paths` ∪ `allowed_extra_paths` → `unexpected_path_changed`.
+
+Globs (`*` dentro do segmento, `**` atravessando, `?` um caractere, `/` no fim =
+`/**`) existem porque o escopo real raramente é um único arquivo (documentação por
+data, diretório de evidência gerada) e a implementação é segura por construção:
+regex ancorada, sem resolução de filesystem, padrão validado (sem absoluto, `..`,
+`\`). A alternativa (só match exato) está descartada no ADR.
+
+## 4. Semântica de evidência
+
+`required_evidence` é uma lista de **nomes** (slug minúsculo). O registry é:
+
+1. o nome reservado **`repository-gates`** — satisfeito pelo próprio estágio de
+   gates (que roda imediatamente antes e, para a evidência ser avaliada, passou);
+2. os nomes declarados pelo projeto em `delivery.evidence` (nome → comando).
+
+Um nome sem provider é `required_evidence_missing`; comando com exit ≠ 0 ou que
+estoura `delivery.gates_timeout_ms` é `required_evidence_failed`. A evidência
+**nunca é inventada pelo agente**: ela é o exit code de um comando declarado no
+workflow do projeto, executado no workspace da issue. Não se persiste duração,
+contagem de testes, SHA ou saída de comando — só nome, status e comando.
+
+## 5. Proibições: o que é verificável e o que não é
+
+| Aspecto | Verificável? | Mecanismo |
+|---|---|---|
+| paths entregues/autorizados | **sim, determinístico** | change set do git (`--porcelain -z -uall`) |
+| evidência exigida | **sim** | exit code do comando declarado no workflow |
+| comando proibido **presente** nas linhas adicionadas | **sim (positivo)** | varredura de padrões fixos (ADR-0006 §4) |
+| **ausência** de acesso remoto/deploy na execução | **não** | o pipeline não observa rede/processos do agente: um `PASS` significa "nenhum achado na varredura", não prova de ausência |
+| conteúdo/qualidade do que foi entregue | **não** | é dos gates, da review e do arquiteto |
+
+Essa distinção é declarada na resposta (`limits`) e no comentário de handoff, em
+vez de virar `PASS` silencioso. A varredura é limitada (200 arquivos não
+rastreados, 2 000 linhas adicionadas, 5 achados por tipo, trecho de 80 caracteres)
+e diz `change_scan_truncated` quando o limite foi atingido.
+
+`deploy: true` / `remote_access: true` **não concedem capacidade**: significam
+apenas "este contrato não proíbe". Quem autoriza deploy é a política da plataforma
+/do projeto — o aceite é declarativo e restritivo, nunca um mecanismo de permissão.
+
+## 6. `strict`, `advisory` e contrato ausente
+
+| Situação | Status do veredicto | Efeito no run |
+|---|---|---|
+| contrato ausente | `:not_configured` | nenhum (comportamento anterior, ADR-0005) |
+| sem change set novo (`--resume-only`, nada a publicar) | `:not_applicable` | nenhum (o candidato publicado foi aceito quando foi criado) |
+| `strict`, sem achados | `:pass` | segue: gates → evidências → publicação |
+| `strict`, com achados | `:fail` | run falha **sem publicar** (nada de branch/PR/rótulo/comentário) |
+| `advisory`, com achados | `:advisory` | publica normalmente; achados no log e no comentário |
+| contrato inválido | `:fail` (`mode: nil`) | run falha sem publicar (`invalid_contract`) |
+
+Idempotência: o veredicto é função de (contrato, change set, comandos de
+evidência), então repetir o aceite sobre o mesmo candidato dá o mesmo resultado; um
+retry não publica nada em caso de falha e não duplica o comentário em caso de
+sucesso (o comentário é chaveado pelo SHA do candidato).
+
+## 7. Códigos de finding
+
+| Código | Categoria | Significado |
+|---|---|---|
+| `invalid_contract` | `contract` | o contrato existe e não é fiscalizável (versão/campo/tipo/duplicidade/âncora/YAML) |
+| `expected_path_missing` | `scope` | path esperado não faz parte do change set do candidato |
+| `unexpected_path_changed` | `scope` | path alterado fora de `expected_paths` ∪ `allowed_extra_paths` |
+| `required_evidence_missing` | `evidence` | nome exigido sem provider no registry |
+| `required_evidence_failed` | `evidence` | provider com exit ≠ 0 ou timeout |
+| `forbidden_deploy_detected` | `forbidden_operation` | regra de deploy casou em linha adicionada |
+| `forbidden_remote_access_detected` | `forbidden_operation` | regra de acesso remoto casou em linha adicionada |
+
+Cada finding tem `code`, `category`, `message` (humano) e `path` (quando aplicável).
+Não há score nem ranking: quem decide bloquear é o `mode`.
+
+## 8. Persistência e o que a #14 vai consumir
+
+O veredicto completo é devolvido por `Delivery.run/3` (`result.contract`) e
+persistido no comentário de handoff como marcação + JSON:
+
+```text
+<!-- acceptance:result:<candidate-sha> -->
+{"status":"advisory","contract_version":1,"mode":"advisory","findings":[...],"evidence":[...],"limits":[...]}
+```
+
+O JSON é a interface estável para a máquina de estados da review (#13) e para o
+architect runner (#14): eles leem `status`, `findings[].code`/`category`/`path` e
+`limits`, sem parsear prosa. Limite declarado: quando o aceite **reprova**, o run
+falha e **não** publica nem comenta (a evidência fica no log do run) — o estado de
+bloqueio persistido no GitHub é escopo da #13.
+
+## 9. Segurança
+
+- o contrato é **entrada não confiável** (corpo da issue): decodificação de dados
+  com tipos explícitos, tags YAML recusadas, âncoras recusadas, limites de tamanho
+  e de itens, sem `eval`/`source`/shell;
+- **path traversal**: padrões com `/` inicial, `..` ou `\` são erro de schema; a
+  comparação é textual e ancorada, sem resolução de filesystem, e symlinks não
+  movem o escopo;
+- **symlink**: a leitura dos arquivos não rastreados usa `lstat` e recusa tudo que
+  não for arquivo regular (um link não faz a varredura ler fora do workspace);
+- **segredos**: o texto dos findings é mascarado (`gho_*`, `ghp_*`, `github_pat_*`,
+  `sk-*`, `x-access-token:`), truncado e sem quebras de linha antes de ir para log
+  ou comentário; a saída das evidências não é persistida;
+- **injeção em comentário**: `<` é neutralizado no texto humano, então uma alteração
+  do candidato não consegue reescrever o comentário nem forjar marcação de handoff;
+- **comandos**: só vêm de `delivery.gates`/`delivery.evidence` (configuração do
+  projeto). A issue contribui com **nomes** de evidência, nunca com comandos.
+
+## 10. Como o consumidor prepara um issue executável
+
+```yaml
+pipeline_contract:
+  version: 1
+  scope_mode: strict
+  expected_paths:
+    - docs/changes/<data>-<assunto>.md
+    - tests/agent/run-tests.sh
+  allowed_extra_paths: []
+  required_evidence: [agent-tests, wordpress-tests, repository-gates]
+  remote_access: false
+  deploy: false
+```
+
+e no `WORKFLOW.md` do projeto:
+
+```yaml
+delivery:
+  gates: "scripts/agent/preflight.sh --gates"
+  evidence:
+    agent-tests: "tests/agent/run-tests.sh"
+    wordpress-tests: "tests/wordpress/run-tests.sh"
+```
+
+Enquanto o consumidor não tiver contrato nas issues, nada muda: o aceite reporta
+`not_configured` e o handoff segue o ADR-0005.

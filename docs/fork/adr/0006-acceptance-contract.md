@@ -100,13 +100,43 @@ apply/destroy`, `helm upgrade/install/...`, `ansible-playbook`, `docker push`,
 deploy|s3 sync`; e `ssh/scp/sftp`, `rsync` para host remoto, `ssh://`, `git clone
 git@`, `wp @host|--ssh=`, `mysql/mysqldump/psql -h`. Uma linha produz no máximo um
 achado (primeira regra que casa), até 5 achados por tipo, com o trecho truncado e
-mascarado (mesmo `sanitize` das saídas de git) porque o achado vai para log e
-comentário no GitHub. Um `true` no contrato desliga aquele tipo.
+mascarado porque o achado vai para log e comentário no GitHub. Um `true` no
+contrato desliga aquele tipo.
 
-Limites declarados desta heurística: ela julga o que o candidato **adiciona**, não
-a intenção nem o ambiente; um comando proibido escondido em um binário, em um
-arquivo ignorado pelo git ou fora das linhas adicionadas não é detectado; a
-varredura para nos limites de arquivos/linhas e o relatório diz `truncated`.
+**Importante — `deploy: true` não concede capacidade.** O contrato é declarativo e
+**restritivo**: escrever `true` significa apenas "este contrato não proíbe deploy",
+e qualquer outra política (plataforma, projeto, ambiente) continua valendo. O
+aceite nunca libera o que o projeto não tem.
+
+### Verificável e não verificável (declarado, não fingido)
+
+| Aspecto | Verificável? | Mecanismo |
+|---|---|---|
+| paths entregues/autorizados | sim, determinístico | change set do git (`--porcelain -z -uall`) |
+| evidência exigida | sim | exit code do comando declarado no workflow |
+| comando proibido **presente** | sim (positivo) | varredura de padrões das linhas adicionadas |
+| **ausência** de acesso remoto/deploy na execução | **não** | o fork não observa rede/processos do agente; "sem achado" ≠ prova de ausência |
+| conteúdo/qualidade do entregue | não | gates, review e arquiteto |
+
+A distinção é declarada na resposta (`limits`) e no comentário de handoff, e não
+convertida em `PASS` silencioso.
+
+### Segurança da entrada não confiável
+
+- YAML: só decodificação de dados com tipos explícitos; tags recusadas pelo decoder
+  (`!foo`, `!ruby/object`, `!!python/...`) e âncoras recusadas pelo parser antes de
+  decodificar (sem alias/expansão, e portanto sem bom de aliases);
+- duplicidade ambígua (dois blocos ou duas chaves) é recusada, nunca "escolhida";
+- nenhum dado do contrato chega a um shell: o comando executado vem de
+  `delivery.gates`/`delivery.evidence` (configuração do projeto) e a issue só
+  contribui com **nomes** de evidência;
+- path traversal: padrão absoluto, com `..` ou com `\` é erro de schema; o match é
+  textual e ancorado, sem resolução de filesystem, então symlink não move escopo;
+- leitura de arquivo não rastreado usa `lstat` e recusa o que não for arquivo
+  regular (um symlink não faz a varredura ler fora do workspace);
+- achado que vai para log/comentário é mascarado, truncado e sem quebras de linha;
+  o texto humano tem `<` neutralizado (uma alteração do candidato não reescreve o
+  comentário nem forja marcação de handoff).
 
 ### 5. Sem candidato novo não há aceite a aplicar
 
@@ -116,14 +146,36 @@ reprovar: o candidato que está sendo retomado foi aceito pelo ciclo que o criou
 O relatório aparece no comentário de handoff e no log; nunca é inventado um
 "aceite verde".
 
-### 6. O veredicto vai para o log e para o comentário de handoff
+### 6. O veredicto é dado estruturado, não booleano
 
-O resultado do aceite entra no `result` de `Delivery.run/3`, na linha
-`acceptance contract:` do comentário de `ready-for-human` e no log
-(`Delivery acceptance passed|diverged|failed`), com a contagem de paths
-entregues, achados e evidências. Nenhum rótulo novo, nenhum arquivo de estado: a
-evidência continua transitória (PR/CI/comentário), como decidido no ADR-0006 da
-plataforma.
+O aceite devolve `SymphonyElixir.Delivery.Acceptance.Result`:
+
+```
+%Result{status, contract_version, mode, findings, evidence, change_set, limits}
+```
+
+- `status`: `:pass` | `:fail` | `:advisory` | `:not_configured` (issue sem
+  contrato) | `:not_applicable` (sem change set novo);
+- `findings`: `SymphonyElixir.PipelineContract.Finding` com `code` estável
+  (`invalid_contract`, `expected_path_missing`, `unexpected_path_changed`,
+  `required_evidence_missing`, `required_evidence_failed`,
+  `forbidden_deploy_detected`, `forbidden_remote_access_detected`), `category`
+  (`contract`/`scope`/`evidence`/`forbidden_operation`), `message` e `path`;
+  **sem score e sem ranking** — quem bloqueia é o `mode`;
+- `evidence`: registros observados (nome, status, comando; nunca saída, duração ou
+  contagem transitória);
+- `limits`: o que **não** foi verificado (verificação heurística de proibição,
+  varredura truncada, conteúdo não avaliado), para que um `pass` não seja lido como
+  prova.
+
+O veredicto aparace no `result` de `Delivery.run/3`, no log
+(`Delivery acceptance passed|diverged|failed`) e no comentário de handoff como
+marcação + JSON (`<!-- acceptance:result:<sha> -->`), que é a interface estável para
+a máquina de estados da review (#13) e para o architect runner (#14). Nada de
+rótulo novo e nada de arquivo de estado: a evidência continua transitória
+(PR/CI/comentário), como decidido no ADR-0006 da plataforma. Limite declarado:
+quando o aceite reprova, o run falha e **não** publica nem comenta (a evidência do
+bloqueio fica no log; o estado persistido de bloqueio é escopo da #13).
 
 ## Consequências
 

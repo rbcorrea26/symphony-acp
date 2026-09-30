@@ -331,9 +331,25 @@ pipeline_contract:
 - With no candidate change set (a `--resume-only` cycle over an already published candidate,
   or nothing to publish) the layer reports `not_applicable` instead of failing: that
   candidate was accepted by the cycle that created it.
-- The verdict is in the result of `Delivery.run/3`, in the `acceptance contract:` line of the
-  handoff comment and in the log (`Delivery acceptance passed|diverged|failed`). Nothing new
-  is persisted: the evidence stays in the PR/CI/comment.
+- The verdict is **structured data**, not a boolean: `status` (`:pass`, `:fail`,
+  `:advisory`, `:not_configured` for an issue without a contract, `:not_applicable` when there
+  is no candidate change set), `contract_version`, `mode`, `findings`, `evidence`,
+  `change_set` and `limits`. Each finding carries a deterministic `code`
+  (`invalid_contract`, `expected_path_missing`, `unexpected_path_changed`,
+  `required_evidence_missing`, `required_evidence_failed`, `forbidden_deploy_detected`,
+  `forbidden_remote_access_detected`), a `category`, a human `message` and an optional `path`.
+  There is no score and no ranking: the contract `mode` decides whether a finding blocks.
+- `limits` says what the layer did **not** verify — the forbidden-operation check is a pattern
+  scan of the added lines, so "no finding" is not a proof that the agent did not reach a remote
+  host or deploy, and the contents/quality of what was delivered belong to the gates, the
+  review and the architect. A pass is never reported as a proof of absence.
+- The verdict is in the result of `Delivery.run/3`, in the log
+  (`Delivery acceptance passed|diverged|failed`) and in the handoff comment as a
+  `<!-- acceptance:result:<sha> -->` marker plus JSON, which is the stable interface for the
+  review state machine and the architect runner (next increments). A rejected candidate is not
+  published and not commented: the evidence of the block lives in the run log.
+  `../docs/fork/acceptance-contract.md` documents the schema, the semantics per diff case, the
+  codes and every declared limit.
 - The candidate is the head SHA of the delivery branch that passed the local gates **and**
   whose check runs all concluded successfully **and** that was still the branch head when
   the observation finished. A push that lands during the observation invalidates it and

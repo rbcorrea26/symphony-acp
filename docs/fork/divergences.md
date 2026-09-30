@@ -187,24 +187,29 @@ O **bloco D da fase 7b** (contrato de aceite legível por máquina, issue
 pela branch `feat/phase7b-acceptance-contract` e é a primeira extensão do fork que acrescenta
 uma **camada de verificação** ao estágio de entrega: o aceite da issue
 (`pipeline_contract` v1: escopo `strict`/`advisory`, evidências nomeadas e proibições) passa a
-rodar antes de qualquer publicação, **separado** dos gates do repositório e do CI. Arquivos:
+rodar antes de qualquer publicação, **separado** dos gates do repositório e do CI, com
+veredicto estruturado (findings de código estável) persistido no comentário de handoff. A
+**fase 7b continua incompleta**: a review (`waiting-review`/`rework`, #13) e o architect runner
+(#14) não existem ainda. Arquivos:
 
 | Arquivo | Tipo | Motivo | Comportamento upstream afetado? |
 |---|---|---|---|
-| `docs/fork/adr/0006-acceptance-contract.md` | novo | decisão durável: schema v1 do contrato, política `strict`/`advisory`, evidência nomeada, regras e limites da varredura de proibição | não |
-| `elixir/lib/symphony_elixir/pipeline_contract.ex` | novo | parser/schema do `pipeline_contract` (data da issue, nunca código), matching de glob e achados puros de escopo/proibição | não (só existe com `delivery.enabled`) |
-| `elixir/lib/symphony_elixir/delivery/acceptance.ex` | novo | gate impuro do aceite: lê o change set, roda as evidências exigidas, decide por modo e resume o relatório | não (só existe com `delivery.enabled`) |
+| `docs/fork/adr/0006-acceptance-contract.md` | novo | decisão durável: schema v1, política `strict`/`advisory`, veredicto estruturado, evidência nomeada, o que é verificável e o que não é, segurança | não |
+| `docs/fork/acceptance-contract.md` | novo | documento operacional do aceite: schema, semântica por caso de diff, tabela de códigos, limites declarados, ponteiros para #13/#14 | não |
+| `elixir/lib/symphony_elixir/pipeline_contract.ex` | novo | parser/schema do `pipeline_contract` (data da issue, nunca código; tags e âncoras recusadas), globs, achados puros de escopo/proibição e o struct `Finding` | não (só existe com `delivery.enabled`) |
+| `elixir/lib/symphony_elixir/delivery/acceptance.ex` | novo | gate impuro do aceite: lê o change set, roda as evidências exigidas, decide por modo e descreve/persiste o veredicto | não (só existe com `delivery.enabled`) |
+| `elixir/lib/symphony_elixir/delivery/acceptance/result.ex` | novo | `Result`: status, `contract_version`, `mode`, findings, evidências, change set e `limits` (serializável em JSON) | não |
 | `elixir/lib/symphony_elixir/delivery/gates.ex` | novo | runner único de comando com timeout, compartilhado por gates e evidências (extraído do `delivery.ex`) | não |
-| `elixir/lib/symphony_elixir/delivery.ex` | alterado (aditivo) | ordem das três camadas (aceite → gates → evidências), `contract` no resultado, linha do aceite no comentário de handoff e `run_gates` delegando a `Delivery.Gates` | não (sem o bloco `delivery` o caminho é o upstream) |
-| `elixir/lib/symphony_elixir/delivery/git.ex` | alterado (aditivo) | `change_set/1` (porcelain `-z -uall`), `added_lines/1` (diff + não rastreados, limitado) e leitura crua de saída do git | não |
+| `elixir/lib/symphony_elixir/delivery.ex` | alterado (aditivo) | ordem das três camadas (aceite → gates → evidências), `contract` no resultado, linha + bloco JSON do aceite no comentário de handoff e `run_gates` delegando a `Delivery.Gates` | não (sem o bloco `delivery` o caminho é o upstream) |
+| `elixir/lib/symphony_elixir/delivery/git.ex` | alterado (aditivo) | `change_set/1` (porcelain `-z -uall`), `added_lines/1` (diff + não rastreados, limitado, sem seguir symlink) e leitura crua de saída do git | não |
 | `elixir/lib/symphony_elixir/config/schema.ex` | alterado (aditivo) | campo `delivery.evidence` (nome → comando) com validação de nome/comando não vazios | não (default `{}`) |
-| `elixir/test/symphony_elixir/pipeline_contract_test.exs` | novo | schema, glob, escopo e proibições do parser | não |
-| `elixir/test/symphony_elixir/delivery_acceptance_test.exs` | novo | gate sobre git real (change set, evidências, resume, limites, arquivo ilegível/binário) | não |
-| `elixir/test/symphony_elixir/delivery_test.exs` | alterado | casos ponta a ponta: bloqueio `strict`, regressão #64/#65, `advisory`, evidência verde/vermelha, contrato inválido e segundo ciclo | não |
-| `elixir/README.md` | alterado | documenta `delivery.evidence` e a camada de aceite | não |
-| `docs/fork/delivery-and-promotion.md` | alterado | fluxo com as três camadas, schema na issue e limites declarados | não |
-| `docs/fork/lifecycle.md` | alterado | o contrato de aceite deixa de ser pendência da fase 7b | não |
-| `docs/fork/README.md` | alterado | status da fase 7b (bloco D implementado) | não |
+| `elixir/test/symphony_elixir/pipeline_contract_test.exs` | novo | schema, duplicidade, tags/âncoras, glob, escopo e proibições do parser | não |
+| `elixir/test/symphony_elixir/delivery_acceptance_test.exs` | novo | gate sobre git real (change set, evidências, resume, limites, symlink/binário/ilegível, idempotência, JSON) | não |
+| `elixir/test/symphony_elixir/delivery_test.exs` | alterado | casos ponta a ponta: bloqueio `strict`, regressão #64/#65, `advisory` persistido, evidência verde/vermelha, contrato inválido, segundo ciclo | não |
+| `elixir/README.md` | alterado | documenta `delivery.evidence`, os findings e os `limits` do aceite | não |
+| `docs/fork/delivery-and-promotion.md` | alterado | fluxo com as três camadas e ponteiro para o documento do aceite | não |
+| `docs/fork/lifecycle.md` | alterado | o contrato de aceite deixa de ser pendência; #13/#14 seguem pendentes | não |
+| `docs/fork/README.md` | alterado | status da fase 7b (bloco D implementado; 7b **não** concluída) | não |
 | `docs/fork/adr/README.md` | alterado | índice do ADR `0006` | não |
 
 ## Regras do registro

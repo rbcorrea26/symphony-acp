@@ -36,6 +36,10 @@ o schema v1 e os limites estão em [adr/0006](adr/0006-acceptance-contract.md).
 
 ### Contrato de aceite na issue
 
+O aceite lê um `pipeline_contract` (schema v1, corpo da issue): escopo
+`strict`/`advisory` sobre o change set, evidências nomeadas e proibições
+(`remote_access`/`deploy`) por varredura limitada das linhas adicionadas.
+
 ```yaml
 pipeline_contract:
   version: 1
@@ -43,32 +47,31 @@ pipeline_contract:
   expected_paths:                    # globs; cada um precisa ser entregue
     - docs/changes/2026-09-30-pipeline-e2e-smoke.md
     - tests/agent/run-tests.sh
-  allowed_extra_paths: []            # globs autorizados além dos esperados
-  required_evidence:                 # nomes exigidos para este candidato
+  allowed_extra_paths: []
+  required_evidence:
     - agent-tests
     - repository-gates
-  remote_access: false               # ausente = false (proibição explícita)
+  remote_access: false
   deploy: false
 ```
 
-- o contrato é lido do **corpo da issue** (bloco fenced que declare
-  `pipeline_contract:`, ou um corpo que comece com a chave); conteúdo da issue
-  nunca é executado;
-- `strict`: path esperado não entregue, path não autorizado alterado, proibição
-  detectada ou evidência exigida ausente **reprovam o aceite sem publicar**;
-- `advisory`: a divergência é reportada no log e no comentário de handoff e a
-  entrega continua (a review arquitetural decide);
-- sem contrato no corpo da issue, a camada não se aplica e o comportamento é o do
-  ADR-0005;
-- evidência é **nomeada**: a issue exige o nome, o workflow fornece o comando em
-  `delivery.evidence`; `repository-gates` é reservado e satisfeito pelo próprio
-  estágio de gates;
-- proibição (`remote_access`/`deploy` = `false`) é detectada por varredura das
-  **linhas adicionadas** pelo candidato, com regras fixas e limitadas (ver
-  [adr/0006](adr/0006-acceptance-contract.md) §4) — é um achado para o humano,
-  não uma prova de intenção;
-- sem candidato novo (ciclo `--resume-only`, nada a publicar), o relatório diz
-  `not_applicable` em vez de reprovar.
+- `strict`: achado bloqueia a publicação; `advisory`: achado é reportado e o
+  handoff continua (a revisão arquitetural decide, #14);
+- issue **sem** contrato → camada `not_configured` (comportamento anterior intacto);
+- evidência é **nome**: o registry é `delivery.evidence` (workflow) + o nome
+  reservado `repository-gates` (satisfeito pelo estágio de gates);
+- achados são findings com código estável, e o veredicto é persistido como JSON no
+  comentário de handoff (interface para #13/#14).
+
+Schema, semântica por caso de diff, tabela de códigos, o que é verificável e o que
+**não** é, e os limites declarados: [acceptance-contract.md](acceptance-contract.md)
+(decisão em [adr/0006](adr/0006-acceptance-contract.md)).
+
+> `acceptance PASS` ≠ `repository gates PASS` ≠ `CI PASS` ≠ `review PASS` ≠ `architect PASS`.
+
+A review (`waiting-review`/`rework`) e o architect runner **não** existem nesta
+fase: o handoff continua sendo o do ADR-0005 e a fase 7b **não** está concluída
+(#13 e #14 continuam pendentes).
 
 
 ## Configuração (bloco `delivery` do `WORKFLOW.md`)

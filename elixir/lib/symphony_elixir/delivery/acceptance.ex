@@ -160,14 +160,14 @@ defmodule SymphonyElixir.Delivery.Acceptance do
   # persisted. The first item that does not fit and every item after it are counted
   # as omitted.
   defp fit(items, key, payload) do
-    {kept, _omitted, payload} =
-      Enum.reduce_while(items, {[], 0, payload}, fn item, {kept, omitted, payload} ->
+    {kept, payload} =
+      Enum.reduce_while(items, {[], payload}, fn item, {kept, payload} ->
         attempt = %{payload | key => kept ++ [item]}
 
         if byte_size(Jason.encode!(attempt)) <= @max_persisted_bytes do
-          {:cont, {kept ++ [item], omitted, attempt}}
+          {:cont, {kept ++ [item], attempt}}
         else
-          {:halt, {kept, omitted, payload}}
+          {:halt, {kept, payload}}
         end
       end)
 

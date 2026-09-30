@@ -58,6 +58,10 @@ Regras do parser (`SymphonyElixir.PipelineContract`):
 | uma mesma chave repetida no mapeamento (bloco, flow ou `? chave`) | `{:duplicate_field, "scope_mode"}` → reprova |
 | `pipeline_contract:` **dentro de um scalar** (exemplo em bloco de documentação) | não é declaração: o parser não vê a chave ali, então o corpo segue `:absent`; um bloco que não pode ser decodificado **e** cujo texto cita a chave é erro, nunca ausência |
 | conteúdo de block scalar (`key: \|`, `key: >-`, `- \|`) | é **texto**: a chave ou a âncora escrita dentro dele não conta (o escalar termina na primeira linha menos indentada) |
+| cabeçalho de block scalar com os dois indicadores (`\|2-`, `\|-2`) | as duas ordens valem: o conteúdo é texto nas duas |
+| string com aspas que atravessa linhas físicas | a continuação continua sendo **scalar** (o estado da citação sobrevive ao `\n`), então `&notes` ali não é âncora |
+| cerca de fechamento com o mesmo marcador e mais caracteres que a abertura | fecha o bloco (CommonMark): a prosa seguinte não é lida como YAML |
+| `pipeline_contract:` dentro de um scalar **e** bloco que não pode ser decodificado | a dica de chave roda no texto com o scalar blankado: um scalar não declara o contrato (nem sequer para reprovar), mas um bloco que cita a chave fora de scalar segue falhando fechado |
 | aspas simples escapada (`''`) dentro de scalar | continua sendo **um** scalar (`'docs/it''s &notes.md'` não é scalar + âncora) |
 | padrão que não é UTF-8 (ex.: um `!!binary`) | `{:invalid_pattern, _, :not_utf8}` → reprova (a comparação de paths é sobre UTF-8) |
 | tag YAML (`!foo`, `!ruby/object`, `!!python/...`) | `{:invalid_yaml, %{type: :unrecognized_node}}` → reprova |
@@ -178,7 +182,7 @@ apenas "este contrato não proíbe". Quem autoriza deploy é a política da plat
 | Situação | Status do veredicto | Efeito no run |
 |---|---|---|
 | contrato ausente | `:not_configured` | nenhum (comportamento anterior, ADR-0005) |
-| sem change set novo (`--resume-only`, nada a publicar) | `:not_applicable` | nenhum (o candidato publicado foi aceito quando foi criado) |
+| sem change set novo (`--resume-only`, nada a publicar) | `:not_applicable` | nenhum (o candidato publicado foi aceito quando foi criado) — o limite disso está na seção 6 |
 | `strict`, sem achados | `:pass` | segue: gates → evidências → publicação |
 | `strict`, com achados | `:fail` | run falha **sem publicar** (nada de branch/PR/rótulo/comentário) |
 | `strict`, varredura de proibição **truncada** | `:fail` (`prohibition_scan_truncated`) | run falha sem publicar: um scan parcial não certifica ausência de proibição |
@@ -189,6 +193,20 @@ Idempotência: o veredicto é função de (contrato, change set, comandos de
 evidência), então repetir o aceite sobre o mesmo candidato dá o mesmo resultado; um
 retry não publica nada em caso de falha e não duplica o comentário em caso de
 sucesso (o comentário é chaveado pelo SHA do candidato).
+
+### Retomada (`--resume-only`) e contrato alterado (limite declarado)
+
+Quando não há change set novo, o escopo é `not_applicable`: o candidato publicado foi
+aceito pelo ciclo que o criou, com o contrato **em vigor naquele momento**, e o run
+de retomada só reexecuta as **evidências** exigidas pelo contrato atual (elas não
+dependem do diff). Limite declarado: se o corpo da issue declarar um contrato **mais
+exigente** depois da publicação e o run for retomado, os requisitos de **escopo**
+novos não são reavaliados — a mudança candidato↔base não está no workspace. Fechar
+isso exigiria reavaliar o diff do candidato contra a base (um `fetch` no meio da
+entrega, que este estágio evita de propósito: a única rede que ele usa é o push) ou
+persistir um fingerprint do contrato aceito; os dois são incremento e não esta
+camada. O que fica auditável é o comentário de handoff, que registra o veredicto
+de então com o SHA do candidato.
 
 ## 7. Códigos de finding
 

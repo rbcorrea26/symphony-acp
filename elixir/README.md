@@ -321,7 +321,12 @@ pipeline_contract:
   quoted (`"scope_mode":`, `'scope_mode':`), tagged or with the explicit-key indicator
   (`? key`), and duplicates are counted on the parser nodes, before the decoder collapses equal
   keys — so a declared contract is never classified as absent because of the key style and two
-  equal keys are never silently one. An unenforceable contract (unknown version or field,
+  equal keys are never silently one. The claim hint that fails an unreadable block closed runs
+  on the text with the *scalar content* blanked: a `pipeline_contract:` written inside a
+  comment, a quoted value, a block scalar (`key: |`, any header order) or the continuation of a
+  quoted scalar is data, not a declaration — while a quoted key in key position
+  (`"pipeline_contract":`) is unquoted first and stays visible. An unenforceable contract
+  (unknown version or field,
   invalid pattern, a pattern that is not valid UTF-8, broken YAML, two contracts, a repeated
   key, an anchor) fails the run instead of being ignored; an issue without a contract is simply
   not subject to this layer, and a mention of the key inside a string is data, not a
@@ -344,7 +349,10 @@ pipeline_contract:
   read, while `advisory` reports the divergence and continues.
 - With no candidate change set (a `--resume-only` cycle over an already published candidate,
   or nothing to publish) the layer reports `not_applicable` instead of failing: that
-  candidate was accepted by the cycle that created it.
+  candidate was accepted by the cycle that created it. Declared limit: a contract made
+  *stricter* after that publication is not re-evaluated on resume (the scope needs the
+  candidate diff, which the workspace no longer holds); the demanded *evidence* of the current
+  contract is still executed. `../docs/fork/acceptance-contract.md` §6 declares it.
 - Candidate reads fail closed: a change set above 5 000 entries
   (`change_set_too_large`) or with a non-UTF-8 path (`change_set_not_utf8`) is an error
   instead of a partial verdict, and every scan bound reached is declared

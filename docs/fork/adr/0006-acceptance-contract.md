@@ -184,6 +184,14 @@ o run não promove (nem rotula) um commit que ele não aceitou e cujos gates loc
 não rodaram aqui. É a mesma regra do run que publica: o veredicto pertence ao commit
 observado, e o observado tem de ser o aceito.
 
+Limite declarado da retomada: a verificação é sobre o **candidato**, não sobre o
+contrato. Se o corpo da issue ficar **mais exigente** depois da publicação, o run
+retomado reexecuta as evidências exigidas pelo contrato atual, mas o **escopo** novo
+continua `not_applicable` (o diff candidato↔base não está no workspace, e o estágio
+não faz `fetch` no meio da entrega). Fechar isso exige reavaliar o diff contra a base
+ou persistir um fingerprint do contrato aceito — incremento, declarado como tal em
+`../acceptance-contract.md` §6.
+
 ### 6. O veredicto é dado estruturado, não booleano
 
 O aceite devolve `SymphonyElixir.Delivery.Acceptance.Result`:

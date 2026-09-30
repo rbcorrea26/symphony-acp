@@ -320,9 +320,11 @@ pipeline_contract:
   pattern, broken YAML, two contracts) fails the run instead of being ignored; an issue
   without a contract is simply not subject to this layer.
 - Evidence is named: `required_evidence` demands names, `delivery.evidence` supplies the
-  command (mapped evidence commands use `delivery.gates_timeout_ms`). The reserved name
-  `repository-gates` is satisfied by the gates stage itself. A demanded name without a
-  provider is a finding, never a silent pass.
+  command. The reserved name `repository-gates` is satisfied by the gates stage itself. A
+  demanded name without a provider is a finding, never a silent pass, and the phase has **one
+  budget** (`delivery.gates_timeout_ms` shared by every command), because the demanded names
+  come from the untrusted issue and multiplying a timeout per name would occupy the worker for
+  hours.
 - Prohibitions are detected by scanning the **added lines** of the candidate (tracked diff
   plus untracked files, bounded and reported as truncated when the cap is reached) with the
   fixed rules documented in `../docs/fork/adr/0006-acceptance-contract.md`. A match is a
@@ -331,6 +333,10 @@ pipeline_contract:
 - With no candidate change set (a `--resume-only` cycle over an already published candidate,
   or nothing to publish) the layer reports `not_applicable` instead of failing: that
   candidate was accepted by the cycle that created it.
+- Candidate reads fail closed: a change set above 5 000 entries
+  (`change_set_too_large`) or with a non-UTF-8 path (`change_set_not_utf8`) is an error
+  instead of a partial verdict, and every scan bound reached is declared
+  (`change_scan_truncated`).
 - The scope is evaluated again **after** the gates and the evidence commands, because they run
   inside the workspace and may create files: what is published is the final change set, so the
   final one is what gets accepted (a gate artifact has to be authorized in

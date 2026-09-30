@@ -70,6 +70,11 @@ no repositório": a comparação é com o **change set do candidato** (o que ser
 publicado), obtido de `git status --porcelain -z -uall`. Um arquivo que já existia
 na base e não foi tocado **não satisfaz** o contrato — foi exatamente o caso #64.
 
+A leitura do change set **falha fechada**: acima de 5 000 entradas é erro
+(`change_set_too_large`) e um path que não é UTF-8 válido é recusado
+(`change_set_not_utf8`) em vez de derrubar o run ou aceitar dado parcial — o escopo
+nunca é decidido sobre um change set incompleto.
+
 O escopo é avaliado **duas vezes** no run: antes dos gates (fail-fast) e **depois**
 das evidências, porque gates e comandos de evidência rodam dentro do workspace e
 podem criar arquivos. O que é publicado é o change set final, então é ele que
@@ -102,10 +107,16 @@ regex ancorada, sem resolução de filesystem, padrão validado (sem absoluto, `
 2. os nomes declarados pelo projeto em `delivery.evidence` (nome → comando).
 
 Um nome sem provider é `required_evidence_missing`; comando com exit ≠ 0 ou que
-estoura `delivery.gates_timeout_ms` é `required_evidence_failed`. A evidência
+estoura o orçamento é `required_evidence_failed`. A evidência
 **nunca é inventada pelo agente**: ela é o exit code de um comando declarado no
 workflow do projeto, executado no workspace da issue. Não se persiste duração,
 contagem de testes, SHA ou saída de comando — só nome, status e comando.
+
+A fase de evidência tem **um orçamento**, não um por comando: como o
+`required_evidence` vem de entrada não confiável (até 256 nomes), todos os
+comandos dividem `delivery.gates_timeout_ms`; quando o orçamento acaba, o que
+faltou executar é `required_evidence_failed` com o status `deadline_exceeded`
+(um contrato não pode ocupar o worker por horas multiplicando o timeout).
 
 ## 5. Proibições: o que é verificável e o que não é
 
@@ -153,7 +164,7 @@ sucesso (o comentário é chaveado pelo SHA do candidato).
 | `expected_path_missing` | `scope` | path esperado não faz parte do change set do candidato |
 | `unexpected_path_changed` | `scope` | path alterado fora de `expected_paths` ∪ `allowed_extra_paths` |
 | `required_evidence_missing` | `evidence` | nome exigido sem provider no registry |
-| `required_evidence_failed` | `evidence` | provider com exit ≠ 0 ou timeout |
+| `required_evidence_failed` | `evidence` | provider com exit ≠ 0, timeout ou orçamento da fase esgotado |
 | `forbidden_deploy_detected` | `forbidden_operation` | regra de deploy casou em linha adicionada |
 | `forbidden_remote_access_detected` | `forbidden_operation` | regra de acesso remoto casou em linha adicionada |
 
@@ -172,9 +183,14 @@ persistido no comentário de handoff como marcação + JSON:
 
 O JSON é a interface estável para a máquina de estados da review (#13) e para o
 architect runner (#14): eles leem `status`, `findings[].code`/`category`/`path` e
-`limits`, sem parsear prosa. Limite declarado: quando o aceite **reprova**, o run
-falha e **não** publica nem comenta (a evidência fica no log do run) — o estado de
-bloqueio persistido no GitHub é escopo da #13.
+`limits`, sem parsear prosa. O payload é **limitado a 16 KiB**: acima disso ele é
+persistido de forma compacta (sem os comandos de evidência, que é a parte maior) com
+o campo `persisted` dizendo que foi compactado — perder o texto do comando é melhor
+que perder o veredicto, e o comentário do GitHub tem limite de tamanho. O comentário
+é escrito **antes** dos rótulos de promoção, para que uma falha de escrita não deixe
+a issue promovida sem o veredicto. Limite declarado: quando o aceite **reprova**, o
+run falha e **não** publica nem comenta (a evidência fica no log do run) — o estado
+de bloqueio persistido no GitHub é escopo da #13.
 
 ## 9. Segurança
 

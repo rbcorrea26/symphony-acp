@@ -50,6 +50,7 @@ defmodule SymphonyElixir.DeliveryTest do
             requests: [],
             labels: attrs[:labels] || [],
             fail_label_delete: attrs[:fail_label_delete] || false,
+            fail_comment: attrs[:fail_comment],
             comments: [],
             review: attrs[:review] || :created
           }
@@ -154,8 +155,15 @@ defmodule SymphonyElixir.DeliveryTest do
     end
 
     defp dispatch_repo(state, "POST", ["issues", _number, "comments"], _params, body, _checks) do
-      comment = %{"body" => body["body"]}
-      {{:ok, %{status: 201, body: comment}}, %{track(state, :comment_created) | comments: state.comments ++ [comment]}}
+      case state.fail_comment do
+        nil ->
+          comment = %{"body" => body["body"]}
+          created = %{track(state, :comment_created) | comments: state.comments ++ [comment]}
+          {{:ok, %{status: 201, body: comment}}, created}
+
+        {:failed, status, message} ->
+          {{:error, {:github_request_failed, status, message}}, track(state, {:comment_failed, status})}
+      end
     end
 
     defp dispatch(state, method, ["repos", @owner, @name | rest], params, body, checks) do
@@ -772,6 +780,24 @@ defmodule SymphonyElixir.DeliveryTest do
     labels_at = Enum.find_index(state.requests, &match?({:labels, _}, &1))
 
     assert comment_at < labels_at
+  end
+
+  test "a comment that cannot be written does not promote the issue", %{workspace: workspace} do
+    configure!([])
+    fake = fake!(labels: ["pipeline:ready"], fail_comment: {:failed, 422, %{"message" => "body too long"}})
+    change_answer!(workspace, "42")
+
+    assert {:error, {:github_request_failed, 422, _body}} = Delivery.run(workspace, @issue, github_opts(fake))
+
+    state = FakeGitHub.state(fake)
+
+    # The promotion state did not advance: no handoff label, no entry label removed
+    # and no comment written — the machine-readable verdict was not persisted, so the
+    # issue must not look delivered (the invariant of `handoff/7`).
+    assert state.comments == []
+    assert state.labels == ["pipeline:ready"]
+    refute Enum.any?(state.requests, &match?({:labels, _}, &1))
+    refute Enum.any?(state.requests, &match?({:label_removed, _}, &1))
   end
 
   test "a label that cannot be removed fails the delivery instead of being ignored", %{workspace: workspace} do

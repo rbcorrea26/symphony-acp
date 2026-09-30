@@ -61,8 +61,15 @@ defmodule SymphonyElixir.PipelineContract do
       (`@max_items`) and the patterns (`@max_pattern_length`);
     * a body that declares `pipeline_contract` twice is rejected as ambiguous
       instead of picking one (both two blocks and two keys in the same block), and a
-      key repeated inside the mapping is rejected too — the key may be written
-      plain or quoted, and it is read the same way the YAML decoder reads it;
+      key repeated inside the mapping is rejected too: the keys are counted on the
+      **parser nodes**, before the decoder collapses equal keys, so the style of
+      the key (plain, `"quoted"`, `'quoted'`, tagged or the explicit `? key`) never
+      changes the answer;
+    * the *text* of the block is never the source of truth for that count: a regex
+      hint only **widens** the failure set (a block whose text claims the key but
+      that cannot be decoded is an error, never `absent`), and a block with a
+      structural anchor is refused without being parsed — an alias graph (a shared
+      `&name`) is never expanded;
     * patterns are never resolved against the filesystem: an absolute path, a `..`
       segment or a `\` separator is a schema error, and the match is a pure,
       anchored comparison against the candidate change set — a symlink cannot
@@ -104,16 +111,21 @@ defmodule SymphonyElixir.PipelineContract do
 
   @version 1
   @fields ~w(version scope_mode expected_paths allowed_extra_paths required_evidence remote_access deploy)
-  # One key of the contract document. YAML accepts the plain form, a quoted scalar
-  # (`"pipeline_contract":`, what a template or a JSON-ish generator produces), a tag
-  # before the key and the explicit-key indicator (`? key`, with its `:` on the same
-  # line or on the next one). All of them are recognized, so the checks look at the
-  # same keys the decoder looks at: a declared contract is never reported as
-  # `absent` because of the key style, and a repeated key is never collapsed in
-  # silence. The tag token excludes whitespace and `:`, so a value is never read as
-  # a tag.
-  @contract_key ~r/(?:^[ \t]*|[{,]\s*)(?:\?[ \t]*)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/m
-  @contract_key_start ~r/^[ \t]*(?:\?[ \t]*)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/
+  @contract_field "pipeline_contract"
+  # Text hint of the contract key, in the shapes a YAML writer produces: plain, a
+  # quoted scalar (`"pipeline_contract":`, what a template or a JSON-ish generator
+  # produces), a tag or an anchor before the key, the explicit-key indicator
+  # (`? key`, with its `:` on the same line or on the next one) and the flow
+  # separator. It is **not** what decides whether the body declares a contract —
+  # that is read from the parser nodes (`observe/1`) —; it only *widens* the
+  # failure set: a block whose text claims the key but that cannot be decoded is an
+  # error instead of `absent`, and an anchored key is routed to the anchor refusal
+  # instead of being parsed (an alias graph must never be expanded). A mention of
+  # the key inside a scalar is data, not a declaration, and the parser is what
+  # tells the two apart. The tag/anchor token excludes whitespace and `:`, so a
+  # value is never read as a tag.
+  @contract_key ~r/(?:^[ \t]*|[{,]\s*)(?:\?[ \t]*)?(?:&[^\s:,]+[ \t]+)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/m
+  @contract_key_start ~r/^[ \t]*(?:\?[ \t]*)?(?:&[^\s:,]+[ \t]+)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/
   @fence ~r/^[ \t]*(`{3,}|~{3,})/
   @evidence_name ~r/^[a-z0-9][a-z0-9._-]*$/
   @max_pattern_length 512
@@ -201,6 +213,10 @@ defmodule SymphonyElixir.PipelineContract do
   `{:error, {:pipeline_contract_invalid, reason}}` when the issue declares a
   contract that cannot be enforced — including an unsupported version, an
   unknown field, an ambiguous body with two contracts and invalid YAML.
+
+  The declaration itself is read from the YAML parser nodes (every key style is
+  the same key) and only a body the parser cannot read falls back to the text
+  hint, which can only fail closed.
   """
   @spec parse(String.t() | nil) :: :absent | {:ok, t()} | {:error, {:pipeline_contract_invalid, term()}}
   def parse(nil), do: :absent
@@ -208,7 +224,7 @@ defmodule SymphonyElixir.PipelineContract do
   def parse(body) when is_binary(body) do
     case candidate(body) do
       :absent -> :absent
-      {:ok, yaml} -> decode(yaml)
+      {:contract, found} -> decode_found(found)
       {:error, reason} -> {:error, {:pipeline_contract_invalid, reason}}
     end
   end
@@ -240,7 +256,8 @@ defmodule SymphonyElixir.PipelineContract do
   def path_findings(%__MODULE__{} = contract, changed_paths) when is_list(changed_paths) do
     changed = changed_paths |> Enum.map(&String.replace_prefix(&1, "./", "")) |> Enum.uniq()
     expected = Enum.map(contract.expected_paths, &{&1, glob_regex(&1)})
-    authorized = Enum.map(contract.expected_paths ++ contract.allowed_extra_paths, &glob_regex/1)
+    allowed = Enum.map(contract.allowed_extra_paths, &glob_regex/1)
+    authorized = Enum.map(expected, &elem(&1, 1)) ++ allowed
 
     delivered = expected |> Enum.filter(&delivered?(&1, changed)) |> Enum.map(&elem(&1, 0))
     unexpected = Enum.reject(changed, fn path -> Enum.any?(authorized, &Regex.match?(&1, path)) end)
@@ -353,61 +370,126 @@ defmodule SymphonyElixir.PipelineContract do
   # --- extraction ---------------------------------------------------------
 
   defp candidate(body) do
-    case body |> fenced_blocks() |> Enum.filter(&Regex.match?(@contract_key, &1)) do
-      [only] -> with :ok <- single_contract(only), do: {:ok, only}
-      [] -> unfenced(body)
-      many -> {:error, {:ambiguous_contracts, length(many)}}
+    case declared(fenced_blocks(body)) do
+      {:ok, []} -> unfenced(body)
+      {:ok, [only]} -> {:contract, only}
+      {:ok, many} -> {:error, {:ambiguous_contracts, length(many)}}
+      {:error, reason} -> {:error, reason}
     end
   end
 
+  # Which fenced blocks declare the contract. The answer comes from the YAML parser
+  # (see `observe/1`), so the style of the key cannot change it, and two keys —
+  # in one block or in two — are ambiguity instead of a silent choice.
+  defp declared(blocks) do
+    Enum.reduce_while(blocks, {:ok, []}, fn block, {:ok, acc} ->
+      case classify(block) do
+        :absent -> {:cont, {:ok, acc}}
+        {:contract, found} -> {:cont, {:ok, acc ++ [found]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # A block is classified on its text **before** it is parsed when it carries a
+  # structural anchor, because parsing it would expand the alias graph: an anchored
+  # key is refused (the hint says the block claims the key) and an anchored block
+  # that claims nothing is simply not the contract, as before. A block above the size
+  # cap is not parsed either — the claim decides, and the size error comes from
+  # `decode/1`.
+  defp classify(block) do
+    case anchor(block) do
+      nil ->
+        classify_parsed(block)
+
+      anchor ->
+        if claimed?(block), do: {:error, {:anchors_not_supported, anchor}}, else: :absent
+    end
+  end
+
+  defp classify_parsed(block) when byte_size(block) > @max_contract_bytes do
+    if claimed?(block), do: {:contract, {block, nil}}, else: :absent
+  end
+
+  defp classify_parsed(block) do
+    case observe(block) do
+      {:ok, %{contracts: 0}} -> :absent
+      {:ok, %{contracts: 1} = observation} -> {:contract, {block, observation}}
+      {:ok, %{contracts: many}} -> {:error, {:duplicate_contract_key, many}}
+      :invalid -> if claimed?(block), do: {:contract, {block, nil}}, else: :absent
+    end
+  end
+
+  # An unfenced body is a contract only when it starts with the key (the same shape
+  # the YAML decoder reads): a mention of the key in the middle of the body is prose,
+  # not a declaration.
   defp unfenced(body) do
     trimmed = String.trim_leading(body)
 
-    if Regex.match?(@contract_key_start, trimmed) do
-      with :ok <- single_contract(trimmed), do: {:ok, trimmed}
-    else
-      :absent
+    if claimed_start?(trimmed), do: classify(trimmed), else: :absent
+  end
+
+  defp decode_found({block, observation}) do
+    with :ok <- duplicate_field(observation), do: decode(block)
+  end
+
+  # The decoder keeps one of two equal keys *inside* the mapping silently, so a
+  # repeated field is refused: the contract is data and ambiguity is not acceptable.
+  # The count of `pipeline_contract` keys was already settled by `classify/1`, and a
+  # `nil` observation means the block was above the size cap (which `decode/1`
+  # reports as `contract_too_large`). The reported field follows the schema order,
+  # so the finding is deterministic.
+  defp duplicate_field(nil), do: :ok
+  defp duplicate_field(%{fields: []}), do: :ok
+
+  defp duplicate_field(%{fields: [field | _rest]}) do
+    {:error, {:pipeline_contract_invalid, {:duplicate_field, field}}}
+  end
+
+  # What the YAML parser sees, before the decoder collapses duplicates: every
+  # document of the block as a keyword list (`maps_as_keywords`), so the contract key
+  # and the fields of its mapping are counted *semantically* — `"scope_mode"`,
+  # `'scope_mode'`, `? scope_mode` and `scope_mode` are the same key, and two equal
+  # keys are two keys. The parser is only asked what it reads; the value is decoded
+  # by `decode/1`, which is what the schema validates. `YamlElixir` never raises on
+  # the document: it converts a parser failure (including an internal error) into
+  # `{:error, _}`, which is this function's `:invalid`.
+  defp observe(block) do
+    case YamlElixir.read_all_from_string(block, maps_as_keywords: true) do
+      {:ok, documents} -> {:ok, observed(documents)}
+      {:error, _reason} -> :invalid
     end
   end
 
-  # Two `pipeline_contract` keys in the same document would let the YAML decoder
-  # keep one of them silently (it does), so ambiguity is refused instead of
-  # guessed. Anchors are refused before decoding, for the reason in @anchor_token.
-  defp single_contract(block) do
-    with :ok <- one_contract_key(block),
-         :ok <- no_duplicate_field(block) do
-      reject_anchors(block)
-    end
+  defp observed(documents) do
+    documents
+    |> Enum.flat_map(&mapping_pairs/1)
+    |> Enum.filter(fn {key, _value} -> key == @contract_field end)
+    |> Enum.reduce(%{contracts: 0, fields: []}, fn {_key, value}, acc ->
+      %{acc | contracts: acc.contracts + 1, fields: acc.fields ++ duplicated_fields(value)}
+    end)
   end
 
-  defp one_contract_key(block) do
-    case Regex.scan(@contract_key, block) do
-      [_only] -> :ok
-      many -> {:error, {:duplicate_contract_key, length(many)}}
-    end
+  defp duplicated_fields(value) do
+    counts = value |> mapping_pairs() |> Enum.frequencies_by(&elem(&1, 0))
+
+    Enum.filter(@fields, &(Map.get(counts, &1, 0) > 1))
   end
 
-  # The decoder also keeps one of two equal keys *inside* the mapping silently, so
-  # a repeated field is refused: the contract is data and ambiguity is not
-  # acceptable. Only key-shaped occurrences count (`^  field:`, `{field:` or the
-  # quoted form `"field":`), so a commented example inside the block is not a
-  # duplicate.
-  defp no_duplicate_field(block) do
-    case Enum.find(@fields, &(length(Regex.scan(field_pattern(&1), block)) > 1)) do
-      nil -> :ok
-      field -> {:error, {:duplicate_field, field}}
-    end
+  defp mapping_pairs(pairs) when is_list(pairs) do
+    Enum.filter(pairs, &(is_tuple(&1) and tuple_size(&1) == 2 and is_binary(elem(&1, 0))))
   end
 
-  # The same key shape as `@contract_key`, for one field of the mapping.
-  defp field_pattern(field) do
-    ~r/(?:^[ \t]*|[{,]\s*)(?:\?[ \t]*)?(?:!!?[^\s:,]+[ \t]+)?["']?#{field}["']?[ \t]*(?::|$)/m
-  end
+  defp mapping_pairs(_other), do: []
 
-  defp reject_anchors(block) do
+  defp claimed?(block), do: Regex.match?(@contract_key, block)
+
+  defp claimed_start?(block), do: Regex.match?(@contract_key_start, block)
+
+  defp anchor(block) do
     case Regex.run(@anchor_token, without_scalars(block)) do
-      nil -> :ok
-      [match | _rest] -> {:error, {:anchors_not_supported, String.trim(match)}}
+      nil -> nil
+      [match | _rest] -> String.trim(match)
     end
   end
 
@@ -417,12 +499,13 @@ defmodule SymphonyElixir.PipelineContract do
   # or a comment only begins where YAML allows it — after a blank, after
   # `:`/`[`/`,`/`{` or at the start of a line —, so a quote inside a plain scalar
   # (`it's`) stays data too. Blanking keeps the position of what is left, which is
-  # what the token class of `@anchor_token` needs around the `&`.
+  # what the token class of `@anchor_token` needs around the `&`; it works on bytes,
+  # so a path that is not valid UTF-8 cannot make it crash either.
   defp without_scalars(block) do
     block
-    |> String.to_charlist()
+    |> :binary.bin_to_list()
     |> blank_scalars(:plain, ?\n, [])
-    |> List.to_string()
+    |> :binary.list_to_bin()
   end
 
   defp blank_scalars([], _state, _previous, acc), do: Enum.reverse(acc)
@@ -572,6 +655,7 @@ defmodule SymphonyElixir.PipelineContract do
 
   defp normalize_pattern(pattern) when is_binary(pattern) do
     cond do
+      not String.valid?(pattern) -> {:error, :not_utf8}
       String.trim(pattern) == "" -> {:error, :empty_pattern}
       String.length(pattern) > @max_pattern_length -> {:error, :pattern_too_long}
       String.contains?(pattern, "\\") -> {:error, :invalid_path_separator}

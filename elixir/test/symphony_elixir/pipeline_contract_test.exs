@@ -292,6 +292,156 @@ defmodule SymphonyElixir.PipelineContractTest do
       assert {:error, {:pipeline_contract_invalid, {:ambiguous_contracts, 2}}} = Contract.parse(quoted)
     end
 
+    test "every style of the key is the same key: single quotes included" do
+      body = """
+      ```yaml
+      'pipeline_contract':
+        version: 1
+        scope_mode: advisory
+        expected_paths:
+          - docs/x.md
+      ```
+      """
+
+      assert {:ok, contract} = Contract.parse(body)
+      assert contract.scope_mode == :advisory
+      assert contract.expected_paths == ["docs/x.md"]
+    end
+
+    test "a duplicate written in mixed styles is still a duplicate" do
+      # The count comes from the parser nodes, so `pipeline_contract:` and
+      # `"pipeline_contract":` are two keys, not one the decoder would collapse.
+      mixed = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+      "pipeline_contract":
+        version: 1
+        scope_mode: strict
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:duplicate_contract_key, 2}}} = Contract.parse(mixed)
+
+      tagged = """
+      ```yaml
+      !!str pipeline_contract:
+        version: 1
+        scope_mode: advisory
+      "pipeline_contract":
+        version: 1
+        scope_mode: strict
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:duplicate_contract_key, 2}}} = Contract.parse(tagged)
+    end
+
+    test "a repeated field is refused whatever its style, in block and explicit form" do
+      mixed = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+        "scope_mode": strict
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:duplicate_field, "scope_mode"}}} = Contract.parse(mixed)
+
+      listed = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+        expected_paths: [a.md]
+        "expected_paths": [b.md]
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:duplicate_field, "expected_paths"}}} = Contract.parse(listed)
+
+      explicit = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        ? scope_mode
+        : strict
+        ? scope_mode
+        : advisory
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:duplicate_field, "scope_mode"}}} = Contract.parse(explicit)
+    end
+
+    test "a quoted unknown field is an unknown field" do
+      assert {:error, {:pipeline_contract_invalid, {:unknown_fields, ["scope_mod"]}}} =
+               Contract.parse(~s[```yaml\npipeline_contract:\n  version: 1\n  scope_mode: advisory\n  "scope_mod": strict\n```])
+    end
+
+    test "an anchored key is refused instead of being read as absent" do
+      # An anchor before the key is still a key the block claims, and refusing the
+      # anchor is what keeps an alias graph from being expanded.
+      key = """
+      ```yaml
+      &k pipeline_contract:
+        version: 1
+        scope_mode: advisory
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:anchors_not_supported, "&k"}}} = Contract.parse(key)
+
+      explicit = """
+      ```yaml
+      ? &k pipeline_contract
+      : {version: 1, scope_mode: advisory}
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:anchors_not_supported, "&k"}}} = Contract.parse(explicit)
+    end
+
+    test "a block with more than one document is read as one contract, never as the wrong one" do
+      # The key is counted across the documents of the block, while the decoder reads
+      # one document: a contract that is not in the decoded document is refused
+      # instead of being silently ignored (or read from the wrong document).
+      body = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+      ---
+      notes: hi
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, :missing_pipeline_contract_key}} = Contract.parse(body)
+    end
+
+    test "an anchored block that is not the contract is left alone" do
+      # The anchor is refused only where it would be a contract: an unrelated fenced
+      # document that uses an anchor is not silently promoted to a declaration (and
+      # it is not parsed either, so the alias graph is never expanded).
+      body = """
+      ```yaml
+      defaults: &defaults
+        timeout: 5
+      ```
+
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+      ```
+      """
+
+      assert {:ok, contract} = Contract.parse(body)
+      assert contract.scope_mode == :advisory
+    end
+
     test "the explicit key and the flow form with quotes are the same mapping" do
       explicit = """
       ```yaml
@@ -399,6 +549,14 @@ defmodule SymphonyElixir.PipelineContractTest do
       end
     end
 
+    test "a pattern that is not valid UTF-8 is refused, never compiled" do
+      # `!!binary` is how YAML hands raw bytes to a scalar: the glob comparison runs
+      # over UTF-8 paths, so such a pattern is a schema error instead of a crash in
+      # the middle of the scope comparison.
+      assert {:error, {:pipeline_contract_invalid, {:invalid_pattern, "expected_paths", :not_utf8}}} =
+               Contract.parse(contract("version: 1\nscope_mode: advisory\nexpected_paths: [!!binary \"//4=\"]"))
+    end
+
     test "a field that is not a list is refused" do
       assert {:error, {:pipeline_contract_invalid, {:invalid_field, "expected_paths", "\"docs/x.md\""}}} =
                Contract.parse(contract("version: 1\nscope_mode: advisory\nexpected_paths: \"docs/x.md\""))
@@ -433,9 +591,23 @@ defmodule SymphonyElixir.PipelineContractTest do
                Contract.parse("```yaml\npipeline_contract: [1, 2\n```")
 
       assert {:error, {:pipeline_contract_invalid, {:not_a_mapping, "3"}}} = Contract.parse(contract("3"))
+    end
 
-      assert {:error, {:pipeline_contract_invalid, :missing_pipeline_contract_key}} =
-               Contract.parse("```yaml\nnotes: |\n  pipeline_contract: 1\n```")
+    test "a mention of the key inside a scalar is data, not a declaration" do
+      # The parser is what tells a key from text: here `pipeline_contract:` is the
+      # *value* of `notes`, so the body declares no contract at all.
+      assert Contract.parse("```yaml\nnotes: |\n  pipeline_contract: 1\n```") == :absent
+
+      # A block whose text claims the key but that cannot be decoded at all is an
+      # error instead: the text fallback can only fail closed.
+      assert {:error, {:pipeline_contract_invalid, {:invalid_yaml, _reason}}} =
+               Contract.parse("```yaml\nnotes: [1, 2\npipeline_contract: 1\n```")
+    end
+
+    test "a fenced block that is not the contract is not read as one" do
+      # A block nobody can decode and that claims no key is unrelated: it does not
+      # make the body a contract (nor an error).
+      assert Contract.parse("## Notes\n\n```bash\nif [ -f x; then echo x\n```\n") == :absent
     end
 
     test "an oversized contract is refused before decoding" do
@@ -537,6 +709,32 @@ defmodule SymphonyElixir.PipelineContractTest do
       findings = Contract.path_findings(contract, Enum.map(1..9, &"extra/#{&1}.md"))
 
       assert length(findings.findings) == 7
+      assert findings.truncated
+    end
+
+    test "the whole contract and a large change set are matched without recompiling per pair" do
+      # 512 patterns (256 expected + 256 allowed) against 1,000 paths. Each pattern
+      # is compiled **once per evaluation** and reused for the delivered and the
+      # authorized comparison; compiling per combination would be half a million
+      # compilations for this single call, which is why the invariant is stated in
+      # the documentation of `path_findings/2` and covered here at the limits (the
+      # change set itself is capped at 5,000 paths by the delivery stage).
+      expected = Enum.map_join(1..256, ", ", &~s("expected/dir-#{&1}/*.md"))
+      allowed = Enum.map_join(1..256, ", ", &~s("allowed/dir-#{&1}/*.md"))
+
+      {:ok, contract} =
+        Contract.parse(contract("version: 1\nscope_mode: advisory\nexpected_paths: [#{expected}]\nallowed_extra_paths: [#{allowed}]"))
+
+      paths = Enum.map(1..1_000, &"allowed/dir-#{rem(&1, 256) + 1}/file-#{&1}.md")
+      findings = Contract.path_findings(contract, paths)
+
+      # Every path is authorized, and every expected pattern is missing: the verdict
+      # is the same one a small candidate gets, only at the limits of the schema.
+      assert findings.changed == paths
+      assert findings.unexpected == []
+      assert findings.delivered == []
+      assert findings.findings |> Enum.map(& &1.code) |> Enum.uniq() == [:expected_path_missing]
+      assert length(findings.findings) == 5
       assert findings.truncated
     end
   end

@@ -372,9 +372,10 @@ pipeline_contract:
   semantics per diff case, the codes and every declared limit.
 - The candidate is the head SHA of the delivery branch that passed the local gates **and**
   whose check runs all concluded successfully **and** that was still the branch head when
-  the observation finished. A push that lands during the observation invalidates it and
-  the observation restarts on the new SHA; no CI at all, a failing check or a timeout
-  blocks the promotion.
+  the observation finished. A push that lands during the observation invalidates it: the new
+  head is not the commit the acceptance and the local gates validated, so the run fails
+  (`delivery_candidate_replaced`) instead of promoting it with another candidate's verdict.
+  No CI at all, a failing check or a timeout blocks the promotion.
 - State comes from GitHub (open pull request, ref, check runs, labels, comments), so a
   retry reconciles the existing candidate: no second branch, no second pull request, no
   second handoff comment, no repeated push. A reconciled candidate does not request a new

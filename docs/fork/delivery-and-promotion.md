@@ -16,7 +16,7 @@ AgentRunner (turnos)            # executor selecionado por executor.kind (acp)
        4. branch `pipeline/<identificador>` + commit + push                  # nunca na base
        5. Draft PR (base = delivery.base_branch)                             # idempotente
        6. observa check runs do head SHA                                     # CI obrigatório
-       7. candidate stable = SHA com gates + CI verdes                       # invalida se o head mudar
+       7. candidate stable = SHA que este run publicou + gates + CI verdes    # head movido → falha
        8. review one-shot (se disponível)                                    # depois do candidato
        9. handoff: comentário (com o veredicto) e depois rótulos                # veredicto antes da promoção
 ```
@@ -26,6 +26,12 @@ O handoff é o único ponto que muda o estado da issue, e ele tem ordem fixa: o
 rótulo de entrada. Se a escrita do comentário falhar, a issue **não** é promovida —
 ela não pode ficar marcada como entregue sem o veredicto legível por máquina que a
 #13/#14 vão consumir.
+
+O **candidato fica amarrado ao que foi aceito**: o aceite e os gates rodam no
+conteúdo do workspace que este run publica. Se o head da branch observado no fim da
+espera do CI for outro commit (um push concorrente), o run falha com
+`delivery_candidate_replaced` em vez de promover um head que ninguém aceitou; o
+retry reexecuta o aceite sobre o conteúdo e republica.
 
 ## As três camadas de verificação
 

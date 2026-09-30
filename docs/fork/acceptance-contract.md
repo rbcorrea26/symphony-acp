@@ -203,6 +203,12 @@ uma falha de escrita não deixe a issue promovida sem o veredicto. Limite declar
 quando o aceite **reprova**, o run falha e **não** publica nem comenta (a evidência
 fica no log do run) — o estado de bloqueio persistido no GitHub é escopo da #13.
 
+O veredicto é do **conteúdo aceito**: ele é calculado sobre o workspace antes de
+publicar, e o comentário carrega o SHA do candidato publicado. Se o head da branch
+observado no fim for outro commit (um push concorrente), o run falha com
+`delivery_candidate_replaced` em vez de associar o veredicto a um candidato que
+ninguém aceitou.
+
 ## 9. Segurança
 
 - o contrato é **entrada não confiável** (corpo da issue): decodificação de dados

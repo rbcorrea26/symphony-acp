@@ -50,10 +50,10 @@ pipeline_contract:
   deploy: false              # ausente = false
 ```
 
-- globs: `*` dentro do segmento, `**` atravessa segmentos, `?` um caractere,
-  `/` no fim significa `/**`; padrão absoluto, com `..` ou com `\` é erro de
-  schema (o padrão nunca é resolvido no filesystem, só comparado com o change
-  set);
+- globs: `*` dentro do segmento, `**` atravessa segmentos, `?` um caractere
+  (Unicode, não um byte: `docs/?.md` casa `docs/é.md`), `/` no fim significa `/**`;
+  padrão absoluto, com `..` ou com `\` é erro de schema (o padrão nunca é resolvido
+  no filesystem, só comparado com o change set);
 - a chave pode ser escrita **plana ou com aspas** (`pipeline_contract:`,
   `"scope_mode":`, o que um gerador de template produz) e o indicador explícito
   (`? chave`) também é lido: o parser enxerga as mesmas chaves que o decoder YAML
@@ -111,7 +111,10 @@ regras fixas e versionadas neste fork: `kubectl apply/create/...`, `terraform
 apply/destroy`, `helm upgrade/install/...`, `ansible-playbook`, `docker push`,
 `npm/yarn/pnpm publish`, `gh release create/upload`, `aws deploy|cloudformation
 deploy|s3 sync`; e `ssh/scp/sftp`, `rsync` para host remoto, `ssh://`, `git clone
-git@`, `wp @host|--ssh=`, `mysql/mysqldump/psql -h`. Uma linha produz no máximo um
+git@`, `wp @host|--ssh=`, `mysql/mysqldump/psql -h`. O parse do diff mantém o estado
+do arquivo: `+++ b/path` é cabeçalho **só fora de hunk**, então uma linha adicionada
+que comece com `++ b/` é varrida como conteúdo (e não rouba o path das linhas
+seguintes). Uma linha produz no máximo um
 achado (primeira regra que casa), até 5 achados por tipo, com o trecho truncado e
 mascarado porque o achado vai para log e comentário no GitHub. Um `true` no
 contrato desliga aquele tipo.
@@ -138,7 +141,8 @@ convertida em `PASS` silencioso.
 
 - YAML: só decodificação de dados com tipos explícitos; tags recusadas pelo decoder
   (`!foo`, `!ruby/object`, `!!python/...`) e âncoras recusadas pelo parser antes de
-  decodificar (sem alias/expansão, e portanto sem bomba de aliases);
+  decodificar (sem alias/expansão, e portanto sem bomba de aliases) — a detecção de
+  âncora ignora comentários e scalars com aspas, onde `&` é dado;
 - duplicidade ambígua é recusada, nunca "escolhida": dois blocos, duas chaves
   `pipeline_contract` e uma **mesma chave repetida dentro do mapeamento**
   (`duplicate_field`), contando também as formas com aspas e com o indicador

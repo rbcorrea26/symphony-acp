@@ -11,8 +11,11 @@ defmodule SymphonyElixir.Shutdown do
   Exit codes (contract with the platform's dispatcher):
 
     * `0` — nothing left to do for this cycle (idle; work may or may not have run)
-    * `1` — the run failed (tracker/config error)
+    * `1` — the run could not start (CLI/WORKFLOW.md/application startup failure)
     * `3` — work is still pending when the runtime cap was reached
+
+  A tracker/config failure **while polling** does not end the cycle: as in upstream,
+  the orchestrator keeps trying, and with a runtime cap the end comes as `3`.
 
   `:shutdown_fun` is injectable so tests can assert the decision without stopping
   the test VM.

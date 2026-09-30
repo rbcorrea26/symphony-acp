@@ -128,7 +128,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
-    {state, outcome} = maybe_dispatch_within_deadline(state)
+    {state, outcome} = maybe_dispatch(state)
     state = schedule_tick(state, next_tick_delay_ms(state))
     state = %{state | poll_check_in_progress: false}
 
@@ -825,7 +825,7 @@ defmodule SymphonyElixir.Orchestrator do
     issues
     |> sort_issues_for_dispatch()
     |> Enum.reduce(state, fn issue, state_acc ->
-      if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
+      if dispatchable_within_deadline?(issue, state_acc, active_states, terminal_states) do
         dispatch_issue(state_acc, issue)
       else
         state_acc
@@ -870,6 +870,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  # `--max-runtime-seconds` e um prazo: depois dele o ciclo nao inicia trabalho novo
+  # (ele vai encerrar), mas a avaliacao de candidatos continua valendo - e o que
+  # permite um ciclo comprovadamente idle encerrar com `0` em vez de `3`.
+  defp dispatchable_within_deadline?(issue, %State{} = state, active_states, terminal_states) do
+    should_dispatch_issue?(issue, state, active_states, terminal_states) and not deadline_expired?(state)
+  end
 
   # `--issue <identificador>`: um ciclo on-demand atende UMA issue. Sem filtro, o
   # comportamento upstream (todos os candidatos) permanece intacto.
@@ -1707,17 +1714,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       true ->
         :continue
-    end
-  end
-
-  # `--max-runtime-seconds` e um prazo: um ciclo que comeca depois dele nao despacha
-  # trabalho novo (o processo ja vai encerrar) e vai direto para o desfecho, em vez
-  # de iniciar um item que seria abandonado no mesmo instante.
-  defp maybe_dispatch_within_deadline(%State{} = state) do
-    if deadline_expired?(state) do
-      {state, :not_idle}
-    else
-      maybe_dispatch(state)
     end
   end
 

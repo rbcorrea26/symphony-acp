@@ -30,7 +30,7 @@ symphony [--logs-root <path>] [--port <port>]
 | Opção | Efeito |
 |---|---|
 | `--exit-when-idle` | encerra o processo quando o ciclo não tem mais nada a fazer (nada rodando, nada em retry, nada bloqueado e nenhum candidato despachável) |
-| `--issue <id>` | limita o ciclo a **uma** issue (`GH-64`, `GH-64`…); sem ela, o comportamento upstream (todos os candidatos) permanece |
+| `--issue <id>` | limita o ciclo a **uma** issue (ex.: `GH-64`); sem ela, o comportamento upstream (todos os candidatos) permanece |
 | `--resume-only` | avança um estado assíncrono (CI, review, arquiteto) do candidato **já publicado**, sem rodar os turnos do agente de novo |
 | `--max-runtime-seconds <n>` | teto **gracioso** de duração do processo (`n` > 0; `0` e negativo são recusados como uso inválido); ao atingir, encerra com código 3 em vez de ficar preso |
 
@@ -38,10 +38,10 @@ Nenhuma opção existente do upstream foi renomeada, removida ou teve o default 
 as flags, o comportamento é exatamente o upstream (poll contínuo).
 
 O teto de duração é um **prazo**, não um intervalo de poll: o próximo ciclo é agendado no
-vencimento dele (o que vier primeiro entre o poll normal e o prazo), nenhum trabalho novo é
-despachado depois do prazo — o ciclo vai direto para o encerramento — e um ciclo
-comprovadamente idle termina com `0` em vez de `3`, porque `3` faria o dispatcher repetir um
-ciclo que já terminou.
+vencimento dele (o que vier primeiro entre o poll normal e o prazo) e nenhum trabalho novo é
+despachado depois do prazo — mas o ciclo ainda avalia a carga, para que um ciclo
+comprovadamente idle termine com `0` em vez de `3` (com `3` o dispatcher repetiria um ciclo que
+já terminou).
 
 ## 3. Códigos de saída
 

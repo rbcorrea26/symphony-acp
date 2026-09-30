@@ -63,6 +63,38 @@ defmodule SymphonyElixir.OnDemandTest do
     pid
   end
 
+  # Espera um ciclo de poll terminar e o proximo tick ser agendado: um `sleep` fixo
+  # nao garante a ordem sob carga, e o cenario de teste depende de o primeiro ciclo
+  # ja ter lido o tracker antes de o item entrar.
+  defp wait_for_poll_cycle(pid, attempts \\ 150) do
+    state = :sys.get_state(pid)
+    now_ms = System.monotonic_time(:millisecond)
+
+    next_tick_scheduled? =
+      not state.poll_check_in_progress and is_integer(state.next_poll_due_at_ms) and
+        state.next_poll_due_at_ms > now_ms + 50
+
+    cond do
+      next_tick_scheduled? ->
+        :ok
+
+      attempts == 0 ->
+        flunk("orchestrator did not schedule the next poll cycle")
+
+      true ->
+        Process.sleep(20)
+        wait_for_poll_cycle(pid, attempts - 1)
+    end
+  end
+
+  # Simula trabalho que terminou entre polls com o prazo ja vencido (o estado muda por
+  # `:sys.replace_state`, como nos testes de retry do upstream).
+  defp expire_deadline(pid) do
+    :sys.replace_state(pid, fn state ->
+      %{state | deadline_ms: System.monotonic_time(:millisecond) - 1}
+    end)
+  end
+
   defp resume_issue(id, identifier) do
     %Issue{
       id: id,
@@ -219,11 +251,14 @@ defmodule SymphonyElixir.OnDemandTest do
       Application.put_env(:symphony_elixir, :max_runtime_seconds, 1)
       shutdown_to_test()
 
-      start_orchestrator()
+      pid = start_orchestrator()
 
-      # O item fica despachavel entre o primeiro poll e o vencimento do teto: o ciclo
-      # que cai no teto nao pode iniciar um run que seria abandonado no mesmo instante.
-      Process.sleep(500)
+      # O item fica despachavel depois do poll inicial e antes do vencimento do teto:
+      # o ciclo que cai no teto nao pode iniciar um run que seria abandonado no mesmo
+      # instante. A espera e pelo estado do orquestrador (o proximo ciclo agendado),
+      # nao por um `sleep` fixo, que sob carga poderia deixar o item entrar antes do
+      # poll inicial.
+      wait_for_poll_cycle(pid)
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [resume_issue("issue-3", "GH-73")])
 
       log = capture_log(fn -> assert_receive {:shutdown, 3}, 5_000 end)
@@ -231,6 +266,31 @@ defmodule SymphonyElixir.OnDemandTest do
       # Controle de que o log do orquestrador (outro processo) foi capturado.
       assert log =~ "On-demand cycle finished"
       refute log =~ "Dispatching issue to agent"
+    end
+
+    test "teto vencido com ciclo comprovadamente idle encerra com 0" do
+      clear_on_demand_env()
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        poll_interval_ms: 30_000
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      Application.put_env(:symphony_elixir, :exit_when_idle, true)
+      Application.put_env(:symphony_elixir, :max_runtime_seconds, 1)
+      shutdown_to_test()
+
+      pid = start_orchestrator()
+
+      # Trabalho que termina entre polls com o prazo ja vencido: o ciclo do teto nao
+      # pode responder `3` ("ainda pode haver trabalho"), senao o dispatcher repete um
+      # ciclo concluido. O teto impede o despacho, nao a checagem de idle.
+      expire_deadline(pid)
+      send(pid, :run_poll_cycle)
+
+      assert_receive {:shutdown, 0}, 5_000
+      refute_receive {:shutdown, 3}, 1_000
     end
   end
 

@@ -6,7 +6,15 @@ defmodule SymphonyElixir.CLI do
   alias SymphonyElixir.LogFile
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
-  @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer]
+  @switches [
+    {@acknowledgement_switch, :boolean},
+    exit_when_idle: :boolean,
+    resume_only: :boolean,
+    issue: :string,
+    max_runtime_seconds: :integer,
+    logs_root: :string,
+    port: :integer
+  ]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
@@ -41,6 +49,7 @@ defmodule SymphonyElixir.CLI do
       {opts, [], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
              :ok <- maybe_set_logs_root(opts, deps),
+             :ok <- maybe_set_run_options(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
           run(Path.expand("WORKFLOW.md"), deps)
         end
@@ -48,6 +57,7 @@ defmodule SymphonyElixir.CLI do
       {opts, [workflow_path], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
              :ok <- maybe_set_logs_root(opts, deps),
+             :ok <- maybe_set_run_options(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
           run(workflow_path, deps)
         end
@@ -78,7 +88,8 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    "Usage: symphony [--logs-root <path>] [--port <port>] [--exit-when-idle] " <>
+      "[--issue <identifier>] [--resume-only] [--max-runtime-seconds <n>] [path-to-WORKFLOW.md]"
   end
 
   @spec runtime_deps() :: deps()
@@ -87,9 +98,57 @@ defmodule SymphonyElixir.CLI do
       file_regular?: &File.regular?/1,
       set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
       set_logs_root: &set_logs_root/1,
+      set_run_options: &set_run_options/1,
       set_server_port_override: &set_server_port_override/1,
       ensure_all_started: ensure_all_started
     }
+  end
+
+  # On-demand lifecycle options (fork extension, ADR-0009 of the platform). They
+  # are published in the application environment so the orchestrator (idle/idle
+  # deadline/issue filter) and the agent runner (resume-only) can see them without
+  # new plumbing through the supervision tree.
+  @doc false
+  @spec set_run_options(keyword()) :: :ok
+  def set_run_options(options) do
+    Application.put_env(:symphony_elixir, :exit_when_idle, Keyword.get(options, :exit_when_idle, false))
+    Application.put_env(:symphony_elixir, :resume_only, Keyword.get(options, :resume_only, false))
+    Application.put_env(:symphony_elixir, :issue_filter, Keyword.get(options, :issue_filter))
+    Application.put_env(:symphony_elixir, :max_runtime_seconds, Keyword.get(options, :max_runtime_seconds))
+    :ok
+  end
+
+  defp maybe_set_run_options(opts, deps) do
+    issue =
+      case Keyword.get_values(opts, :issue) do
+        [] -> nil
+        values -> values |> List.last() |> to_string() |> String.trim()
+      end
+
+    max_runtime =
+      case Keyword.get_values(opts, :max_runtime_seconds) do
+        [] -> nil
+        values -> List.last(values)
+      end
+
+    cond do
+      issue == "" ->
+        {:error, usage_message()}
+
+      is_integer(max_runtime) and max_runtime < 0 ->
+        {:error, usage_message()}
+
+      true ->
+        setter = Map.get(deps, :set_run_options, fn _ -> :ok end)
+
+        :ok =
+          setter.(
+            exit_when_idle: Keyword.get(opts, :exit_when_idle, false),
+            resume_only: Keyword.get(opts, :resume_only, false),
+            issue_filter: issue,
+            max_runtime_seconds: max_runtime
+          )
+    end
   end
 
   defp maybe_set_logs_root(opts, deps) do

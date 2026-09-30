@@ -159,6 +159,21 @@ merge, porque depende dele desde o upstream.
 | `docs/fork/README.md` | alterado | status da fase 6 (estágio de entrega implementado e validado em execução real) | não |
 | `docs/fork/adr/README.md` | alterado | índice do ADR `0005` | não |
 
+A **fase 7b** (ciclo de vida sob demanda, ADR-0009 da plataforma) entra pela branch
+`feat/phase7b-on-demand-lifecycle` e é a primeira extensão do fork que muda o
+**comportamento do processo** sem alterar o fluxo upstream por omissão: as flags
+`--exit-when-idle`, `--issue <id>`, `--resume-only` e `--max-runtime-seconds <n>` são
+aditivas e o encerramento é gracioso (nunca `kill`). Arquivos:
+
+| Arquivo | Tipo | Motivo | Comportamento upstream afetado? |
+|---|---|---|---|
+| `docs/fork/lifecycle.md` | novo | contrato operacional do modo sob demanda (flags, códigos de saída, `resume-only`, o que segue pendente) | não |
+| `elixir/lib/symphony_elixir/shutdown.ex` | novo | ponto único de encerramento gracioso com código de saída significativo (injetável em teste) | não |
+| `elixir/lib/symphony_elixir/cli.ex` | alterado (aditivo) | quatro flags novas publicadas no ambiente da aplicação; sem elas o fluxo é o upstream | não |
+| `elixir/lib/symphony_elixir/orchestrator.ex` | alterado | ciclo de poll informa se havia algo despachável (para decidir o idle), filtro `--issue` e teto `--max-runtime-seconds` | **sim, mínimo**: só quando as flags são usadas; `maybe_dispatch/1` passa a devolver `{state, resultado}` |
+| `elixir/lib/symphony_elixir/agent_runner.ex` | alterado (aditivo) | `--resume-only` pula os turnos do agente e mantém a etapa de entrega | não |
+| `elixir/test/symphony_elixir/on_demand_test.exs` | novo | suíte determinística e offline do lifecycle (tracker `memory` + shutdown injetado) | não |
+
 ## Regras do registro
 
 - Toda alteração em arquivo existente do upstream entra aqui **no mesmo PR**,

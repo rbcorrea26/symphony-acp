@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, Shutdown, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -33,6 +33,13 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      # On-demand lifecycle (fork extension, ADR-0009 of the platform):
+      # `exit_when_idle` ends the run when there is nothing left to do,
+      # `issue_filter` limits the cycle to one tracker identifier and
+      # `deadline_ms` bounds the run (graceful, never a shell timeout).
+      :exit_when_idle,
+      :issue_filter,
+      :deadline_ms,
       task_supervisor: SymphonyElixir.TaskSupervisor,
       running: %{},
       completed: MapSet.new(),
@@ -64,11 +71,15 @@ defmodule SymphonyElixir.Orchestrator do
           poll_check_in_progress: false,
           tick_timer_ref: nil,
           tick_token: nil,
+          exit_when_idle: on_demand_exit_when_idle?(),
+          issue_filter: on_demand_issue_filter(),
+          deadline_ms: on_demand_deadline_ms(now_ms),
           task_supervisor: Keyword.get(opts, :task_supervisor, SymphonyElixir.TaskSupervisor),
           codex_totals: @empty_codex_totals,
           codex_rate_limits: nil
         }
 
+        log_on_demand_mode(state)
         run_terminal_workspace_cleanup()
         state = schedule_tick(state, 0)
 
@@ -117,12 +128,20 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
-    state = maybe_dispatch(state)
+    {state, outcome} = maybe_dispatch(state)
     state = schedule_tick(state, state.poll_interval_ms)
     state = %{state | poll_check_in_progress: false}
 
     notify_dashboard()
-    {:noreply, state}
+
+    case on_demand_outcome(state, outcome) do
+      {:stop, code, reason} ->
+        :ok = Shutdown.request(code, reason)
+        {:noreply, state}
+
+      :continue ->
+        {:noreply, state}
+    end
   end
 
   def handle_info(
@@ -262,7 +281,7 @@ defmodule SymphonyElixir.Orchestrator do
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states),
          true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+      {choose_issues(issues, state), dispatch_outcome(issues, state)}
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Tracker API token missing in WORKFLOW.md")
@@ -309,6 +328,22 @@ defmodule SymphonyElixir.Orchestrator do
 
       false ->
         state
+    end
+    |> normalize_dispatch_result(state)
+  end
+
+  # `maybe_dispatch/1` returns the state from a dozen different branches (tracker
+  # errors, missing config, no capacity). The on-demand lifecycle only needs to know
+  # whether this cycle had something dispatchable, so the branches stay untouched and
+  # the outcome is derived here.
+  defp normalize_dispatch_result({%State{} = new_state, outcome}, _previous), do: {new_state, outcome}
+  defp normalize_dispatch_result(%State{} = state, _previous), do: {state, :not_idle}
+
+  defp dispatch_outcome(issues, %State{} = state) do
+    if Enum.any?(issues, &should_dispatch_issue?(&1, state, active_state_set(), terminal_state_set())) do
+      :work
+    else
+      :idle_candidate
     end
   end
 
@@ -825,6 +860,7 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
+      matches_issue_filter?(issue, state.issue_filter) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       !Map.has_key?(blocked, issue.id) and
@@ -834,6 +870,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  # `--issue <identificador>`: um ciclo on-demand atende UMA issue. Sem filtro, o
+  # comportamento upstream (todos os candidatos) permanece intacto.
+  defp matches_issue_filter?(_issue, nil), do: true
+
+  defp matches_issue_filter?(%Issue{identifier: identifier}, filter) when is_binary(identifier) do
+    String.downcase(String.trim(identifier)) == String.downcase(filter)
+  end
+
+  defp matches_issue_filter?(_issue, _filter), do: false
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
@@ -1642,6 +1688,68 @@ defmodule SymphonyElixir.Orchestrator do
       | poll_interval_ms: config.polling.interval_ms,
         max_concurrent_agents: config.agent.max_concurrent_agents
     }
+  end
+
+  # ---------------------------------------------------------- sob demanda ----
+  # Contrato do modo on-demand (`--exit-when-idle`, `--issue`, `--resume-only`,
+  # `--max-runtime-seconds`). O encerramento e decisao do control plane, nunca de um
+  # `timeout`/`kill` externo; os codigos de saida estao em `SymphonyElixir.Shutdown`.
+
+  defp on_demand_outcome(%State{} = state, outcome) do
+    cond do
+      deadline_expired?(state) ->
+        {:stop, 3, "runtime cap reached (work may still be pending)"}
+
+      not state.exit_when_idle ->
+        :continue
+
+      outcome == :idle_candidate and idle_state?(state) ->
+        {:stop, 0, "nothing left to do (idle)"}
+
+      true ->
+        :continue
+    end
+  end
+
+  # Idle de verdade: nada rodando, nada em retry e nada bloqueado. Um item bloqueado
+  # mantem o processo vivo de proposito (o control plane ainda tem trabalho no
+  # modelo); com `--max-runtime-seconds` o ciclo encerra em 3 em vez de ficar preso.
+  defp idle_state?(%State{running: running, retry_attempts: retries, blocked: blocked}) do
+    map_size(running) == 0 and map_size(retries) == 0 and map_size(blocked) == 0
+  end
+
+  defp deadline_expired?(%State{deadline_ms: nil}), do: false
+  defp deadline_expired?(%State{deadline_ms: deadline}), do: System.monotonic_time(:millisecond) >= deadline
+
+  defp on_demand_exit_when_idle?, do: Application.get_env(:symphony_elixir, :exit_when_idle, false) == true
+
+  defp on_demand_issue_filter do
+    case Application.get_env(:symphony_elixir, :issue_filter) do
+      value when is_binary(value) ->
+        case String.trim(value) do
+          "" -> nil
+          trimmed -> trimmed
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp on_demand_deadline_ms(now_ms) do
+    case Application.get_env(:symphony_elixir, :max_runtime_seconds) do
+      seconds when is_integer(seconds) and seconds > 0 -> now_ms + seconds * 1_000
+      _ -> nil
+    end
+  end
+
+  defp log_on_demand_mode(%State{exit_when_idle: false, issue_filter: nil}), do: :ok
+
+  defp log_on_demand_mode(%State{} = state) do
+    Logger.info(
+      "On-demand mode: exit_when_idle=#{state.exit_when_idle} " <>
+        "issue_filter=#{inspect(state.issue_filter)} deadline_ms=#{inspect(state.deadline_ms)}"
+    )
   end
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do

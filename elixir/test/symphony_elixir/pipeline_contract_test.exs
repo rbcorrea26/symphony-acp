@@ -491,6 +491,44 @@ defmodule SymphonyElixir.PipelineContractTest do
       assert {:error, {:pipeline_contract_invalid, {:anchors_not_supported, "&paths"}}} = Contract.parse(body)
     end
 
+    test "an anchor whose name is not ASCII is refused too" do
+      # YAML's anchor name is any run of characters that is not whitespace and not a
+      # flow indicator, so `&çaminho` and `&ação` are anchors: an ASCII-only token
+      # class would let the block reach the parser and expand an alias graph.
+      value = """
+      ```yaml
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+        expected_paths: &çaminho
+          - a.md
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:anchors_not_supported, "&çaminho"}}} = Contract.parse(value)
+
+      key = """
+      ```yaml
+      &ação pipeline_contract:
+        version: 1
+        scope_mode: advisory
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:anchors_not_supported, "&ação"}}} = Contract.parse(key)
+
+      # An anchor name may even carry a `:` (it is not a flow indicator).
+      colon = """
+      ```yaml
+      &a:b pipeline_contract:
+        version: 1
+        scope_mode: advisory
+      ```
+      """
+
+      assert {:error, {:pipeline_contract_invalid, {:anchors_not_supported, "&a:b"}}} = Contract.parse(colon)
+    end
+
     test "a YAML tag is refused: the schema has explicit types, never constructors" do
       assert {:error, {:pipeline_contract_invalid, {:invalid_yaml, %{type: :unrecognized_node}}}} =
                Contract.parse("```yaml\npipeline_contract: !ruby/object {}\n```")

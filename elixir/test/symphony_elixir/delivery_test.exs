@@ -793,7 +793,7 @@ defmodule SymphonyElixir.DeliveryTest do
 
     # The promotion state did not advance: no handoff label, no entry label removed
     # and no comment written — the machine-readable verdict was not persisted, so the
-    # issue must not look delivered (the invariant of `handoff/7`).
+    # issue must not look delivered (the invariant of `handoff/8`).
     assert state.comments == []
     assert state.labels == ["pipeline:ready"]
     refute Enum.any?(state.requests, &match?({:labels, _}, &1))

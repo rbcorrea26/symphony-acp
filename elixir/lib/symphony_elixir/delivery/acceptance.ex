@@ -225,7 +225,7 @@ defmodule SymphonyElixir.Delivery.Acceptance do
     Result.evaluated(
       mode: contract.scope_mode,
       contract_version: contract.version,
-      findings: sanitize(paths.findings ++ prohibitions.findings),
+      findings: sanitize(paths.findings ++ prohibitions.findings ++ truncated_scan_findings(contract, truncated)),
       change_set: %{
         expected: paths.expected,
         delivered: paths.delivered,
@@ -235,6 +235,27 @@ defmodule SymphonyElixir.Delivery.Acceptance do
       limits: limits(contract, truncated or paths.truncated or prohibitions.truncated)
     )
   end
+
+  # A partial scan cannot certify the absence of a prohibition: with `strict` the
+  # delivery fails closed (the finding blocks) instead of passing on a read that
+  # stopped at its cap, and with `advisory` the divergence is reported and the
+  # delivery continues. The limit itself is declared either way, and a contract that
+  # switched both prohibitions off has nothing to certify (no scan ran).
+  defp truncated_scan_findings(contract, true) do
+    if PipelineContract.prohibition_scan?(contract) do
+      [
+        %Finding{
+          code: :prohibition_scan_truncated,
+          category: :forbidden_operation,
+          message: "the added-lines scan reached its documented cap: the absence of a prohibition cannot be certified over a partial scan"
+        }
+      ]
+    else
+      []
+    end
+  end
+
+  defp truncated_scan_findings(_contract, false), do: []
 
   defp limits(contract, truncated) do
     heuristic = if PipelineContract.prohibition_scan?(contract), do: [:prohibition_scan_is_heuristic], else: []

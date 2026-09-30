@@ -292,43 +292,83 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       assert {:ok, %Result{status: :pass, findings: []}} = Acceptance.scope(workspace, issue)
     end
 
-    test "a candidate bigger than the scan limit declares the truncation", %{workspace: workspace} do
+    test "a candidate bigger than the scan limit fails closed in strict mode", %{workspace: workspace} do
       write!(workspace, "README.md", "base\nmore\n")
       write!(workspace, "big.md", String.duplicate("line\n", 2_100))
 
-      assert {:ok, result} = Acceptance.scope(workspace, issue(contract_body(allowed_extra_paths: ["big.md"])))
+      assert {:error, {:delivery_acceptance_failed, result}} =
+               Acceptance.scope(workspace, issue(contract_body(allowed_extra_paths: ["big.md"])))
 
-      assert result.status == :pass
+      # A partial scan cannot certify the absence of a prohibition: the strict
+      # contract fails instead of passing on a read that stopped at its cap, and the
+      # limit is still declared.
+      assert result.status == :fail
+      assert [%Finding{code: :prohibition_scan_truncated, category: :forbidden_operation}] = result.findings
       assert :change_scan_truncated in result.limits
       assert Acceptance.describe(result) =~ "change scan truncated"
+      assert Acceptance.describe(result) =~ "cannot be certified over a partial scan"
     end
 
-    test "more untracked files than the scan limit declares the truncation", %{workspace: workspace} do
+    test "the same truncated scan diverges in advisory mode instead of blocking", %{workspace: workspace} do
+      write!(workspace, "README.md", "base\nmore\n")
+      write!(workspace, "big.md", String.duplicate("line\n", 2_100))
+
+      issue =
+        issue(contract_body(scope_mode: "advisory", allowed_extra_paths: ["big.md"]))
+
+      assert {:ok, result} = Acceptance.scope(workspace, issue)
+
+      assert result.status == :advisory
+      assert [%Finding{code: :prohibition_scan_truncated}] = result.findings
+      assert :change_scan_truncated in result.limits
+      refute Result.blocking?(result)
+    end
+
+    test "a truncated scan with both prohibitions authorized is a limit, not a finding", %{workspace: workspace} do
+      write!(workspace, "README.md", "base\nmore\n")
+      write!(workspace, "big.md", String.duplicate("line\n", 2_100))
+
+      issue = issue(contract_body(allowed_extra_paths: ["big.md"], remote_access: true, deploy: true))
+
+      assert {:ok, result} = Acceptance.scope(workspace, issue)
+
+      assert result.status == :pass
+      assert result.findings == []
+      assert :change_scan_truncated in result.limits
+    end
+
+    test "more untracked files than the scan limit fails closed in strict mode", %{workspace: workspace} do
       write!(workspace, "README.md", "base\nmore\n")
       Enum.each(1..201, fn index -> write!(workspace, "many/file-#{index}.js", "x\n") end)
 
-      assert {:ok, result} = Acceptance.scope(workspace, issue(contract_body(allowed_extra_paths: ["many/**"])))
+      assert {:error, {:delivery_acceptance_failed, result}} =
+               Acceptance.scope(workspace, issue(contract_body(allowed_extra_paths: ["many/**"])))
 
-      assert result.status == :pass
+      assert result.status == :fail
+      assert [%Finding{code: :prohibition_scan_truncated}] = result.findings
       assert :change_scan_truncated in result.limits
     end
 
-    test "an untracked file bigger than the per-file limit declares the truncation", %{workspace: workspace} do
+    test "an untracked file bigger than the per-file limit fails closed in strict mode", %{workspace: workspace} do
       write!(workspace, "README.md", "base\nmore\n")
       write!(workspace, "big.md", String.duplicate("y\n", 200_000))
 
-      assert {:ok, result} = Acceptance.scope(workspace, issue(contract_body(allowed_extra_paths: ["big.md"])))
+      assert {:error, {:delivery_acceptance_failed, result}} =
+               Acceptance.scope(workspace, issue(contract_body(allowed_extra_paths: ["big.md"])))
 
-      assert result.status == :pass
+      assert result.status == :fail
+      assert [%Finding{code: :prohibition_scan_truncated}] = result.findings
       assert :change_scan_truncated in result.limits
     end
 
-    test "a tracked diff bigger than the parse limit declares the truncation", %{workspace: workspace} do
+    test "a tracked diff bigger than the parse limit fails closed in strict mode", %{workspace: workspace} do
       write!(workspace, "README.md", String.duplicate("x\n", 600_000))
 
-      assert {:ok, result} = Acceptance.scope(workspace, issue(contract_body([])))
+      assert {:error, {:delivery_acceptance_failed, result}} =
+               Acceptance.scope(workspace, issue(contract_body([])))
 
-      assert result.status == :pass
+      assert result.status == :fail
+      assert Enum.map(result.findings, & &1.code) == [:prohibition_scan_truncated]
       assert :change_scan_truncated in result.limits
     end
 

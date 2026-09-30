@@ -93,6 +93,7 @@ defmodule SymphonyElixir.PipelineContract do
             | :unexpected_path_changed
             | :required_evidence_missing
             | :required_evidence_failed
+            | :prohibition_scan_truncated
             | :forbidden_deploy_detected
             | :forbidden_remote_access_detected
 
@@ -124,8 +125,8 @@ defmodule SymphonyElixir.PipelineContract do
   # the key inside a scalar is data, not a declaration, and the parser is what
   # tells the two apart. The tag/anchor token excludes whitespace and `:`, so a
   # value is never read as a tag.
-  @contract_key ~r/(?:^[ \t]*|[{,]\s*)(?:\?[ \t]*)?(?:&[^\s:,]+[ \t]+)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/m
-  @contract_key_start ~r/^[ \t]*(?:\?[ \t]*)?(?:&[^\s:,]+[ \t]+)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/
+  @contract_key ~r/(?:^[ \t]*|[{,]\s*)(?:\?[ \t]*)?(?:&[^\s,\[\]{}]+[ \t]+)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/m
+  @contract_key_start ~r/^[ \t]*(?:\?[ \t]*)?(?:&[^\s,\[\]{}]+[ \t]+)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/
   @fence ~r/^[ \t]*(`{3,}|~{3,})/
   @evidence_name ~r/^[a-z0-9][a-z0-9._-]*$/
   @max_pattern_length 512
@@ -137,10 +138,13 @@ defmodule SymphonyElixir.PipelineContract do
 
   # An anchor token (`&name`) is refused: the schema needs no indirection, and an
   # alias graph can expand exponentially from a small document. The token class
-  # only matches an anchor *indicator* (start, whitespace or structural
-  # punctuation before `&`), so a glob pattern such as `docs/*.md` or `**/x.sh`
-  # and an `&` inside a value or a quoted string are untouched.
-  @anchor_token ~r/(?:^|[\s:,\[\]{}])&[A-Za-z0-9_.-]+/m
+  # matches an anchor *indicator* (start, whitespace or structural punctuation
+  # before `&`) followed by YAML's anchor grammar for the name — any run of
+  # characters that is not whitespace and not a flow indicator (`[`, `]`, `{`, `}`,
+  # `,`), so `&é`, `&ção` and `&a:b` are refused too, not only ASCII names —, so a
+  # glob pattern such as `docs/*.md` or `**/x.sh` and an `&` inside a value or a
+  # quoted string are untouched.
+  @anchor_token ~r/(?:^|[\s:,\[\]{}])&[^\s,\[\]{}]+/m
 
   # Fixed rules of `deploy: false`. They run over the *added* lines of the
   # candidate only, so a line that merely documents the pipeline (in an

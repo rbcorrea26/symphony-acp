@@ -12,33 +12,34 @@ defmodule SymphonyElixir.Delivery.Git do
   process), the credential never appears in `argv`, in the workspace or in a log
   line, and the file is removed even when the push fails.
 
-  Reading the candidate (who changed) is this module's other job, and the
-  acceptance contract depends on it: `change_set/1` reports a rename as the
+  Reading the candidate (what would be published) is this module's other job, and the
+  acceptance contract depends on it: `effective_change_set/2` reports a rename as the
   destination **plus the origin as a deletion** (the rename removed it, so a scope
   that authorized only the destination must not be able to delete an unrelated
-  file) and every untracked file individually, and `added_lines/1` gives the
+  file) and every untracked file individually, and `added_lines/2` gives the
   prohibition scan the added lines with the path they belong to.
 
-  A **resumed** cycle has no worktree change set to read: the candidate was
-  committed by the cycle that created it and the workspace is clean, so the change
-  set comes from git instead — `candidate_change_set/2` reads the branch head
-  against `merge_base/2`, the commit the branch forked from. A clean workspace is
-  never a change set of its own (that would be an invented empty read) and a
-  contract that became stricter after the publication is evaluated against the real
-  content of the published candidate.
+  The subject is **one** read, never a choice between two: a **resumed** cycle holds a
+  candidate already committed by the cycle that published it, and the gates and the
+  evidence commands may have written more into the same workspace, so the change set is
+  the diff of the **final workspace state** against `merge_base/2` (the commit the
+  branch forked from). That is exactly what the commit the run is about to create would
+  carry — committed candidate, tracked changes made again in the worktree and untracked
+  files included — so a clean workspace is never read as an invented empty change set
+  and a contract that became stricter after the publication is evaluated against the
+  real content of what is about to be promoted.
 
   The reads are **bounded and fail closed**: the change set is capped
-  (`@max_change_set` entries, non-UTF-8 paths refused), the **parse of both
-  formats is bounded while it reads** — one NUL-delimited field at a time, so a
-  candidate with millions of paths never materializes a list of millions of entries
-  before the cap applies — and the added-lines scan stops at its budgets
-  (`@max_diff_bytes`, enforced while the `git diff` child is still running so the
-  whole diff is never captured; `@max_scanned_files`, `@max_scanned_bytes`,
-  `@max_scanned_lines`), declaring `truncated` when a bound was reached. The
-  declared residual: the captures of `git status`, `git ls-files` and of the
-  candidate `git diff` are proportional to the number of paths the candidate
-  produced (the change set is capped at `@max_change_set`); the *parse* and the
-  structures built here are limited.
+  (`@max_change_set` entries, non-UTF-8 paths refused), the **parse is bounded while it
+  reads** — one NUL-delimited field at a time, so a candidate with millions of paths
+  never materializes a list of millions of entries before the cap applies — and the
+  added-lines scan stops at its budgets (`@max_diff_bytes`, enforced while the
+  `git diff` child is still running so the whole diff is never captured;
+  `@max_scanned_files`, `@max_scanned_bytes`, `@max_scanned_lines`), declaring
+  `truncated` when a bound was reached. The declared residual: the capture of
+  `git ls-files` and of the `git diff` of the subject are proportional to the number of
+  paths the candidate produced (the change set is capped at `@max_change_set`); the
+  *parse* and the structures built here are limited.
   """
 
   require Logger
@@ -56,6 +57,9 @@ defmodule SymphonyElixir.Delivery.Git do
   @max_scanned_lines 2_000
   @max_scanned_bytes 262_144
   @max_diff_bytes 1_048_576
+  # Untracked files are not in any diff, so both the change set and the added-lines scan
+  # read them from `ls-files`, one NUL-delimited path at a time.
+  @untracked_args ["ls-files", "--others", "--exclude-standard", "-z"]
 
   @type identity :: %{name: String.t(), email: String.t()}
   @type change :: %{path: String.t(), status: String.t()}
@@ -78,55 +82,71 @@ defmodule SymphonyElixir.Delivery.Git do
   end
 
   @doc """
-  The candidate change set: one entry per change the agent made.
+  The **effective candidate**: one entry per change the workspace would publish right
+  now, read against `base` — the fork point of the delivery branch with the base
+  branch (`merge_base/2`).
 
-  A rename is two entries — the destination with the status `R` and the origin
-  with the status `D` — because the rename **deleted the origin**: a `strict`
-  contract that authorized only the destination would otherwise be a way to remove
-  an unauthorized path. A copy is only the destination; its origin stays.
+  A resumed cycle is not "the committed candidate **or** the worktree": it is both. The
+  candidate was committed by the cycle that published it, and the gates or the evidence
+  commands may have written more into the same workspace, so what will be promoted is
+  the **final workspace state** against the base — the committed candidate, the tracked
+  files the worktree changed again (including one that undoes a commit) and the
+  untracked files `git add -A` would publish. The worktree's content simply wins over
+  the commit, as it does in the commit the run is about to create; there are no two
+  lists to reconcile and no precedence to guess.
 
-  `--porcelain -z -uall` is used on purpose. `-z` is unquoted (and reports the
-  destination of a rename before its origin), so a path with a space arrives
-  intact, and `-uall` lists each untracked file instead of a compressed `dir/`,
-  which is what lets an expected path inside a directory the agent just created be
-  matched.
+  `git diff --name-status -z --find-renames --find-copies <base>` compares the base
+  commit to the **working tree** (not to the index and not to `HEAD`), so every tracked
+  path is reported once, in its final state: a file committed by the candidate and
+  deleted afterwards is a deletion, and a renamed file is the effective rename.
+  Untracked files are not part of that diff, so they are read from
+  `git ls-files --others --exclude-standard -z` and reported as `??` (the state that
+  tells the parser they are not in the index yet); a path the index no longer tracks
+  but the worktree still holds appears in **both** reads (the diff as a deletion, because
+  the index cannot compare its content), and the worktree wins: it is reported once, as
+  untracked — never as a deletion the promotion does not have.
 
-  The read is **bounded and fails closed**: a change set above `@max_change_set`
-  entries is an error instead of a partial verdict, and a path that is not valid
-  UTF-8 is refused (the entry cannot be matched or persisted safely) instead of
-  crashing the run. The child capture of `git status` is proportional to the
-  number of changes, which is a declared limit of the stage.
+  A rename is two entries — the destination with the status `R` and the origin with the
+  status `D` — because the rename **deleted** the origin: a `strict` contract that
+  authorized only the destination would otherwise be a way to remove an unauthorized
+  path. A copy is only the destination; its origin stays.
+
+  `-z` is unquoted, so a path with a space arrives intact. The read is **bounded and
+  fails closed**: the cap (`@max_change_set`) applies to the two reads together (the
+  parse stops at the first entry above it instead of materializing the whole list), a
+  path that is not valid UTF-8 is refused (the entry cannot be matched or persisted
+  safely) instead of crashing the run, and a `base` that cannot be read is an error —
+  never an empty diff, which would be read as "the candidate changed nothing".
   """
-  @spec change_set(Path.t()) :: {:ok, [change()]} | {:error, term()}
-  def change_set(workspace) do
-    with {:ok, output} <- run_raw(workspace, ["status", "--porcelain", "-z", "-uall"]) do
-      entries_result(change_entries(output))
+  @spec effective_change_set(Path.t(), String.t()) :: {:ok, [change()]} | {:error, term()}
+  def effective_change_set(workspace, base) do
+    with {:ok, output} <- run_raw(workspace, diff_args(base)),
+         {:ok, untracked} <- run_raw(workspace, @untracked_args),
+         {:ok, extra} <- entries_result(untracked_entries(untracked, 0, [])) do
+      tracked_entries(output, extra)
     end
   end
 
-  @doc """
-  The change set of a **published** candidate: the delivery branch head against the
-  commit it forked from.
+  # The tracked half is read **against** the untracked one: a path the index stopped
+  # tracking while the worktree still holds it is reported by `git diff` as a deletion (a
+  # path the index does not know about cannot be compared content-wise) and by `ls-files`
+  # as untracked. The worktree wins — the file is there and `git add -A` publishes it —,
+  # so the diff entry is dropped instead of describing a deletion the promotion does not
+  # have, and the path is reported once.
+  defp tracked_entries(output, untracked) do
+    skip = Map.new(untracked, &{&1.path, true})
 
-  A resumed cycle has nothing in the worktree to read — the candidate was committed
-  by the cycle that created it —, so the change set is derived from git instead of
-  being invented as empty: `base` is `merge_base/2` (the fork point with the base
-  branch), which makes the diff exactly what the branch brought over the base, even
-  if the base branch moved after the clone.
-
-  The shape and the bounds are the same as `change_set/1`: a rename is the
-  destination plus the origin **as a deletion**, a copy is only the destination, the
-  cap and the non-UTF-8 refusal apply. Only the git format differs —
-  `--name-status -z` prints the status first and, for a rename or a copy, the source
-  before the destination (the opposite of the porcelain format).
-  """
-  @spec candidate_change_set(Path.t(), String.t()) :: {:ok, [change()]} | {:error, term()}
-  def candidate_change_set(workspace, base) do
-    args = ["-c", "core.quotePath=false", "diff", "--name-status", "--find-renames", "--find-copies", "-z", base]
-
-    with {:ok, output} <- run_raw(workspace, args) do
-      entries_result(scan_diff(output, [], 0))
+    case entries_result(scan_diff(output, [], length(untracked), skip)) do
+      {:ok, tracked} -> {:ok, tracked ++ untracked}
+      {:error, reason} -> {:error, reason}
     end
+  end
+
+  # `--find-renames`/`--find-copies` are explicit: the rename shape (destination plus
+  # the origin as a deletion) is what a scope is matched against, so it must not depend
+  # on the user's configuration.
+  defp diff_args(base) do
+    ["-c", "core.quotePath=false", "diff", "--name-status", "--find-renames", "--find-copies", "-z", base]
   end
 
   @doc """
@@ -161,10 +181,12 @@ defmodule SymphonyElixir.Delivery.Git do
   end
 
   @doc """
-  Parses a `git status --porcelain -z` output (`XY PATH\\0[ORIGIN\\0]`).
+  Parses a `git diff --name-status -z` output (`STATUS\\0PATH\\0`, and
+  `STATUS\\0SOURCE\\0DESTINATION\\0` for a rename or a copy — the source comes **before**
+  the destination).
 
-  The status `R` (rename) yields two entries — the destination and the origin as a
-  deletion — while `C` (copy) yields only the destination. The scan is **bounded
+  The status `R` (rename) yields two entries — the destination and the origin **as a
+  deletion** — while `C` (copy) yields only the destination. The scan is **bounded
   while it reads**: it takes one NUL-delimited field at a time and stops at the
   first entry above `@max_change_set`, so the list of paths is never materialized
   before the cap applies. Nothing past that point is read — not even decoded as
@@ -173,24 +195,42 @@ defmodule SymphonyElixir.Delivery.Git do
   is not valid UTF-8.
   """
   @spec change_entries(String.t()) :: {:ok, [change()]} | :overflow | :invalid_encoding
-  def change_entries(output) when is_binary(output), do: scan_porcelain(output, [], 0)
+  def change_entries(output) when is_binary(output), do: scan_diff(output, [], 0, MapSet.new())
+
+  # The untracked files are the other half of the effective change set: `git diff` never
+  # reports them and `git add -A` would publish them, so they are read from
+  # `ls-files --others` and reported as `??`. The read is bounded like the diff one — one
+  # field at a time, the cap shared with the entries the diff materializes — and a path
+  # both reads report is resolved by the caller (which drops the diff entry: the worktree
+  # wins over an index that stopped tracking the file).
+  defp untracked_entries(binary, count, acc) do
+    case next_field(binary) do
+      {<<>>, _rest} -> {:ok, Enum.reverse(acc)}
+      {path, rest} -> untracked_entry(path, rest, count, acc)
+    end
+  end
+
+  defp untracked_entry(_path, _rest, count, _acc) when count >= @max_change_set, do: :overflow
+
+  defp untracked_entry(path, rest, count, acc) do
+    with :ok <- encoding(path) do
+      untracked_entries(rest, count + 1, [%{status: "??", path: path} | acc])
+    end
+  end
 
   @doc """
-  The added lines of the candidate, with the path they belong to.
+  The added lines of the **effective candidate**, with the path they belong to.
 
-  Tracked modifications come from `git diff` against `revision` (added lines only,
-  so an untouched line is never scanned) and untracked files are read from disk.
-  Every step is bounded (`@max_diff_bytes`, `@max_scanned_files`,
-  `@max_scanned_bytes`, `@max_scanned_lines`) and the collection **stops at the
-  budget it reached** instead of building everything and truncating afterwards;
-  `truncated: true` says a bound was reached, so the caller can declare the scan
-  incomplete instead of pretending it was exhaustive.
+  Tracked modifications come from `git diff` against `revision` — the same revision the
+  change set is read against (`merge_base/2`, so the added lines of the committed
+  candidate are part of the scan) — and untracked files are read from disk. Added lines
+  only, so an untouched line is never scanned. Every step is bounded
+  (`@max_diff_bytes`, `@max_scanned_files`, `@max_scanned_bytes`, `@max_scanned_lines`)
+  and the collection **stops at the budget it reached** instead of building everything
+  and truncating afterwards; `truncated: true` says a bound was reached, so the caller
+  can declare the scan incomplete instead of pretending it was exhaustive.
 
-  `revision` is what the tracked lines are read against: `HEAD` (the default) for
-  the change set the workspace is about to commit, and `merge_base/2` when the
-  subject is a **published** candidate — the scan then reads the added lines of the
-  candidate itself instead of reporting a clean scan over an empty worktree. The
-  list of untracked files is read the same way the change sets are: **while it is
+  The list of untracked files is read the same way the change set is: **while it is
   read**, one NUL-delimited path at a time up to `@max_scanned_files`, so the whole
   `git ls-files` output is not materialized to apply the cap afterwards.
 
@@ -198,13 +238,10 @@ defmodule SymphonyElixir.Delivery.Git do
   and closes the port (which kills `git`), so a huge diff is never captured in the
   memory of the worker — see `diff_output/2`.
   """
-  @spec added_lines(Path.t()) :: {:ok, %{lines: [added_line()], truncated: boolean()}} | {:error, term()}
-  def added_lines(workspace), do: added_lines(workspace, "HEAD")
-
   @spec added_lines(Path.t(), String.t()) :: {:ok, %{lines: [added_line()], truncated: boolean()}} | {:error, term()}
   def added_lines(workspace, revision) do
     with {:ok, diff, diff_truncated} <- diff_output(workspace, revision),
-         {:ok, untracked} <- run_raw(workspace, ["ls-files", "--others", "--exclude-standard", "-z"]) do
+         {:ok, untracked} <- run_raw(workspace, @untracked_args) do
       {diff_lines, parse_truncated} = diff_added_lines(diff)
       budget = @max_scanned_lines - length(diff_lines)
       {file_lines, files_dropped, files_truncated} = untracked_lines(workspace, untracked, budget)
@@ -349,31 +386,18 @@ defmodule SymphonyElixir.Delivery.Git do
     end
   end
 
-  defp scan_porcelain(binary, acc, count) do
+  defp scan_diff(binary, acc, count, skip) do
     case next_field(binary) do
       {<<>>, _rest} -> {:ok, Enum.reverse(acc)}
-      {field, rest} -> porcelain_entry(field, rest, acc, count)
+      {field, rest} -> diff_entry(field, rest, acc, count, skip)
     end
   end
 
-  defp porcelain_entry(field, rest, acc, count) do
-    with :ok <- encoding(field),
-         {:ok, rest, entries} <- porcelain_entries(change_entry(field), rest) do
-      keep(entries, rest, acc, count, &scan_porcelain/3)
-    end
-  end
-
-  defp scan_diff(binary, acc, count) do
-    case next_field(binary) do
-      {<<>>, _rest} -> {:ok, Enum.reverse(acc)}
-      {field, rest} -> diff_entry(field, rest, acc, count)
-    end
-  end
-
-  defp diff_entry(field, rest, acc, count) do
+  defp diff_entry(field, rest, acc, count, skip) do
     with :ok <- encoding(field),
          {:ok, rest, entries} <- diff_entries(field, rest) do
-      keep(entries, rest, acc, count, &scan_diff/3)
+      entries = Enum.reject(entries, &Map.has_key?(skip, &1.path))
+      keep(entries, rest, acc, count, &scan_diff(&1, &2, &3, skip))
     end
   end
 
@@ -398,38 +422,10 @@ defmodule SymphonyElixir.Delivery.Git do
     if String.valid?(field), do: :ok, else: :invalid_encoding
   end
 
-  # In the `-z` **porcelain** format a rename/copy is two fields: the destination
-  # (which carries the status) followed by the origin. A rename **removed** the
-  # origin, so the origin is reported as a deletion of its own — otherwise a
-  # candidate could rename an unauthorized path into an authorized one and delete
-  # the origin with no finding at all. A copy leaves the origin in place, so it is
-  # consumed and not reported at all.
-  defp porcelain_entries(%{status: status} = entry, rest) do
-    if rename?(status) or copy?(status), do: origin_field(rest, status, entry), else: {:ok, rest, [entry]}
-  end
-
-  defp origin_field(rest, status, entry) do
-    case next_field(rest) do
-      # An origin that is missing (a malformed read) does not crash the parse.
-      {<<>>, remaining} ->
-        {:ok, remaining, [entry]}
-
-      {origin, remaining} ->
-        case encoding(origin) do
-          :ok -> {:ok, remaining, origin_entries(status, entry, origin)}
-          :invalid_encoding -> :invalid_encoding
-        end
-    end
-  end
-
-  defp origin_entries(status, entry, origin) do
-    if rename?(status), do: [entry, %{status: "D", path: origin}], else: [entry]
-  end
-
   # `git diff --name-status -z` emits `STATUS\0PATH\0` and, for a rename or a copy,
-  # `STATUS\0SOURCE\0DESTINATION\0` — the source **first**, the opposite of the
-  # porcelain format. A rename becomes the same two entries as `change_set/1` and a
-  # copy only the destination.
+  # `STATUS\0SOURCE\0DESTINATION\0` — the source **before** the destination. A rename
+  # becomes two entries (destination plus the origin as a deletion) and a copy only the
+  # destination.
   defp diff_entries(field, rest) do
     {source, remaining} = next_field(rest)
 
@@ -452,15 +448,6 @@ defmodule SymphonyElixir.Delivery.Git do
   defp renamed("R", source, destination) do
     [%{status: "R", path: destination}, %{status: "D", path: source}]
   end
-
-  # Binary match on purpose: the status is ASCII and the path is raw bytes (the
-  # field was validated as UTF-8 before this parse, so `String` is safe here).
-  defp change_entry(<<x::binary-size(1), y::binary-size(1), " ", path::binary>>) do
-    %{status: String.trim(x <> y), path: path}
-  end
-
-  defp rename?(status), do: String.contains?(status, "R")
-  defp copy?(status), do: String.contains?(status, "C")
 
   # The parse keeps the state of the file: `+++ b/path` is a header **only** outside a
   # hunk (before the first `@@`), so an added source line that starts with `++ b/`

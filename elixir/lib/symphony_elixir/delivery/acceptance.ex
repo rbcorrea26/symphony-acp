@@ -28,16 +28,19 @@ defmodule SymphonyElixir.Delivery.Acceptance do
       which runs immediately before this phase; a demanded name without a provider
       is a finding, never an invented pass;
     * an issue without a contract is **not configured**, not implicitly strict;
-    * what is accepted is the candidate of this cycle: the worktree change set when
-      this run is about to commit one, and — when the workspace is clean — the
-      **published candidate**, read from git as `HEAD` against the branch it forked
-      from (`delivery.base_branch`). A clean workspace is never taken as "nothing
-      changed": that would skip the scope *and* the demanded evidence of a resume,
-      which is exactly the case that has to stay verified. Only a workspace that is
-      clean **and** sits on the base itself has nothing to accept
-      (`not_applicable`), and the required evidence of the current contract is
-      executed whenever there is a candidate to promote;
-    * both phases derive that candidate from git; the read is cheap, has no state and
+    * what is accepted is **the content this run would promote**, read in one go: the
+      diff of the final workspace state against the branch it forked from
+      (`delivery.base_branch`). A resumed cycle is not "the worktree or the candidate":
+      the candidate was committed by the cycle that published it and the gates and the
+      evidence commands may have written more into the same workspace, so the subject is
+      committed candidate + tracked worktree changes + untracked files — exactly what the
+      commit the run is about to create would carry. A workspace that holds a candidate
+      is never taken as "nothing changed" (that would skip the scope *and* the demanded
+      evidence of a resume, which is exactly the case that has to stay verified); only a
+      workspace that sits on the base itself has nothing to accept (`not_applicable`),
+      and the required evidence of the current contract is executed whenever there is
+      something to promote;
+    * both phases derive that subject from git; the read is cheap, has no state and
       keeps the two phases independently testable, which is also why a retry over the
       same candidate produces the same verdict.
 
@@ -62,13 +65,12 @@ defmodule SymphonyElixir.Delivery.Acceptance do
   @max_persisted_bytes 16_384
 
   @doc """
-  Scope, prohibition and contract findings of the candidate change set.
+  Scope, prohibition and contract findings of the effective candidate.
 
-  `base_branch` — the branch a candidate forked from, `delivery.base_branch` — is
-  what gives a **clean workspace** a candidate: the change set is then derived from
-  git (`HEAD` against its merge base with that branch, `Git.candidate_change_set/2`)
-  instead of being read from the empty worktree, so a resume re-evaluates the scope
-  with the contract in force *now*.
+  `base_branch` (the `delivery.base_branch`) is what the subject is read against: the
+  final workspace state against its merge base with that branch
+  (`Git.effective_change_set/2`), so a resume re-evaluates the scope of everything it
+  would promote — the committed candidate included — with the contract in force *now*.
 
   Returns `{:error, {:delivery_acceptance_failed, result}}` when the verdict
   blocks the delivery; `advisory` findings come back in `{:ok, result}`.
@@ -188,9 +190,33 @@ defmodule SymphonyElixir.Delivery.Acceptance do
     {kept, length(items) - length(kept), payload}
   end
 
-  @doc "Marker of the persisted acceptance block of a candidate."
-  @spec comment_marker(String.t()) :: String.t()
-  def comment_marker(candidate_sha), do: "<!-- acceptance:result:#{candidate_sha} -->"
+  @doc """
+  Fingerprint of the verdict payload: the SHA-256 of the JSON that is persisted.
+
+  It is deterministic and derived from the canonical payload only (status, mode,
+  findings, evidence, limits), so it contains no secret and two equal verdicts always
+  carry the same fingerprint, while any material change — a different status, another
+  finding, an evidence that now fails, a mode that flipped — changes it.
+  """
+  @spec payload_fingerprint(Result.t()) :: String.t()
+  def payload_fingerprint(%Result{} = result) do
+    result |> summary_json() |> fingerprint()
+  end
+
+  @doc """
+  Marker of the persisted acceptance block of a candidate, carrying the fingerprint of
+  the payload it was written for.
+
+  The marker is the **identity** of the authoritative artifact of that verdict: a
+  comment whose body carries it is the record of *this* verdict, and the same candidate
+  re-evaluated with another verdict has to replace it (see
+  `SymphonyElixir.Delivery.GitHub.upsert_comment/5`) instead of leaving an old record
+  behind that still looks current.
+  """
+  @spec comment_marker(Result.t(), String.t()) :: String.t()
+  def comment_marker(%Result{} = result, candidate_sha) do
+    "<!-- acceptance:result:#{candidate_sha}:#{payload_fingerprint(result)} -->"
+  end
 
   @doc """
   The persisted acceptance block of the handoff comment: a marker plus the JSON
@@ -199,7 +225,11 @@ defmodule SymphonyElixir.Delivery.Acceptance do
   """
   @spec comment_block(Result.t(), String.t()) :: String.t()
   def comment_block(%Result{} = result, candidate_sha) do
-    "#{comment_marker(candidate_sha)}\n```json\n#{summary_json(result)}\n```"
+    "#{comment_marker(result, candidate_sha)}\n```json\n#{summary_json(result)}\n```"
+  end
+
+  defp fingerprint(payload) do
+    :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower)
   end
 
   defp contract_of(%Issue{description: description}) do
@@ -210,35 +240,22 @@ defmodule SymphonyElixir.Delivery.Acceptance do
     end
   end
 
-  # What the acceptance is about in this cycle: the change set and the revision the
-  # added lines are read against.
+  # What the acceptance is about in this cycle: **the content the run intends to
+  # promote**, which is one read and never a choice between two.
   #
-  #   * `{:workspace, changed}` — this run is about to commit the worktree, which is
-  #     what the gates and the evidence commands may have changed as well;
-  #   * `{:candidate, base}` — the workspace is clean and holds the **published**
-  #     candidate, so the change set comes from git: `HEAD` against the merge base
-  #     with the base branch (`base`), never from the empty worktree;
-  #   * `:none` — the workspace is clean and sits on the base itself: there is no
-  #     candidate to accept.
-  defp subject(workspace, base_branch) do
-    case Git.change_set(workspace) do
-      {:ok, []} -> published_subject(workspace, base_branch)
-      {:ok, changed} -> {:ok, {:workspace, changed}}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp published_subject(workspace, base_branch) do
-    with {:ok, base} <- Git.merge_base(workspace, base_branch),
-         {:ok, head} <- Git.head_sha(workspace) do
-      if head == base, do: {:ok, :none}, else: {:ok, {:candidate, base}}
-    end
-  end
-
+  # A resumed cycle holds a candidate already committed by the cycle that published it,
+  # and the gates and the evidence commands may have written more into the same
+  # workspace, so the subject is the diff of the **final workspace state** against the
+  # merge base with the base branch: committed candidate + tracked changes of the
+  # worktree + untracked files. Modelling "worktree" and "candidate" as alternatives
+  # would forget the committed part of a resume whose gates only added a file, and would
+  # promote content nobody accepted. An empty change set means the workspace sits on the
+  # base itself and has nothing to promote (`not_applicable`) — never "the read found
+  # nothing" about a workspace that does hold a candidate.
   defp scope_phase(workspace, contract, base_branch) do
-    with {:ok, subject} <- subject(workspace, base_branch),
-         {:ok, changed} <- subject_change_set(workspace, subject),
-         {:ok, %{lines: lines, truncated: truncated}} <- subject_added_lines(workspace, subject) do
+    with {:ok, base} <- Git.merge_base(workspace, base_branch),
+         {:ok, changed} <- Git.effective_change_set(workspace, base),
+         {:ok, %{lines: lines, truncated: truncated}} <- Git.added_lines(workspace, base) do
       case changed do
         [] -> {:ok, result_not_applicable(contract)}
         changed -> scope_result(contract, changed, lines, truncated) |> decide(:scope)
@@ -246,22 +263,15 @@ defmodule SymphonyElixir.Delivery.Acceptance do
     end
   end
 
-  defp subject_change_set(_workspace, :none), do: {:ok, []}
-  defp subject_change_set(_workspace, {:workspace, changed}), do: {:ok, changed}
-  defp subject_change_set(workspace, {:candidate, base}), do: Git.candidate_change_set(workspace, base)
-
-  # The added lines belong to the subject: against `HEAD` for the worktree, against
-  # the merge base of the candidate for a resume (the scan of a published candidate
-  # would otherwise be an empty scan over a clean worktree).
-  defp subject_added_lines(_workspace, :none), do: {:ok, %{lines: [], truncated: false}}
-  defp subject_added_lines(workspace, {:workspace, _changed}), do: Git.added_lines(workspace)
-  defp subject_added_lines(workspace, {:candidate, base}), do: Git.added_lines(workspace, base)
-
+  # The evidence module runs for the same subject: the demanded evidence is executed
+  # whenever there is something to promote (never on a workspace that sits on the base).
   defp evidence_phase(workspace, contract, delivery, base_branch) do
-    case subject(workspace, base_branch) do
-      {:ok, :none} -> {:ok, result_not_applicable(contract)}
-      {:ok, _subject} -> evidence_result(contract, workspace, delivery) |> decide(:evidence)
-      {:error, reason} -> {:error, reason}
+    with {:ok, base} <- Git.merge_base(workspace, base_branch),
+         {:ok, changed} <- Git.effective_change_set(workspace, base) do
+      case changed do
+        [] -> {:ok, result_not_applicable(contract)}
+        _changed -> evidence_result(contract, workspace, delivery) |> decide(:evidence)
+      end
     end
   end
 

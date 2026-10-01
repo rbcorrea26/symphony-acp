@@ -66,6 +66,32 @@ pipeline_contract:
 - corpo sem contrato (`:absent`) **não** é erro: a camada não se aplica e o
   comportamento segue o do ADR-0005.
 
+Revisão de 2026-09-30 (achados 1 e 2 da review do candidato `75791b4`), sobre a
+**extração** do bloco:
+
+- a cerca segue o limite estrutural do CommonMark: abertura e fechamento podem ser
+  indentados por **até três espaços** (mais que isso é código indentado e não cerca), e
+  a indentação é contada **só em espaços** — um marcador com tab é conteúdo (a coluna
+  que um tab alcança depende do tab stop; a leitura conservadora é declarada em
+  `../acceptance-contract.md`). Sem isso, uma linha indentada que *parece* fechamento
+  truncava o YAML e escondia os campos seguintes;
+- a dica textual é, e continua sendo, só um **ampliador do conjunto de falhas**: quem
+  decide presença/duplicidade é o parser. Ela passou a valer também quando o documento
+  **é decodificável e não lê a chave**: um scalar malformado (`foo:'unterminated`) faz o
+  decoder absorver o `pipeline_contract:` seguinte dentro de uma chave plana multi-linha
+  (ou a declaração está aninhada em outro mapeamento), o que transformava uma declaração
+  real em ausência silenciosa;
+- para não esconder nada, a dica **não usa heurística de scalar** onde ela decide: um
+  bloco **ilegível** é julgado no texto **bruto** (nada blankado, então nada pode ser
+  escondido — o preço declarado é conservador: um scalar de um bloco ilegível que cite a
+  chave é reprovado) e um bloco **legível sem a chave** é julgado no que o **decoder
+  leu** (uma chave lida que contém o token reprova; um token dentro de um valor não é
+  chave e deixa o corpo `:absent`). O blanking de scalar sobrevive só para as decisões
+  que **não** parseiam o bloco (a recusa de âncora e o cap de tamanho), e ali ele usa as
+  mesmas separações que o decoder exige (um scalar com aspas ou um comentário só começa
+  onde um nó pode começar, nunca colado a um `:`) e não deixa uma citação que não fecha
+  blankar as linhas seguintes (o blanking é refeito linha a linha).
+
 ### 2. As três camadas continuam independentes
 
 | # | Camada | Pergunta | Quem responde |
@@ -168,21 +194,29 @@ do limite `change_scan_truncated`.
   o texto humano tem `<` neutralizado (uma alteração do candidato não reescreve o
   comentário nem forja marcação de handoff).
 
-### 5. Retomada: o candidato publicado é aceito de novo (revisão de 2026-09-30)
+### 5. Retomada: o candidato efetivo é aceito de novo (revisão de 2026-09-30)
 
-Quando o change set do **worktree** está vazio, o relatório não conclui "nada a
-aceitar": se o workspace está em um commit do branch de entrega (o candidato
-publicado), o aceite é **recalculado sobre o candidato**, lido do Git —
-`SymphonyElixir.Delivery.Git.candidate_change_set/2` (`HEAD` contra `merge_base/2`,
-a merge base com `delivery.base_branch`) —, com as linhas adicionadas do mesmo diff
-indo para a varredura de proibição e as evidências exigidas pelo contrato em vigor
-executadas de novo. O veredicto anterior **nunca é reusado**: um contrato que ficou
-mais exigente (ou materialmente diferente) depois da publicação é reavaliado de
-forma determinística — ou o candidato satisfaz o contrato novo, ou o run falha sem
-promover nem comentar. `not_applicable` fica reservado ao workspace limpo que
-**está na base** (não há candidato nenhum), e uma branch base que não resolve é erro
-(`delivery_base_missing`), nunca um diff vazio lido como "o candidato não mudou
-nada".
+O sujeito do aceite é o **conteúdo que o run pretende promover**, e ele é **uma**
+leitura, não uma escolha entre duas: o diff da merge base com `delivery.base_branch`
+para o **estado final do workspace** —
+`SymphonyElixir.Delivery.Git.effective_change_set/2`, `git diff --name-status -z
+--find-renames --find-copies <base>` mais os não rastreados de
+`git ls-files --others --exclude-standard -z` —, com as linhas adicionadas do mesmo
+diff indo para a varredura de proibição e as evidências exigidas pelo contrato em vigor
+executadas de novo. Isso cobre, numa só leitura, o candidato já commitado (retomada), as
+alterações atuais de arquivos rastreados (inclusive uma que desfaz um commit) e os
+arquivos que `git add -A` publicaria (o que o gates ou uma evidência escreveu depois da
+publicação). Modelar "worktree" e "candidato" como alternativas esquecia a parte
+commitada de uma retomada cujo gates só acrescentou um arquivo — e promovia conteúdo que
+ninguém aceitou. Na revisão do candidato `75791b4` esse era o achado 4.
+
+O veredicto anterior **nunca é reusado**: um contrato que ficou mais exigente (ou
+materialmente diferente) depois da publicação é reavaliado de forma determinística
+contra o candidato efetivo — ou ele satisfaz o contrato novo, ou o run falha sem promover
+nem comentar. `not_applicable` fica reservado ao workspace que **não tem nada a promover**
+(change set efetivo vazio, o que inclui estar na base sem mudanças), e uma branch base
+que não resolve é erro (`delivery_base_missing`), nunca um diff vazio lido como "o
+candidato não mudou nada".
 
 Essa reavaliação é **verificada, não assumida**: o candidato do run reconciliado é o
 **HEAD local** do workspace (o conteúdo que este run tem em mãos) e o head observado
@@ -192,12 +226,14 @@ um commit que ele não aceitou e cujos gates locais não rodaram aqui. É a mesm
 do run que publica: o veredicto pertence ao commit observado, e o observado tem de
 ser o aceito.
 
-Limite declarado: o sujeito do aceite é o que o run **vai promover**. Com o worktree
-sujo o change set é o delta contra `HEAD` (o que este run commita e publica), e o
-conteúdo dos commits anteriores do mesmo branch não entra nele. A revisão desta
-decisão veio do achado da review do candidato `ad10879`: a versão anterior declarava
-que o escopo novo não era reavaliado na retomada, o que transformava ausência de
-execução em promoção. Detalhe operacional em `../acceptance-contract.md` §6.1.
+Limite declarado: o sujeito do aceite é o que o run **vai promover**. Num ciclo de
+criação isso é o worktree contra a base; num ciclo de retomada é o candidato commitado
+**mais** o worktree atual. Nenhum caminho transforma ausência de execução de evidência em
+promoção: sem conteúdo a promover o status é `not_applicable`, e com conteúdo as
+evidências exigidas rodam. A revisão da seção anterior veio do achado da review do
+candidato `ad10879` (ausência de execução virando promoção) e a do sujeito efetivo do
+achado 4 da review do candidato `75791b4`. Detalhe operacional em
+`../acceptance-contract.md` §6.1.
 
 ### 6. O veredicto é dado estruturado, não booleano
 
@@ -223,15 +259,28 @@ O aceite devolve `SymphonyElixir.Delivery.Acceptance.Result`:
 
 O veredicto aparece no `result` de `Delivery.run/3`, no log
 (`Delivery acceptance passed|diverged|failed`) e no comentário de handoff como
-marcação + JSON (`<!-- acceptance:result:<sha> -->`), que é a interface estável para
-a máquina de estados da review (#13) e para o architect runner (#14). Nada de
-rótulo novo e nada de arquivo de estado: a evidência continua transitória
-(PR/CI/comentário), como decidido no ADR-0006 da plataforma.
+marcação + JSON (`<!-- acceptance:result:<sha>:<fingerprint> -->`), que é a interface
+estável para a máquina de estados da review (#13) e para o architect runner (#14). Nada
+de rótulo novo e nada de arquivo de estado: a evidência continua transitória
+(PR/CI/comentário), como decidido no ADR-0006 da plataforma. O `fingerprint` é o
+SHA-256 do JSON persistido (`Acceptance.payload_fingerprint/1`): determinístico,
+derivado só do payload canônico e sem segredo.
 
 Invariante operacional do handoff: *promotion state must not advance if the
 machine-readable verdict was not durably persisted* — o comentário (com o JSON) é
 escrito **antes** do rótulo de handoff e da remoção do rótulo de entrada; se a
 escrita falhar, a issue não é promovida e nada de estado avança.
+
+Revisão de 2026-09-30 (achado 3 da review do candidato `75791b4`): a idempotência do
+comentário era chaveada **só** pelo SHA do candidato, então o mesmo commit reavaliado
+com outro veredicto (contrato corrigido, evidência que passou a falhar, modo que mudou)
+mantinha o comentário antigo como se ele ainda fosse o veredicto vigente. Agora o
+artefato tem identidade explícita (o marcador do candidato) **e** conteúdo conferido
+pela impressão digital do payload: mesmo SHA + mesma impressão → nada é escrito; mesmo
+SHA + impressão diferente → o comentário é **substituído**
+(`GitHub.upsert_comment/5`); candidato diferente → artefato próprio; falha de escrita →
+o run falha antes dos rótulos. Comentários antigos permanecem como histórico e nunca
+são lidos como o veredicto corrente. Detalhe em `../acceptance-contract.md` §8.
 
 Limite declarado:
 quando o aceite reprova, o run falha e **não** publica nem comenta (a evidência do
@@ -272,20 +321,25 @@ bloqueio fica no log; o estado persistido de bloqueio é escopo da #13).
   glob (o padrão é compilado uma vez por avaliação do change set), achados de escopo
   e de proibição (puros).
 - `elixir/lib/symphony_elixir/delivery/acceptance.ex` — gate impuro: deriva o sujeito
-  (worktree, ou o candidato publicado lido do Git contra a base quando o worktree está
-  limpo), roda as evidências exigidas sempre que há candidato, decide por modo, resume o
-  relatório e persiste o veredicto cortado por bytes (16 KiB, com `omitted`).
+  (**candidato efetivo**: diff da base para o estado final do workspace, incluindo não
+  rastreados), roda as evidências exigidas sempre que há conteúdo a promover, decide por
+  modo, resume o relatório, calcula a impressão digital do payload e persiste o veredicto
+  cortado por bytes (16 KiB, com `omitted`).
 - `elixir/lib/symphony_elixir/delivery/gates.ex` — runner único de comando com
   timeout, usado por gates e evidências.
-- `elixir/lib/symphony_elixir/delivery/git.ex` — `change_set/1` (porcelain `-z -uall`:
-  rename = destino + origem como deleção, copy só o destino, arquivo não rastreado
-  individual), `candidate_change_set/2` e `merge_base/2` (o candidato publicado contra a
-  base, no formato `--name-status -z`) e `added_lines/1,2` (leitura limitada do
-  `git diff` de uma revisão, que é encerrado no cap, + não rastreados limitados). O
-  parse dos dois formatos é incremental (um campo NUL-delimited por vez, parando no
-  cap), não uma lista materializada antes do limite.
+- `elixir/lib/symphony_elixir/delivery/git.ex` — `effective_change_set/2` (diff da base
+  para o estado final do workspace, formato `--name-status -z`: rename = destino + origem
+  como deleção, copy só o destino; mais os não rastreados de `ls-files`, sem repetir um
+  path já reportado), `change_entries/1` (o parse puro do formato), `merge_base/2` e
+  `added_lines/2` (leitura limitada do `git diff` de uma revisão, que é encerrado no cap,
+  + não rastreados limitados). O parse é incremental (um campo NUL-delimited por vez,
+  parando no cap), não uma lista materializada antes do limite.
 - `elixir/lib/symphony_elixir/delivery.ex` — ordem das camadas, `contract` no
-  resultado e linha do aceite no comentário de handoff.
+  resultado e o handoff que **cria ou substitui** o comentário autoritativo do
+  candidato antes de mover rótulo.
+- `elixir/lib/symphony_elixir/delivery/github.ex` — superfície REST fina, incluindo
+  `upsert_comment/5` (identidade do artefato + marcador do payload corrente) e
+  `update_comment/3`.
 - `elixir/lib/symphony_elixir/config/schema.ex` — bloco `delivery.evidence`
   (nome não vazio → comando não vazio).
 - Testes: `pipeline_contract_test.exs` (schema, glob, escopo, proibições),

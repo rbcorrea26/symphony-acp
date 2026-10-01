@@ -60,6 +60,11 @@ Regras do parser (`SymphonyElixir.PipelineContract`):
 | conteúdo de block scalar (`key: \|`, `key: >-`, `- \|`) | é **texto**: a chave ou a âncora escrita dentro dele não conta (o escalar termina na primeira linha menos indentada) |
 | cabeçalho de block scalar com os dois indicadores (`\|2-`, `\|-2`) | as duas ordens valem: o conteúdo é texto nas duas |
 | string com aspas que atravessa linhas físicas | a continuação continua sendo **scalar** (o estado da citação sobrevive ao `\n`), então `&notes` ali não é âncora |
+| aspas que **não fecham** em nenhuma linha do bloco (`foo: 'unterminated`) | o scalar não existe (o decoder não o lê): a citação não pode blankar as linhas seguintes, então um `pipeline_contract:` escrito depois dela continua sendo observado e o bloco **falha fechado**, nunca vira ausência |
+| aspas logo depois de `:` **sem separação** (`foo:'unterminated`, `scope_mode:'advisory'`) | perante o YAML isso é **plain scalar**, não scalar com aspas: a dica textual não entra em estado de citação e a declaração seguinte continua visível (com separação `foo: 'unterminated`, a citação é válida e não fecha: vale a linha acima) |
+| bloco **decodificável** que não lê a chave mas cujo texto a declara em posição de chave | o token foi absorvido por um scalar malformado (`foo:'unterminated` transforma o `pipeline_contract:` seguinte em parte de uma chave plana multi-linha) ou é uma declaração aninhada em outro mapeamento: o bloco é candidato a contrato e o decode reporta `:missing_pipeline_contract_key` → reprova, nunca ausência |
+| bloco **ilegível** cujo texto cita a chave em posição de chave (mesmo dentro de um scalar) | a decisão é sobre o texto bruto, então a chave é observada: reprova, nunca ausência (o preço conservador de não deixar nenhuma heurística esconder uma declaração) |
+| cerca de abertura/fechamento com **mais de três espaços** de indentação (ou com tab) | é código indentado, não cerca: não abre nem fecha o bloco, então o conteúdo depois dela continua sendo observado (uma pseudo-cerca não pode truncar o YAML) |
 | cerca de fechamento | mesmo marcador da abertura, comprimento ≥ o da abertura e **nada além de espaços** depois do marcador: uma linha como ` ```not-a-close ` é conteúdo do bloco (não trunca o YAML nem esconde os campos que vêm depois) e uma linha de abertura com info string (` ```yaml `) nunca fecha |
 | cerca de fechamento com o mesmo marcador e mais caracteres que a abertura | fecha o bloco (CommonMark): a prosa seguinte não é lida como YAML |
 | `pipeline_contract:` dentro de um scalar **e** bloco que não pode ser decodificado | a dica de chave roda no texto com o scalar blankado: um scalar não declara o contrato (nem sequer para reprovar), mas um bloco que cita a chave fora de scalar segue falhando fechado |
@@ -78,20 +83,58 @@ Quem decide se o corpo **declara** o contrato é o **parser YAML**, não uma reg
 a chave é contada nos nós do parser (com `maps_as_keywords`, que preserva chaves
 repetidas e não guarda comentários) *antes* de o decoder colapsar duplicatas, então
 estilo de chave e duplicidade ambígua não dependem de forma textual. A regex de
-chave existe só como **dica textual que amplia o conjunto de falhas**: um bloco que
-cita a chave mas não pode ser decodificado é erro (`invalid_yaml`), nunca ausência;
-e uma âncora estrutural faz o bloco ser recusado **sem** ser parseado (o grafo de
-alias nunca é expandido).
+chave existe só como **dica textual que amplia o conjunto de falhas**, nos dois
+lugares em que o parser não consegue responder:
+
+- bloco que **não pode ser lido** (`:invalid`, ou acima do cap de tamanho): a decisão
+  é sobre o texto **bruto**, sem blankar nada — assim nenhuma heurística sobre scalars
+  pode esconder uma declaração. O preço declarado é conservador: um scalar de um bloco
+  ilegível que cite a chave em posição de chave (por exemplo um `pipeline_contract:`
+  dentro de um block scalar num documento quebrado por outro motivo) é reprovado em vez
+  de virar ausência;
+- bloco **legível que não lê a chave**: a decisão vem do que o **decoder leu**. Se
+  alguma chave lida contém o token — o caso de um scalar malformado
+  (`foo:'unterminated`) que absorve o `pipeline_contract:` seguinte para dentro de uma
+  chave plana mais longa, ou o de uma declaração aninhada em outro mapeamento — e o
+  texto a declara em posição de chave, o bloco é reprovado
+  (`:missing_pipeline_contract_key`). Se o token está dentro de um **valor** (block
+  scalar, string com aspas, comentário), ele não é chave nenhuma: não declara nada e o
+  corpo segue `:absent` — é o que mantém um exemplo de documentação ou uma menção em
+  prosa fora do contrato.
+
+O blanking de scalar (comentário, string com aspas, block scalar) continua existindo
+para as decisões que **não** parseiam o bloco: a recusa de âncora estrutural (o grafo
+de alias nunca é expandido) e o cap de tamanho. Ele usa as mesmas separações que o
+decoder exige — um scalar com aspas ou um comentário só começa onde um nó pode
+começar, nunca colado a um `:` — e uma citação que não fecha em nenhuma linha do bloco
+não blanka as linhas seguintes (o blanking é refeito linha a linha, onde nenhum estado
+sobrevive ao `\n`).
 
 ## 3. Semântica de escopo
 
 `expected_paths` significa **"o candidato entrega este path"**, não "o path existe
-no repositório": a comparação é com o **change set do candidato** (o que será
-publicado), obtido de `git status --porcelain -z -uall`. Um arquivo que já existia
-na base e não foi tocado **não satisfaz** o contrato — foi exatamente o caso #64.
+no repositório": a comparação é com o **change set do candidato efetivo** (o que será
+publicado), lido do Git contra a merge base com a branch base
+(`Git.effective_change_set/2`, `git diff --name-status -z --find-renames --find-copies`
++ `git ls-files --others -z`). Um arquivo que já existia na base e não foi tocado
+**não satisfaz** o contrato — foi exatamente o caso #64.
+
+O sujeito é o **conteúdo que o run pretende promover**, e não uma escolha entre
+worktree e candidato: o diff da base para o **estado final do workspace** cobre, numa
+leitura só, o candidato já commitado (retomada), as alterações atuais de arquivos
+rastreados — inclusive uma que desfaz um commit — e os arquivos não rastreados que o
+`git add -A` publicaria. O conteúdo do worktree simplesmente vence o commit, como no
+commit que o run vai criar; não há duas listas para reconciliar nem precedência a
+adivinhar, e um path aparece **uma vez**, no estado final (um rename é o rename
+efetivo, uma deleção do candidato desfeita no worktree deixa de ser mudança). O
+overlap possível entre as duas leituras — um path que o índice deixou de rastrear mas o
+worktree ainda guarda — é resolvido pelo **worktree**: o path é reportado como não
+rastreado (`??`, o que `add -A` publicaria), nunca como a deleção que a promoção não
+tem.
 
 A leitura do change set **falha fechada**: acima de 5 000 entradas é erro
-(`change_set_too_large`) e um path que não é UTF-8 válido é recusado
+(`change_set_too_large`, contando as entradas materializadas do diff e as não
+rastreadas juntas) e um path que não é UTF-8 válido é recusado
 (`change_set_not_utf8`) em vez de derrubar o run ou aceitar dado parcial — o escopo
 nunca é decidido sobre um change set incompleto.
 
@@ -148,7 +191,7 @@ faltou executar é `required_evidence_failed` com o status `deadline_exceeded`
 
 | Aspecto | Verificável? | Mecanismo |
 |---|---|---|
-| paths entregues/autorizados | **sim, determinístico** | change set do git (`--porcelain -z -uall`) |
+| paths entregues/autorizados | **sim, determinístico** | change set efetivo do git (diff base → estado final + não rastreados) |
 | evidência exigida | **sim** | exit code do comando declarado no workflow |
 | comando proibido **presente** nas linhas adicionadas | **sim (positivo)** | varredura de padrões fixos (ADR-0006 §4) |
 | **ausência** de acesso remoto/deploy na execução | **não** | o pipeline não observa rede/processos do agente: um `PASS` significa "nenhum achado na varredura", não prova de ausência |
@@ -160,11 +203,12 @@ atingido** (`change_scan_truncated`): 1 MiB de texto de diff (lido do processo f
 e cortado no cap — o `git diff` é encerrado nesse ponto, o diff inteiro nunca é
 capturado na memória), 200 arquivos não rastreados, 262 144 bytes por arquivo não
 rastreado, 2 000 linhas adicionadas, 5 achados por tipo e trecho de 80 caracteres. O
-limite residual declarado: a captura de `git status`/`git ls-files` (e a do `git diff`
-do candidato publicado) é proporcional ao número de paths do candidato (o change set é
-limitado a 5 000 entradas); o *parse* dos **dois** formatos é limitado **enquanto lê** —
-um campo NUL-delimited por vez, parando na primeira entrada acima do cap, sem
-materializar a lista inteira antes — e as estruturas construídas aqui são limitadas.
+limite residual declarado: a captura de `git ls-files` (e a do `git diff` do sujeito) é
+proporcional ao número de paths do candidato (o change set é limitado a 5 000 entradas); o
+*parse* do formato `--name-status` é limitado **enquanto lê** — um campo NUL-delimited por
+vez, parando na primeira entrada acima do cap, sem materializar a lista inteira antes —, a
+leitura dos não rastreados compartilha o mesmo cap e as estruturas construídas aqui são
+limitadas.
 Consequência declarada dessa leitura incremental: um input enorme cujo *tail* não é
 UTF-8 devolve `change_set_too_large` (o tail não chega a ser lido), enquanto um path não
 UTF-8 **dentro** do cap devolve `change_set_not_utf8` — as duas falham fechado.
@@ -188,50 +232,58 @@ apenas "este contrato não proíbe". Quem autoriza deploy é a política da plat
 | Situação | Status do veredicto | Efeito no run |
 |---|---|---|
 | contrato ausente | `:not_configured` | nenhum (comportamento anterior, ADR-0005) |
-| workspace limpo **e** candidato publicado (HEAD ≠ base) | `:pass` / `:fail` (recalculado do Git) | o candidato é reavaliado antes de promover (seção 6.1) |
-| workspace limpo **e** sem candidato (HEAD na base) | `:not_applicable` | nenhum: não há candidato a aceitar |
+| workspace com o candidato publicado (HEAD ≠ base) | `:pass` / `:fail` (recalculado do Git, com o worktree incluído) | o conteúdo efetivo é reavaliado antes de promover (seção 6.1) |
+| workspace sem nada a promover (HEAD na base e worktree limpo) | `:not_applicable` | nenhum: não há conteúdo a aceitar |
 | `strict`, sem achados | `:pass` | segue: gates → evidências → publicação |
 | `strict`, com achados | `:fail` | run falha **sem publicar** (nada de branch/PR/rótulo/comentário) |
 | `strict`, varredura de proibição **truncada** | `:fail` (`prohibition_scan_truncated`) | run falha sem publicar: um scan parcial não certifica ausência de proibição |
 | `advisory`, com achados | `:advisory` | publica normalmente; achados no log e no comentário |
 | contrato inválido | `:fail` (`mode: nil`) | run falha sem publicar (`invalid_contract`) |
 
-Idempotência: o veredicto é função de (contrato, change set, comandos de
+Idempotência: o veredicto é função de (contrato, change set efetivo, comandos de
 evidência), então repetir o aceite sobre o mesmo candidato dá o mesmo resultado; um
-retry não publica nada em caso de falha e não duplica o comentário em caso de
-sucesso (o comentário é chaveado pelo SHA do candidato).
+retry não publica nada em caso de falha e não duplica o comentário em caso de sucesso.
+O comentário do handoff é o **artefato autoritativo do veredicto do candidato**: ele é
+criado uma vez por SHA e **substituído** quando o mesmo candidato é reavaliado com outro
+payload (seção 8) — identidade pelo candidato, conteúdo pela impressão digital.
 
 ### 6.1 Retomada (`--resume-only`) de um candidato publicado
 
-Um workspace **limpo** não é "nada a aceitar". Quando ele está em um commit do branch de
-entrega (o candidato publicado), o aceite é **recalculado sobre o candidato**, lido do
+Um workspace com um candidato publicado não é "nada a aceitar", nem "só o delta do
+worktree". O aceite é **recalculado sobre o conteúdo que o run vai promover**, lido do
 Git, e o veredicto anterior **nunca é reusado**:
 
-- o change set sai do diff do candidato — `HEAD` contra a merge base com a branch base
-  (`delivery.base_branch`), `git diff --name-status -z` —, não do worktree vazio, que
-  seria um change set inventado;
-- rename continua sendo destino + origem **como deleção** e copy só o destino, aqui como
-  no caminho do porcelain (no formato `--name-status` a origem vem **antes** do destino);
-- a varredura de proibição lê as linhas adicionadas **do candidato** (o mesmo diff contra
-  a base, mais os não rastreados que estiverem no worktree);
+- o sujeito é o **candidato efetivo**: o diff da merge base com a branch base
+  (`delivery.base_branch`) para o **estado final do workspace**, ou seja o candidato já
+  commitado **mais** as alterações rastreadas atuais **mais** os arquivos não rastreados
+  (o que o gates ou uma evidência escreveu depois da publicação entra na avaliação, e o
+  que o worktree desfez deixa de entrar) — nunca uma escolha entre "worktree" e
+  "candidato";
+- rename continua sendo destino + origem **como deleção** e copy só o destino (no formato
+  `--name-status` a origem vem **antes** do destino), e as duas leituras (diff e
+  não rastreados) compartilham o cap de 5 000 entradas;
+- a varredura de proibição lê as linhas adicionadas **do diff do sujeito** (o mesmo diff
+  contra a base, mais os não rastreados que estiverem no worktree);
 - as evidências exigidas pelo contrato **em vigor** rodam de novo: um contrato que passou
   a exigir uma evidência nova (ou cujo provider passou a falhar) não é "aceito pelo ciclo
   que publicou";
 - uma mudança material do contrato depois da publicação (`expected_paths` diferente, uma
-  proibição nova, uma evidência nova) é reavaliada de forma determinística: ou o
-  candidato satisfaz o contrato novo, ou o run falha sem promover nem comentar;
-- `not_applicable` fica reservado ao workspace limpo que **está na base** (não há
-  candidato nenhum), e uma branch base que não resolve é erro (`delivery_base_missing`) —
-  nunca um diff vazio lido como "o candidato não mudou nada";
+  proibição nova, uma evidência nova) é reavaliada de forma determinística contra o
+  candidato efetivo: ou ele satisfaz o contrato novo, ou o run falha sem promover nem
+  comentar;
+- `not_applicable` fica reservado ao workspace que **não tem nada a promover** (o diff
+  base → estado final é vazio, o que inclui o caso de estar na base sem mudanças), e uma
+  branch base que não resolve é erro (`delivery_base_missing`) — nunca um diff vazio lido
+  como "o candidato não mudou nada";
 - a promoção do run de retomada (reconciliar o candidato já publicado) continua amarrada
   ao SHA: um head de branch diferente do HEAD local falha com `delivery_candidate_replaced`.
 
-Limite declarado: o sujeito do aceite é o que o run **vai promover**. Com o worktree
-sujo, o change set é o delta do worktree contra `HEAD` — o que este run commita e
-publica —, e o conteúdo dos commits anteriores do mesmo branch não entra nele. Nenhum
-caminho de retomada transforma ausência de execução de evidência em `PASS`: sem candidato
-o status é `not_applicable`, e com candidato as evidências exigidas rodam (falha continua
-fail-closed em `strict` e advisory em `advisory`).
+Limite declarado: o sujeito do aceite é o que o run **vai promover**. Num ciclo de
+criação (sem candidato publicado) isso é o worktree contra a base; num ciclo de retomada
+é o candidato commitado **mais** o worktree atual. Nenhum caminho de retomada transforma
+ausência de execução de evidência em `PASS`: sem conteúdo a promover o status é
+`not_applicable`, e com conteúdo as evidências exigidas rodam (falha continua fail-closed
+em `strict` e advisory em `advisory`).
 
 ## 7. Códigos de finding
 
@@ -255,7 +307,7 @@ O veredicto completo é devolvido por `Delivery.run/3` (`result.contract`) e
 persistido no comentário de handoff como marcação + JSON:
 
 ```text
-<!-- acceptance:result:<candidate-sha> -->
+<!-- acceptance:result:<candidate-sha>:<fingerprint> -->
 {"status":"advisory","contract_version":1,"mode":"advisory","findings":[...],"evidence":[...],"limits":[...]}
 ```
 
@@ -267,9 +319,31 @@ saem primeiro e depois os arrays de findings/evidências são cortados até cabe
 medido no JSON de verdade (não estimado) — e o campo `omitted` diz quantos ficaram de
 fora, com `persisted` marcando a compactação. Perder o texto do comando (ou o
 excedente dos arrays) é melhor que perder o veredicto, e o comentário do GitHub tem
-limite de tamanho. O comentário é escrito **antes** dos rótulos de promoção, para que
-uma falha de escrita não deixe a issue promovida sem o veredicto. Limite declarado:
-quando o aceite **reprova**, o run falha e **não** publica nem comenta (a evidência
+limite de tamanho.
+
+**Um candidato tem um artefato autoritativo, e ele é o veredicto atual.** A
+identidade do artefato é o comentário que carrega o marcador do candidato
+(`<!-- delivery:candidate:<sha> -->`) e a marcação de aceite leva a **impressão
+digital** do payload (`SHA-256` do JSON persistido, `Acceptance.payload_fingerprint/1`):
+
+- mesmo candidato **e** mesma impressão digital → operação idempotente: nada é escrito
+  (retry não duplica comentário);
+- mesmo candidato **e** impressão diferente → o comentário é **atualizado**
+  (`PATCH /issues/comments/:id`): o veredicto antigo não continua como estado
+  autoritativo quando o contrato mudou, uma evidência passou a falhar ou o modo mudou;
+- candidato diferente → artefato próprio (o marcador carrega o SHA);
+- falha ao escrever/atualizar → o run falha **antes** de qualquer rótulo de promoção,
+  então nenhum rótulo indica um estado cujo aceite não esteja persistido;
+- o comentário é escrito **antes** dos rótulos de promoção (mesmo invariante de antes).
+
+A comparação é por identidade explícita + impressão digital do payload, nunca por
+heurística de prosa ou por "o comentário existe". Limites declarados: comentários
+antigos (de outro candidato, ou de um payload anterior do mesmo candidato, se o GitHub
+não permitir substituir) permanecem como **histórico** e não são lidos como o veredicto
+vigente; a leitura de comentários existentes é a primeira página da API
+(`per_page=100`), o mesmo limite do estágio de entrega — um artefato fora dela não é
+visto, e nesse caso o run escreve o veredicto corrente (nunca deixa de persistir).
+Quando o aceite **reprova**, o run falha e **não** publica nem comenta (a evidência
 fica no log do run) — o estado de bloqueio persistido no GitHub é escopo da #13.
 
 O veredicto é do **conteúdo aceito**: ele é calculado sobre o workspace antes de
@@ -285,7 +359,8 @@ ninguém aceitou.
   e de itens, sem `eval`/`source`/shell; a presença e a duplicidade da chave são
   contadas nos **nós do parser** (uma chave com aspas, com tag ou explícita é a
   mesma chave; duas chaves iguais são duas), e o texto bruto só pode *acrescentar*
-  falha, nunca declarar ausência;
+  falha, nunca declarar ausência — inclusive depois de um scalar malformado, que
+  não pode blankar as linhas seguintes nem esconder uma declaração real;
 - **globs**: o padrão é transformado em uma fonte de regex cujos literais passam por
   `Regex.escape` e cujo match é Unicode (`?` é um caractere, não um byte), então a
   compilação não pode falhar por causa da entrada; um padrão que não é UTF-8 é erro

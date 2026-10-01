@@ -417,7 +417,7 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       # read that stops at the cap (and kills the child).
       write!(workspace, "big.txt", Enum.map_join(1..500, "\n", &("line #{&1} " <> String.duplicate("x", 3_000))) <> "\n")
 
-      assert {:ok, %{lines: lines, truncated: true}} = Git.added_lines(workspace)
+      assert {:ok, %{lines: lines, truncated: true}} = Git.added_lines(workspace, "HEAD")
 
       assert length(lines) < 500
       assert Enum.all?(lines, &(&1.path == "big.txt"))
@@ -577,6 +577,159 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
     test "a base branch that does not exist fails closed instead of reading an empty diff", %{workspace: workspace} do
       assert {:error, {:delivery_base_missing, "not-a-branch"}} =
                Acceptance.scope(workspace, issue(contract_body([])), "not-a-branch")
+    end
+  end
+
+  describe "a resumed candidate with a dirty worktree" do
+    test "the committed candidate and the artifact of the gates are accepted together", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+
+      # The gates (or an evidence command) write an authorized artifact **after** the
+      # publication: the resume has to accept the candidate and the artifact together,
+      # never one of them.
+      write!(workspace, "evidence.txt", "ran\n")
+
+      issue = issue(contract_body(expected_paths: ["answer.sh"], allowed_extra_paths: ["evidence.txt"]))
+
+      assert {:ok, result} = Acceptance.scope(workspace, issue, @base_branch)
+
+      assert %Result{status: :pass, mode: :strict} = result
+      assert result.change_set.delivered == ["answer.sh"]
+      assert result.change_set.unexpected == []
+      assert Enum.sort(result.change_set.changed) == ["answer.sh", "evidence.txt"]
+    end
+
+    test "an artifact the contract does not authorize is a finding, without losing the candidate", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+      write!(workspace, "gates-artifact.txt", "gate\n")
+
+      assert {:error, {:delivery_acceptance_failed, result}} =
+               Acceptance.scope(workspace, issue(contract_body(expected_paths: ["answer.sh"])), @base_branch)
+
+      # The unexpected artifact does not make the committed candidate disappear: the
+      # expected path is still delivered and only the artifact is reported.
+      assert result.change_set.delivered == ["answer.sh"]
+      assert result.change_set.unexpected == ["gates-artifact.txt"]
+
+      assert [%Finding{code: :unexpected_path_changed, path: "gates-artifact.txt"}] = result.findings
+    end
+
+    test "a file the worktree changed again is reported once, in its final state", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n# reviewed\n")
+
+      assert {:ok, result} =
+               Acceptance.scope(workspace, issue(contract_body(expected_paths: ["answer.sh"])), @base_branch)
+
+      assert result.status == :pass
+      assert result.change_set.changed == ["answer.sh"]
+      assert result.change_set.delivered == ["answer.sh"]
+    end
+
+    test "a worktree change that undoes the candidate is not accepted as delivered", %{workspace: workspace} do
+      commit_base_file!(workspace, "notes.md", "base\n")
+      write!(workspace, "notes.md", "base\nmore\n")
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+
+      # The worktree puts `notes.md` back to its base content: the effective candidate has
+      # nothing to publish for it, so an expected path that relied on that modification is
+      # missing — the acceptance reads the final state, not the commit.
+      write!(workspace, "notes.md", "base\n")
+
+      assert {:error, {:delivery_acceptance_failed, result}} =
+               Acceptance.scope(
+                 workspace,
+                 issue(contract_body(expected_paths: ["answer.sh", "notes.md"])),
+                 @base_branch
+               )
+
+      assert result.change_set.changed == ["answer.sh"]
+      assert [%Finding{code: :expected_path_missing, path: "notes.md"}] = result.findings
+
+      # The same effective candidate, with a contract that expects only what it delivers,
+      # is accepted.
+      assert {:ok, %Result{status: :pass}} =
+               Acceptance.scope(workspace, issue(contract_body(expected_paths: ["answer.sh"])), @base_branch)
+    end
+
+    test "a rename of the candidate and a later deletion are read in the final state", %{workspace: workspace} do
+      commit_base_file!(workspace, "notes.md", "base\n")
+      File.mkdir_p!(Path.join(workspace, "docs"))
+      git!(workspace, ["mv", "notes.md", "docs/notes.md"])
+      publish_candidate!(workspace)
+
+      # The worktree deletes the renamed file: what would be published is a deletion of
+      # the origin, so the path delivered by the removal is the origin, not the rename.
+      File.rm!(Path.join(workspace, "docs/notes.md"))
+
+      assert {:ok, result} =
+               Acceptance.scope(workspace, issue(contract_body(expected_paths: ["notes.md"])), @base_branch)
+
+      assert result.status == :pass
+      assert result.change_set.changed == ["notes.md"]
+
+      assert {:error, {:delivery_acceptance_failed, missing}} =
+               Acceptance.scope(workspace, issue(contract_body(expected_paths: ["docs/notes.md"])), @base_branch)
+
+      assert Enum.map(missing.findings, & &1.code) == [:expected_path_missing, :unexpected_path_changed]
+      assert Enum.find(missing.findings, &(&1.code == :expected_path_missing)).path == "docs/notes.md"
+    end
+
+    test "the evidence of the contract runs over the effective candidate", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+
+      issue = issue(contract_body(expected_paths: ["answer.sh"], required_evidence: ["agent-tests"]))
+      delivery = %{@delivery | evidence: %{"agent-tests" => "echo ran > evidence.txt"}}
+
+      assert {:ok, ran} = Acceptance.evidence(workspace, issue, delivery, @base_branch)
+      assert [%{name: "agent-tests", status: :passed}] = ran.evidence
+      assert File.exists?(Path.join(workspace, "evidence.txt"))
+
+      # A red evidence blocks the resume even though the candidate was published by a
+      # cycle that passed: the contract in force is what decides.
+      red = %{@delivery | evidence: %{"agent-tests" => "exit 1"}}
+
+      assert {:error, {:delivery_acceptance_failed, failed}} = Acceptance.evidence(workspace, issue, red, @base_branch)
+
+      assert [%Finding{code: :required_evidence_failed, category: :evidence}] = failed.findings
+    end
+
+    test "a contract that became stricter after the publication sees the effective candidate", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+
+      assert {:ok, %Result{status: :pass}} =
+               Acceptance.scope(workspace, issue(contract_body(expected_paths: ["answer.sh"])), @base_branch)
+
+      # The gates write an authorized artifact and the contract becomes stricter after the
+      # publication: the resume sees the effective candidate (the committed one plus the
+      # artifact) and reports the new expectation as missing, without forgetting the old.
+      write!(workspace, "evidence.txt", "ran\n")
+
+      tightened =
+        issue(contract_body(expected_paths: ["answer.sh", "docs/changes/12.md"], allowed_extra_paths: ["evidence.txt"]))
+
+      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, tightened, @base_branch)
+
+      assert Enum.sort(result.change_set.changed) == ["answer.sh", "evidence.txt"]
+      assert [%Finding{code: :expected_path_missing, path: "docs/changes/12.md"}] = result.findings
+    end
+
+    test "the prohibition scan reads the diff of the candidate that the worktree changed again", %{workspace: workspace} do
+      write!(workspace, "scripts/deploy.sh", "#!/bin/sh\necho ok\n")
+      publish_candidate!(workspace)
+      write!(workspace, "scripts/deploy.sh", "#!/bin/sh\nkubectl apply -f k8s/site.yml\n")
+
+      issue = issue(contract_body(expected_paths: ["scripts/deploy.sh"]))
+
+      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue, @base_branch)
+
+      assert [%Finding{code: :forbidden_deploy_detected, path: "scripts/deploy.sh"}] = result.findings
     end
   end
 
@@ -785,11 +938,25 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
           limits: [:prohibition_scan_is_heuristic]
         )
 
-      assert Acceptance.comment_marker("abc123") == "<!-- acceptance:result:abc123 -->"
+      marker = Acceptance.comment_marker(result, "abc123")
+
+      # The marker is the identity of the persisted verdict: it carries the candidate and
+      # the fingerprint of the payload, and the same verdict always produces it.
+      assert marker =~ ~r/^<!-- acceptance:result:abc123:[0-9a-f]{64} -->$/
+      assert Acceptance.comment_marker(result, "abc123") == marker
+      assert Acceptance.payload_fingerprint(result) =~ ~r/^[0-9a-f]{64}$/
+
+      # A material change of the verdict is a different fingerprint (and another
+      # candidate is another identity), while the payload itself does not change it.
+      assert Acceptance.payload_fingerprint(Result.evaluated(mode: :advisory, contract_version: 1)) !=
+               Acceptance.payload_fingerprint(result)
+
+      assert Acceptance.payload_fingerprint(result) ==
+               Acceptance.payload_fingerprint(%{result | limits: [:prohibition_scan_is_heuristic]})
 
       block = Acceptance.comment_block(result, "abc123")
 
-      assert block =~ "<!-- acceptance:result:abc123 -->"
+      assert block =~ marker
       assert block =~ "```json\n"
 
       json = block |> String.split("```json\n") |> List.last() |> String.replace_suffix("\n```", "")
@@ -885,6 +1052,24 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       "-q",
       "-m",
       "candidate"
+    ])
+  end
+
+  # A file that belongs to the base branch (not to the candidate): what a resume finds
+  # already committed when it starts.
+  defp commit_base_file!(workspace, path, content) do
+    write!(workspace, path, content)
+    git!(workspace, ["add", "-A"])
+
+    git!(workspace, [
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.org",
+      "commit",
+      "-q",
+      "-m",
+      "base #{path}"
     ])
   end
 

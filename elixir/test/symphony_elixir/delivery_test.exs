@@ -12,6 +12,7 @@ defmodule SymphonyElixir.DeliveryTest do
 
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Delivery
+  alias SymphonyElixir.Delivery.Acceptance
   alias SymphonyElixir.Delivery.Acceptance.Result
   alias SymphonyElixir.Delivery.Git
   alias SymphonyElixir.Delivery.GitHub, as: DeliveryGitHub
@@ -51,6 +52,7 @@ defmodule SymphonyElixir.DeliveryTest do
             labels: attrs[:labels] || [],
             fail_label_delete: attrs[:fail_label_delete] || false,
             fail_comment: attrs[:fail_comment],
+            fail_comment_update: attrs[:fail_comment_update],
             comments: [],
             review: attrs[:review] || :created
           }
@@ -68,6 +70,16 @@ defmodule SymphonyElixir.DeliveryTest do
 
     @spec state(pid()) :: map()
     def state(pid), do: Agent.get(pid, & &1)
+
+    @spec fail_comment_update!(pid(), {atom(), integer(), map()}) :: :ok
+    def fail_comment_update!(pid, {:failed, _status, _message} = failure) do
+      Agent.update(pid, &%{&1 | fail_comment_update: failure})
+    end
+
+    @spec forget_comment_ids!(pid()) :: :ok
+    def forget_comment_ids!(pid) do
+      Agent.update(pid, &%{&1 | comments: Enum.map(&1.comments, fn comment -> Map.delete(comment, "id") end)})
+    end
 
     @spec sha(pid(), String.t()) :: String.t() | nil
     def sha(pid, branch), do: remote_sha(Agent.get(pid, & &1.remote), branch)
@@ -157,12 +169,34 @@ defmodule SymphonyElixir.DeliveryTest do
     defp dispatch_repo(state, "POST", ["issues", _number, "comments"], _params, body, _checks) do
       case state.fail_comment do
         nil ->
-          comment = %{"body" => body["body"]}
+          comment = %{"id" => length(state.comments) + 1, "body" => body["body"]}
           created = %{track(state, :comment_created) | comments: state.comments ++ [comment]}
           {{:ok, %{status: 201, body: comment}}, created}
 
         {:failed, status, message} ->
           {{:error, {:github_request_failed, status, message}}, track(state, {:comment_failed, status})}
+      end
+    end
+
+    # The verdict of a candidate is a single artifact: the same candidate re-evaluated
+    # with another payload replaces the body of its comment instead of adding a second
+    # record.
+    defp dispatch_repo(state, "PATCH", ["issues", "comments", id], _params, body, _checks) do
+      case state.fail_comment_update do
+        nil ->
+          case Enum.split_with(state.comments, &(to_string(&1["id"]) == id)) do
+            {[stored], rest} ->
+              updated = %{stored | "body" => body["body"]}
+              new_state = %{track(state, {:comment_updated, stored["id"]}) | comments: rest ++ [updated]}
+              {{:ok, %{status: 200, body: updated}}, new_state}
+
+            _other ->
+              missing = track(state, {:comment_missing, id})
+              {{:error, {:github_request_failed, 404, %{"message" => "Not Found"}}}, missing}
+          end
+
+        {:failed, status, message} ->
+          {{:error, {:github_request_failed, status, message}}, track(state, {:comment_update_failed, status})}
       end
     end
 
@@ -412,6 +446,138 @@ defmodule SymphonyElixir.DeliveryTest do
     assert length(state.pulls) == 1
   end
 
+  test "a retry with the same verdict does not rewrite the comment of the candidate", %{workspace: workspace} do
+    configure!([])
+
+    fake = fake!()
+    change_answer!(workspace, "42")
+    issue = contract_issue(expected_paths: ["answer.sh"])
+
+    assert {:ok, first} = Delivery.run(workspace, issue, github_opts(fake))
+    assert {:ok, second} = Delivery.run(workspace, issue, github_opts(fake))
+
+    state = FakeGitHub.state(fake)
+
+    assert second.candidate_sha == first.candidate_sha
+    assert Enum.count(state.requests, &(&1 == :comment_created)) == 1
+    refute Enum.any?(state.requests, &match?({:comment_updated, _}, &1))
+    assert length(state.comments) == 1
+  end
+
+  test "the same candidate re-evaluated with another verdict replaces its comment", %{workspace: workspace} do
+    configure!([])
+    fake = fake!()
+    change_answer!(workspace, "42")
+
+    # First cycle: the (advisory) contract diverges, so the verdict persisted for the
+    # candidate says `advisory`.
+    diverging =
+      contract_issue(scope_mode: "advisory", expected_paths: ["docs/x.md"], allowed_extra_paths: ["answer.sh"])
+
+    assert {:ok, first} = Delivery.run(workspace, diverging, github_opts(fake))
+    assert first.contract.status == :advisory
+
+    # The issue body is corrected — the candidate did not change — and the verdict of the
+    # very same SHA is now a pass: the old comment cannot stay as the authoritative
+    # record of a verdict that no longer holds.
+    passing = contract_issue(expected_paths: ["answer.sh"])
+
+    assert {:ok, second} = Delivery.run(workspace, passing, github_opts(fake))
+
+    state = FakeGitHub.state(fake)
+
+    assert second.candidate_sha == first.candidate_sha
+    assert second.contract.status == :pass
+    assert Enum.count(state.requests, &(&1 == :comment_created)) == 1
+    assert Enum.count(state.requests, &match?({:comment_updated, _}, &1)) == 1
+    assert length(state.comments) == 1
+
+    [comment] = state.comments
+    assert comment["body"] =~ "`strict` passed"
+    refute comment["body"] =~ "`advisory` diverged"
+    assert comment["body"] =~ Acceptance.comment_marker(second.contract, second.candidate_sha)
+  end
+
+  test "a verdict that changes for the same candidate is persisted before the labels move", %{workspace: workspace} do
+    configure!([])
+    fake = fake!(labels: ["pipeline:ready"])
+    change_answer!(workspace, "42")
+
+    diverging =
+      contract_issue(scope_mode: "advisory", expected_paths: ["docs/x.md"], allowed_extra_paths: ["answer.sh"])
+
+    assert {:ok, _first} = Delivery.run(workspace, diverging, github_opts(fake))
+    after_first = length(FakeGitHub.state(fake).requests)
+
+    passing = contract_issue(expected_paths: ["answer.sh"])
+    assert {:ok, _second} = Delivery.run(workspace, passing, github_opts(fake))
+
+    # Only the requests of the second cycle: the verdict of the same candidate changed, so
+    # the stale comment is replaced and the label moves after it — never before.
+    second_cycle = FakeGitHub.state(fake).requests |> Enum.drop(after_first)
+
+    update_at = Enum.find_index(second_cycle, &match?({:comment_updated, _}, &1))
+    labels_at = Enum.find_index(second_cycle, &match?({:labels, _}, &1))
+
+    assert is_integer(update_at)
+    assert is_integer(labels_at)
+    assert update_at < labels_at
+    assert FakeGitHub.state(fake).labels == ["pipeline:ready-for-human"]
+  end
+
+  test "an artifact the payload cannot be updated on is rewritten, not trusted", %{workspace: workspace} do
+    configure!([])
+    fake = fake!()
+    change_answer!(workspace, "42")
+
+    diverging =
+      contract_issue(scope_mode: "advisory", expected_paths: ["docs/x.md"], allowed_extra_paths: ["answer.sh"])
+
+    assert {:ok, _first} = Delivery.run(workspace, diverging, github_opts(fake))
+
+    # A stored comment without an `id` is not an artifact that can be replaced: the current
+    # verdict is written instead of being assumed, and the promotion still happens.
+    FakeGitHub.forget_comment_ids!(fake)
+
+    passing = contract_issue(expected_paths: ["answer.sh"])
+    assert {:ok, second} = Delivery.run(workspace, passing, github_opts(fake))
+
+    state = FakeGitHub.state(fake)
+
+    assert Enum.count(state.requests, &(&1 == :comment_created)) == 2
+    assert state.labels == ["pipeline:ready-for-human"]
+
+    newest = List.last(state.comments)
+    assert newest["body"] =~ Acceptance.comment_marker(second.contract, second.candidate_sha)
+  end
+
+  test "a comment that cannot be updated does not promote the issue", %{workspace: workspace} do
+    configure!([])
+    fake = fake!(labels: ["pipeline:ready"])
+    change_answer!(workspace, "42")
+
+    diverging =
+      contract_issue(scope_mode: "advisory", expected_paths: ["docs/x.md"], allowed_extra_paths: ["answer.sh"])
+
+    assert {:ok, _first} = Delivery.run(workspace, diverging, github_opts(fake))
+
+    # The stored verdict is now stale and the update fails: the issue must not look
+    # delivered with a verdict that was not written.
+    FakeGitHub.fail_comment_update!(fake, {:failed, 422, %{"message" => "body too long"}})
+
+    passing = contract_issue(expected_paths: ["answer.sh"])
+
+    assert {:error, {:github_request_failed, 422, _body}} = Delivery.run(workspace, passing, github_opts(fake))
+
+    state = FakeGitHub.state(fake)
+    assert [comment] = state.comments
+    assert comment["body"] =~ "`advisory` diverged"
+
+    failed_at = Enum.find_index(state.requests, &match?({:comment_update_failed, 422}, &1))
+    assert is_integer(failed_at)
+    refute Enum.any?(Enum.drop(state.requests, failed_at), &match?({:labels, _}, &1))
+  end
+
   test "an unavailable review is recorded and does not block the handoff", %{workspace: workspace} do
     configure!([])
     fake = fake!(review: {:failed, 422, %{"message" => "Reviews are not available"}})
@@ -479,7 +645,11 @@ defmodule SymphonyElixir.DeliveryTest do
   end
 
   test "the change set parser reports a rename as destination plus deletion, and a copy as destination only" do
-    output = "R  docs.md" <> <<0>> <> "README.md" <> <<0>> <> " M answer.sh" <> <<0>> <> "?? notes/new.md" <> <<0>>
+    output =
+      "R" <>
+        <<0>> <>
+        "README.md" <>
+        <<0>> <> "docs.md" <> <<0>> <> "M" <> <<0>> <> "answer.sh" <> <<0>> <> "T" <> <<0>> <> "notes/new.md" <> <<0>>
 
     assert Git.change_entries(output) ==
              {:ok,
@@ -487,70 +657,74 @@ defmodule SymphonyElixir.DeliveryTest do
                 %{path: "docs.md", status: "R"},
                 %{path: "README.md", status: "D"},
                 %{path: "answer.sh", status: "M"},
-                %{path: "notes/new.md", status: "??"}
+                %{path: "notes/new.md", status: "T"}
               ]}
 
     assert Git.change_entries("") == {:ok, []}
 
     # A copy leaves its origin in place: only the destination is a change.
-    copy = "C  docs/copy.md" <> <<0>> <> "README.md" <> <<0>>
+    copy = "C" <> <<0>> <> "README.md" <> <<0>> <> "docs/copy.md" <> <<0>>
     assert Git.change_entries(copy) == {:ok, [%{path: "docs/copy.md", status: "C"}]}
 
-    # A rename whose origin is missing (a malformed read) does not crash the parse.
-    assert Git.change_entries("R  docs.md" <> <<0>>) == {:ok, [%{path: "docs.md", status: "R"}]}
+    # A rename whose destination is missing (a malformed read) does not crash the parse.
+    assert Git.change_entries("R" <> <<0>> <> "docs.md" <> <<0>>) ==
+             {:ok, [%{path: "", status: "R"}, %{path: "docs.md", status: "D"}]}
 
     # A doubled or trailing NUL separates nothing: the empty field is skipped.
     assert Git.change_entries(<<0>>) == {:ok, []}
 
-    assert Git.change_entries("?? a.md" <> <<0, 0>> <> "?? b.md") ==
-             {:ok, [%{path: "a.md", status: "??"}, %{path: "b.md", status: "??"}]}
+    assert Git.change_entries("M" <> <<0>> <> "a.md" <> <<0, 0>> <> "A" <> <<0>> <> "b.md") ==
+             {:ok, [%{path: "a.md", status: "M"}, %{path: "b.md", status: "A"}]}
 
     # A field that is not valid UTF-8 cannot be matched or persisted safely, neither as
     # an entry nor as the origin of a rename.
-    assert Git.change_entries(<<"?? bad", 0xFF, ".md", 0>>) == :invalid_encoding
-    assert Git.change_entries("R  docs.md" <> <<0>> <> <<"bad", 0xFF>> <> <<0>>) == :invalid_encoding
+    assert Git.change_entries(<<"?", "?", 0, "bad", 0xFF, ".md", 0>>) == :invalid_encoding
+    assert Git.change_entries("R" <> <<0>> <> <<"bad", 0xFF>> <> <<0>>) == :invalid_encoding
 
     # Below the cap the change set is complete and at the cap it is still complete.
-    assert {:ok, entries} = Git.change_entries(Enum.map_join(1..4_999, <<0>>, &"?? f#{&1}"))
+    assert {:ok, entries} = Git.change_entries(Enum.map_join(1..4_999, <<0>>, &"M\0f#{&1}"))
     assert length(entries) == 4_999
-    assert {:ok, entries} = Git.change_entries(Enum.map_join(1..5_000, <<0>>, &"?? f#{&1}"))
+    assert {:ok, entries} = Git.change_entries(Enum.map_join(1..5_000, <<0>>, &"M\0f#{&1}"))
     assert length(entries) == 5_000
-    assert hd(entries) == %{path: "f1", status: "??"}
-    assert List.last(entries) == %{path: "f5000", status: "??"}
+    assert hd(entries) == %{path: "f1", status: "M"}
+    assert List.last(entries) == %{path: "f5000", status: "M"}
 
     # Above the cap the read fails closed instead of producing a partial (and therefore
     # accepted-by-accident) verdict.
-    assert Git.change_entries(Enum.map_join(1..5_001, <<0>>, &"?? f#{&1}")) == :overflow
+    assert Git.change_entries(Enum.map_join(1..5_001, <<0>>, &"M\0f#{&1}")) == :overflow
 
-    # The cap counts what a rename materializes (destination + deletion), not the
-    # porcelain fields.
-    renames = Enum.map_join(1..2_501, <<0>>, fn index -> "R  new#{index}\0old#{index}" end)
+    # The cap counts what a rename materializes (destination + deletion), not the fields
+    # of the git output.
+    renames = Enum.map_join(1..2_501, <<0>>, fn index -> "R\0old#{index}\0new#{index}" end)
     assert Git.change_entries(renames) == :overflow
 
     # The scan stops where the cap was exceeded: a large NUL-delimited input is not
     # materialized as a list before the bound applies, so the bytes after that point are
     # never read — a non-UTF-8 tail cannot even change the answer (a read that validated
     # the whole output first reports `:invalid_encoding` here).
-    huge = Enum.map_join(1..200_000, <<0>>, &"?? f#{&1}") <> <<0>> <> <<"?? bad", 0xFF>>
+    huge = Enum.map_join(1..200_000, <<0>>, &"M\0f#{&1}") <> <<0>> <> <<"M\0bad", 0xFF>>
     assert Git.change_entries(huge) == :overflow
   end
 
-  test "the change set of a published candidate is read from git against its fork point", %{workspace: workspace} do
-    # A base with a larger file (so git detects the copy) and one to delete.
+  test "the effective candidate is read from git against its fork point", %{workspace: workspace} do
+    # A base with a larger file (so git detects the copy), one to delete and one to
+    # modify again later.
     File.write!(Path.join(workspace, "notes.md"), Enum.map_join(1..40, "\n", &"line #{&1}"))
     File.write!(Path.join(workspace, "gone.md"), "gone\n")
+    File.write!(Path.join(workspace, "README.md"), "base\n")
     git!(workspace, ["add", "-A"])
     git!(workspace, ["-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-q", "-m", "base files"])
     git!(workspace, ["push", "-q", "origin", "main"])
 
-    # The candidate: a rename, a file modified and copied and a deletion, all committed
-    # and not present in the worktree any more.
+    # The candidate: a rename, a file modified and copied, a deletion and a plain
+    # modification, all committed and not present in the worktree any more.
     git!(workspace, ["checkout", "-q", "-b", delivery_branch()])
     File.mkdir_p!(Path.join(workspace, "docs"))
     git!(workspace, ["mv", "answer.sh", "docs/renamed.sh"])
     File.write!(Path.join(workspace, "notes.md"), Enum.map_join(1..41, "\n", &"line #{&1}"))
     File.cp!(Path.join(workspace, "notes.md"), Path.join(workspace, "copied.md"))
     File.rm!(Path.join(workspace, "gone.md"))
+    File.write!(Path.join(workspace, "README.md"), "base\nmore\n")
     git!(workspace, ["add", "-A"])
     git!(workspace, ["-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-q", "-m", "candidate"])
 
@@ -559,7 +733,7 @@ defmodule SymphonyElixir.DeliveryTest do
     assert {:ok, base} = Git.merge_base(workspace, "main")
     assert base == String.trim(elem(System.cmd("git", ["-C", workspace, "rev-parse", "origin/main"]), 0))
 
-    assert {:ok, entries} = Git.candidate_change_set(workspace, base)
+    assert {:ok, entries} = Git.effective_change_set(workspace, base)
 
     # Rename = destination plus the origin as a deletion (the origin is gone), copy = the
     # destination only (its source stays), and the deletion is reported as itself.
@@ -569,26 +743,76 @@ defmodule SymphonyElixir.DeliveryTest do
                %{status: "D", path: "answer.sh"},
                %{status: "M", path: "notes.md"},
                %{status: "C", path: "copied.md"},
-               %{status: "D", path: "gone.md"}
+               %{status: "D", path: "gone.md"},
+               %{status: "M", path: "README.md"}
              ])
 
-    # A candidate that is the base itself has no change set at all.
+    # The worktree belongs to the same read: a file written after the candidate was
+    # committed (as the gates or an evidence command may do) is in the change set, and a
+    # file the worktree put back to its base content is reported in its final state — the
+    # committed modification is gone because there is nothing to publish for it.
+    File.write!(Path.join(workspace, "artifact.txt"), "gate\n")
+    File.write!(Path.join(workspace, "README.md"), "base\n")
+
+    assert {:ok, entries} = Git.effective_change_set(workspace, base)
+
+    assert Enum.sort(entries) ==
+             Enum.sort([
+               %{status: "R", path: "docs/renamed.sh"},
+               %{status: "D", path: "answer.sh"},
+               %{status: "M", path: "notes.md"},
+               %{status: "C", path: "copied.md"},
+               %{status: "D", path: "gone.md"},
+               %{status: "??", path: "artifact.txt"}
+             ])
+
+    # A workspace that sits on the base itself has nothing to promote: the gate artifact
+    # is removed and the worktree is reset to the committed candidate, so the read is
+    # empty instead of an invented absence...
+    File.rm!(Path.join(workspace, "artifact.txt"))
+    git!(workspace, ["checkout", "-q", "--", "."])
+
     assert {:ok, head} = Git.head_sha(workspace)
-    assert {:ok, []} = Git.candidate_change_set(workspace, head)
+    assert {:ok, []} = Git.effective_change_set(workspace, head)
+
+    # ...and a new file on top of the base is exactly the change set of a cycle that
+    # starts from it (a workspace with something to publish is never empty).
+    File.write!(Path.join(workspace, "fresh.txt"), "fresh\n")
+
+    assert {:ok, [%{status: "??", path: "fresh.txt"}]} = Git.effective_change_set(workspace, head)
+
+    # A path the index stopped tracking while the file stayed in the worktree is read by
+    # both halves: the worktree wins, so it is reported once as the untracked file the
+    # promotion would publish instead of as a deletion (which the promotion does not have).
+    git!(workspace, ["rm", "-q", "--cached", "README.md"])
+
+    assert {:ok, entries} = Git.effective_change_set(workspace, head)
+
+    assert Enum.sort(entries) ==
+             Enum.sort([
+               %{status: "??", path: "README.md"},
+               %{status: "??", path: "fresh.txt"}
+             ])
 
     # A base branch that does not exist is an error, never an empty (and therefore
     # accepted) change set.
     assert {:error, {:delivery_base_missing, "not-a-branch"}} = Git.merge_base(workspace, "not-a-branch")
   end
 
-  test "a published candidate with a non-UTF-8 path fails closed", %{workspace: workspace} do
+  test "an effective candidate with a non-UTF-8 path fails closed", %{workspace: workspace} do
     git!(workspace, ["checkout", "-q", "-b", delivery_branch()])
     File.write!(Path.join(workspace, <<"bad", 0xFF, ".md">>), "x\n")
     git!(workspace, ["add", "-A"])
     git!(workspace, ["-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-q", "-m", "od name"])
 
     assert {:ok, base} = Git.merge_base(workspace, "main")
-    assert {:error, {:change_set_not_utf8, :rejected}} = Git.candidate_change_set(workspace, base)
+    assert {:error, {:change_set_not_utf8, :rejected}} = Git.effective_change_set(workspace, base)
+
+    # The untracked half of the read is checked the same way: the path is out of the index
+    # and the file stays in the worktree, so it is the `ls-files` read that refuses it.
+    git!(workspace, ["rm", "-q", "--cached", <<"bad", 0xFF, ".md">>])
+
+    assert {:error, {:change_set_not_utf8, :rejected}} = Git.effective_change_set(workspace, base)
   end
 
   test "git refuses to publish without a credential", %{workspace: workspace} do
@@ -774,7 +998,7 @@ defmodule SymphonyElixir.DeliveryTest do
     on_exit(fn -> System.put_env("PATH", path) end)
 
     assert {:error, {:git_not_available, _message}} = Git.status(workspace)
-    assert {:error, {:git_not_available, _message}} = Git.added_lines(workspace)
+    assert {:error, {:git_not_available, _message}} = Git.added_lines(workspace, "HEAD")
     assert {:error, {:git_not_available, _message}} = Git.merge_base(workspace, "main")
   end
 
@@ -786,7 +1010,7 @@ defmodule SymphonyElixir.DeliveryTest do
 
     # Nothing is committed yet, so `git diff HEAD` fails (exit 128): the read reports
     # the failure instead of reporting a clean (and therefore empty) scan.
-    assert {:error, {:git_command_failed, _args, 128, output}} = Git.added_lines(fresh)
+    assert {:error, {:git_command_failed, _args, 128, output}} = Git.added_lines(fresh, "HEAD")
     assert output =~ "HEAD"
   end
 
@@ -991,7 +1215,12 @@ defmodule SymphonyElixir.DeliveryTest do
 
     [comment] = FakeGitHub.state(fake).comments
     assert comment["body"] =~ "- acceptance contract: `advisory` diverged"
-    assert comment["body"] =~ "<!-- acceptance:result:#{result.candidate_sha} -->"
+
+    # The marker carries the fingerprint of the payload that was persisted: it is the
+    # identity of the authoritative record of this verdict.
+    marker = Acceptance.comment_marker(result.contract, result.candidate_sha)
+    assert comment["body"] =~ marker
+    assert marker =~ ~r/^<!-- acceptance:result:#{result.candidate_sha}:[0-9a-f]{64} -->$/
 
     # The findings survive the run: the persisted block is machine-readable.
     persisted = comment["body"] |> String.split("```json\n") |> List.last() |> String.replace_suffix("\n```\n", "")

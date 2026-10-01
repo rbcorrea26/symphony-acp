@@ -245,6 +245,62 @@ defmodule SymphonyElixir.PipelineContractTest do
       assert {:error, {:pipeline_contract_invalid, {:ambiguous_contracts, 2}}} = Contract.parse(body)
     end
 
+    test "a fence is structural only up to three spaces of indentation" do
+      # CommonMark: four spaces make an indented code block, so such a line can neither
+      # open nor close the block that carries the contract.
+      for indent <- 0..3 do
+        opening = String.duplicate(" ", indent)
+
+        body = "#{opening}```yaml\npipeline_contract:\n  version: 1\n  scope_mode: advisory\n#{opening}```\n"
+
+        assert {:ok, contract} = Contract.parse(body), "opening fence indented by #{indent}"
+        assert contract.scope_mode == :advisory
+      end
+
+      indented = "    ```yaml\npipeline_contract:\n  version: 1\n  scope_mode: advisory\n    ```\n"
+
+      # The block is never opened, so its text is prose of the body and declares nothing.
+      assert Contract.parse(indented) == :absent
+    end
+
+    test "an indentation of four spaces does not close the block" do
+      # Inside a block a line indented by four spaces is content (CommonMark), so it does
+      # not end the block: both keys stay in one block — a duplicate — instead of the
+      # second one becoming a block of its own.
+      body =
+        "```yaml\npipeline_contract:\n  version: 1\n  scope_mode: advisory\n    ```\npipeline_contract:\n  version: 1\n  scope_mode: strict\n```\n"
+
+      assert {:error, {:pipeline_contract_invalid, {:duplicate_contract_key, 2}}} = Contract.parse(body)
+
+      # The same body with the marker indented by three spaces does close the block, and
+      # the second key becomes a block of its own: the two declarations are ambiguous.
+      split =
+        "```yaml\npipeline_contract:\n  version: 1\n  scope_mode: advisory\n   ```\n```yaml\npipeline_contract:\n  version: 1\n  scope_mode: strict\n```\n"
+
+      assert {:error, {:pipeline_contract_invalid, {:ambiguous_contracts, 2}}} = Contract.parse(split)
+    end
+
+    test "a tab is not indentation: it cannot open or close the block" do
+      # The column a tab reaches depends on the tab stop, so the conservative reading is
+      # that a tab-indented marker is content: it cannot truncate the block either — the
+      # second key stays inside it and the document is refused, never read as two blocks.
+      tabbed =
+        "```yaml\npipeline_contract:\n  version: 1\n  scope_mode: advisory\n\t```\n```yaml\npipeline_contract:\n  version: 1\n  scope_mode: strict\n```\n"
+
+      assert {:error, {:pipeline_contract_invalid, {:invalid_yaml, _reason}}} = Contract.parse(tabbed)
+
+      # A tab-indented opener opens nothing either: the block is never read.
+      tabbed_open = "## Notes\n\n\t```yaml\n\tpipeline_contract:\n\t  version: 1\n\t```\n"
+
+      assert Contract.parse(tabbed_open) == :absent
+
+      # Trailing whitespace after the marker is still allowed, tab included (CommonMark).
+      assert {:ok, contract} =
+               Contract.parse("```yaml\npipeline_contract:\n  version: 1\n  scope_mode: advisory\n```\t\n")
+
+      assert contract.scope_mode == :advisory
+    end
+
     test "a valid contract with a normal close keeps being accepted" do
       body = """
       ```yaml
@@ -872,6 +928,121 @@ defmodule SymphonyElixir.PipelineContractTest do
       # error instead: the text fallback can only fail closed.
       assert {:error, {:pipeline_contract_invalid, {:invalid_yaml, _reason}}} =
                Contract.parse("```yaml\nnotes: [1, 2\npipeline_contract: 1\n```")
+    end
+
+    test "a comment that mentions the key is text, not a declaration" do
+      body = """
+      ```yaml
+      # pipeline_contract: see docs/fork/acceptance-contract.md
+      other: 1
+      ```
+      """
+
+      assert Contract.parse(body) == :absent
+
+      # The same inside a block that **is** the contract: the comment is not a second key.
+      commented = """
+      ```yaml
+      # pipeline_contract: 1
+      pipeline_contract:
+        version: 1
+        scope_mode: advisory
+      ```
+      """
+
+      assert {:ok, contract} = Contract.parse(commented)
+      assert contract.scope_mode == :advisory
+    end
+
+    test "a quoted scalar that mentions the key is text, not a declaration" do
+      inline = """
+      ```yaml
+      notes: "the pipeline_contract: block is documented in docs/fork"
+      ```
+      """
+
+      assert Contract.parse(inline) == :absent
+
+      # A quoted scalar may span lines: its continuation is scalar content, so it cannot
+      # be read as a key (the decoder reads one string, not a mapping).
+      multiline = """
+      ```yaml
+      notes: "line one
+        pipeline_contract: 1"
+      ```
+      """
+
+      assert Contract.parse(multiline) == :absent
+    end
+
+    test "a malformed scalar cannot hide a declaration that follows it" do
+      # `foo:'unterminated` does not open a quoted scalar (YAML needs separation after the
+      # `:`, so the quote is plain content): the declaration below it is read as a key by
+      # the parser, and it is the *text* that has to notice that the decoder absorbed the
+      # line into a longer plain scalar key — fail closed, never absent.
+      for quote <- ["'", "\""] do
+        adjacent = "```yaml\nfoo:#{quote}unterminated\n#{@strict}```"
+
+        assert {:error, {:pipeline_contract_invalid, _reason}} = Contract.parse(adjacent),
+               "adjacent #{quote} did not fail closed"
+
+        # With separation the quote *does* open a scalar, and since it never closes the
+        # decoder cannot read the document: the declaration after it must still be seen.
+        spaced = "```yaml\nfoo: #{quote}unterminated\n#{@strict}```"
+
+        assert {:error, {:pipeline_contract_invalid, _reason}} = Contract.parse(spaced),
+               "spaced #{quote} did not fail closed"
+      end
+
+      # The same shape inside a flow collection: the unterminated quote is not a scalar
+      # the decoder accepts either, and the key after it is still observed.
+      flow = "```yaml\nfoo: [1, 'unterminated\npipeline_contract: 1\n```"
+
+      assert {:error, {:pipeline_contract_invalid, _reason}} = Contract.parse(flow)
+
+      # A stray quote inside a plain value is not a scalar start, so it cannot blank the
+      # line after it either: the declaration is still refused instead of being ignored.
+      stray = "```yaml\na: b \"c\npipeline_contract: 1\n```"
+
+      assert {:error, {:pipeline_contract_invalid, _reason}} = Contract.parse(stray)
+
+      # The same shape with the stray quote closing further down: a possible declaration
+      # between the two quotes is still observed (the text hint is judged on the raw text
+      # when the document cannot be read, and on the keys the decoder read when it can).
+      for closing <- ["x: \"y\n", "  notes: \"done\"\n"] do
+        reopened = "```yaml\na: b \"c\npipeline_contract:\n  version: 1\n  scope_mode: advisory\n#{closing}```"
+
+        assert {:error, {:pipeline_contract_invalid, _reason}} = Contract.parse(reopened),
+               "a quote closing later hid the declaration"
+      end
+    end
+
+    test "the decoder reads a declaration absorbed by a malformed scalar as an error" do
+      # `YamlElixir` reads this block as one plain multi-line key that *contains* the
+      # declaration, so it reports no contract key at all while the text declares one in
+      # key position: the block is a contract candidate whose decode says the key is
+      # missing, never a silent `absent`.
+      body = "```yaml\nfoo:'unterminated\n#{@strict}```"
+
+      assert {:error, {:pipeline_contract_invalid, :missing_pipeline_contract_key}} = Contract.parse(body)
+
+      # The same with double quotes.
+      double = "```yaml\nfoo:\"unterminated\n#{@strict}```"
+
+      assert {:error, {:pipeline_contract_invalid, :missing_pipeline_contract_key}} = Contract.parse(double)
+    end
+
+    test "normal prose that mentions nothing is not a contract" do
+      assert Contract.parse("## Objective\n\nDeliver the change and explain it.\n") == :absent
+
+      prose = """
+      ## Notes
+
+      - `pipeline_contract` is documented in docs/fork/acceptance-contract.md
+      - the YAML block has to be fenced
+      """
+
+      assert Contract.parse(prose) == :absent
     end
 
     test "a fenced block that is not the contract is not read as one" do

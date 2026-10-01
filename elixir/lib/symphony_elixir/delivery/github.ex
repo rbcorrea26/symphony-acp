@@ -200,21 +200,55 @@ defmodule SymphonyElixir.Delivery.GitHub do
   end
 
   @doc """
-  Writes the handoff comment once per candidate.
+  Writes the authoritative comment of an artifact, or updates it when its payload
+  changed.
 
-  The marker carries the candidate SHA, so a retry that reconciles the same
-  candidate does not post a second comment, while a corrected candidate gets its
-  own record.
+  `identity` is the opaque marker that tells which artifact a comment is (the handoff
+  uses `<!-- delivery:candidate:<sha> -->`, so a corrected candidate gets its own record
+  and a retry over the same candidate does not create a second one) and `marker` is the
+  marker of the **current payload** (`<!-- acceptance:result:<sha>:<fingerprint> -->`): a
+  comment that already carries it is this verdict, so nothing is written.
+
+  A stored artifact whose body does **not** carry the current `marker` is replaced: the
+  same candidate re-evaluated with another verdict (a contract that changed, an evidence
+  that now fails, a mode that flipped from passing to advisory) must have one
+  authoritative record, never an old one that the next reader would take as current. A
+  payload without an `id` is not an artifact that can be updated, so the verdict is
+  written as a new comment — the current verdict is never left unpersisted.
   """
-  @spec ensure_comment(context(), integer(), String.t(), String.t()) :: :ok | {:error, term()}
-  def ensure_comment(context, issue_number, marker, body) do
+  @spec upsert_comment(context(), integer(), String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def upsert_comment(context, issue_number, identity, marker, body) do
     with {:ok, comments} <- comments(context, issue_number) do
-      if Enum.any?(comments, &String.contains?(to_string(&1["body"]), marker)) do
-        :ok
-      else
-        comment(context, issue_number, body)
+      case artifact(comments, identity) do
+        nil -> comment(context, issue_number, body)
+        %{id: nil} -> comment(context, issue_number, body)
+        %{id: id} = stored -> reconcile(context, id, stored, marker, body)
       end
     end
+  end
+
+  @spec update_comment(context(), integer(), String.t()) :: :ok | {:error, term()}
+  def update_comment(context, comment_id, body) do
+    with {:ok, _body} <-
+           request_body(context, "PATCH", "/repos/#{context.repo}/issues/comments/#{comment_id}", %{}, %{
+             "body" => body
+           }) do
+      :ok
+    end
+  end
+
+  defp artifact(comments, identity) do
+    Enum.find_value(comments, fn comment ->
+      body = Map.get(comment, "body")
+
+      if is_binary(body) and String.contains?(body, identity) do
+        %{id: Map.get(comment, "id"), body: body}
+      end
+    end)
+  end
+
+  defp reconcile(context, id, %{body: stored}, marker, body) do
+    if String.contains?(stored, marker), do: :ok, else: update_comment(context, id, body)
   end
 
   @spec summarize_checks([map()]) :: map()

@@ -300,13 +300,18 @@ defmodule SymphonyElixir.Delivery do
 
   # The verdict is persisted *before* the promotion state changes: if writing the
   # comment fails, the issue must not look promoted without its machine-readable
-  # verdict (the labels are the state the next poll cycle reads).
+  # verdict (the labels are the state the next poll cycle reads). The comment is the
+  # **authoritative artifact** of that verdict: it is created when it does not exist and
+  # replaced when the same candidate is re-evaluated with another payload (a contract
+  # that changed, an evidence that now fails), so an old record is never left looking
+  # current — see `GitHub.upsert_comment/5`.
   defp handoff(github, prepared, candidate, review, delivery, issue_number, settings, acceptance) do
     with :ok <-
-           GitHub.ensure_comment(
+           GitHub.upsert_comment(
              github,
              issue_number,
              marker(candidate.sha),
+             Acceptance.comment_marker(acceptance, candidate.sha),
              comment_body(prepared, candidate, review, delivery, acceptance)
            ),
          :ok <- GitHub.add_labels(github, issue_number, [delivery.handoff_label]) do

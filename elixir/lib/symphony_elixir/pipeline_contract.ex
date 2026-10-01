@@ -66,10 +66,22 @@ defmodule SymphonyElixir.PipelineContract do
       the key (plain, `"quoted"`, `'quoted'`, tagged or the explicit `? key`) never
       changes the answer;
     * the *text* of the block is never the source of truth for that count: a regex
-      hint only **widens** the failure set (a block whose text claims the key but
-      that cannot be decoded is an error, never `absent`), and a block with a
-      structural anchor is refused without being parsed — an alias graph (a shared
-      `&name`) is never expanded;
+      hint only **widens** the failure set. A block that **cannot be read** is judged on
+      its **raw** text — nothing is blanked, so no heuristic about scalars can hide a
+      declaration: an unreadable block whose text declares the key is an error, never
+      `absent` — and a **readable** block that reads no contract key is judged on what
+      the **decoder read**: a key the decoder read that *contains* the token means a
+      malformed scalar absorbed a declaration into a longer plain key (`foo:'unterminated`
+      followed by a real `pipeline_contract:`) or that the declaration is nested in
+      another mapping, and both are refused; a token inside a *value* (a block scalar, a
+      quoted string, a comment) is not a key at all and leaves the body unconfigured.
+      Scalar blanking is used only where the block must **not** be parsed: refusing a
+      structural anchor (an alias graph is never expanded) and the size cap;
+    * the fences that delimit the block follow CommonMark's structural limit: a fence
+      may be indented by **at most three spaces**, so a line with four or more is
+      indented code and can neither open nor close the block. Indentation is counted in
+      spaces only: a tab-indented marker is content (the conservative reading, since
+      the column a tab reaches depends on the tab stop);
     * patterns are never resolved against the filesystem: an absolute path, a `..`
       segment or a `\` separator is a schema error, and the match is a pure,
       anchored comparison against the candidate change set — a symlink cannot
@@ -127,12 +139,18 @@ defmodule SymphonyElixir.PipelineContract do
   # value is never read as a tag.
   @contract_key ~r/(?:^[ \t]*|[{,]\s*)(?:\?[ \t]*)?(?:&[^\s,\[\]{}]+[ \t]+)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/m
   @contract_key_start ~r/^[ \t]*(?:\?[ \t]*)?(?:&[^\s,\[\]{}]+[ \t]+)?(?:!!?[^\s:,]+[ \t]+)?["']?pipeline_contract["']?[ \t]*(?::|$)/
-  @fence ~r/^[ \t]*(`{3,}|~{3,})/
+  # A fence may be indented by **at most three spaces** (CommonMark): a line with four
+  # or more is indented code, so it can neither open nor close the block that carries
+  # the contract. Indentation is measured in spaces only — a tab is not accepted as
+  # indentation, because the column a tab reaches depends on the tab stop and a wrong
+  # answer here would truncate the block silently; a tab-indented marker is content
+  # (the conservative reading, declared in `docs/fork/acceptance-contract.md`).
+  @fence ~r/^ {0,3}(`{3,}|~{3,})/
   # The closing fence, the same marker with **nothing but whitespace after it**: an
   # info string is allowed on the opening line only, so ` ```not-a-close ` inside a
   # block is content and cannot end it (a pseudo-close would truncate the block to a
   # readable prefix and hide every field after it).
-  @closing_fence ~r/^[ \t]*(`{3,}|~{3,})[ \t]*$/
+  @closing_fence ~r/^ {0,3}(`{3,}|~{3,})[ \t]*$/
   @evidence_name ~r/^[a-z0-9][a-z0-9._-]*$/
   @max_pattern_length 512
   @max_items 256
@@ -425,18 +443,50 @@ defmodule SymphonyElixir.PipelineContract do
     end
   end
 
+  # The block is above the size cap: it is not parsed either, and the claim decides (a
+  # block whose text declares the key fails closed; an unrelated one is absent).
   defp classify_parsed(block) when byte_size(block) > @max_contract_bytes do
-    if claimed?(block), do: {:contract, {block, nil}}, else: :absent
+    if raw_claim?(block), do: {:contract, {block, nil}}, else: :absent
   end
 
+  # The **parser is the source of truth** for what the block declares: its count of
+  # `pipeline_contract` keys decides presence and duplication, and a mention inside a
+  # scalar or a comment is data, not a declaration. The text only **widens the failure
+  # set**, in the two directions where the parser alone would report absence:
+  #
+  #   * the document cannot be read at all (`:invalid`): the raw text decides between
+  #     "unrelated block" (`:absent`) and "a possible declaration that must fail closed" —
+  #     never a silent absence;
+  #   * the document is readable but reads **no** contract key while its text declares one
+  #     in key position: the token was absorbed by a malformed scalar
+  #     (`foo:'unterminated` turns the following `pipeline_contract:` into part of a
+  #     longer plain key) or it is a declaration nested in another mapping, and the block
+  #     is a contract candidate whose decode reports the missing key instead of being
+  #     reported as absent.
   defp classify_parsed(block) do
     case observe(block) do
-      {:ok, %{contracts: 0}} -> :absent
-      {:ok, %{contracts: 1} = observation} -> {:contract, {block, observation}}
-      {:ok, %{contracts: many}} -> {:error, {:duplicate_contract_key, many}}
-      :invalid -> if claimed?(block), do: {:contract, {block, nil}}, else: :absent
+      {:ok, %{contracts: 0} = observation} ->
+        if unread_declaration?(block, observation), do: {:contract, {block, nil}}, else: :absent
+
+      {:ok, %{contracts: 1} = observation} ->
+        {:contract, {block, observation}}
+
+      {:ok, %{contracts: many}} ->
+        {:error, {:duplicate_contract_key, many}}
+
+      :invalid ->
+        if raw_claim?(block), do: {:contract, {block, nil}}, else: :absent
     end
   end
+
+  # What the decoder read is what separates a declaration from data: a scalar (a block
+  # scalar, a quoted value, a comment) holds no key at all, while an absorbed token — or a
+  # `pipeline_contract:` nested inside another mapping — is a key the decoder **did** read.
+  # Claiming needs both halves: the key position in the text (a key named
+  # `pipeline_contract_notes` is not the contract) and the decoder's key (a token inside a
+  # value is not a declaration).
+  defp unread_declaration?(block, %{absorbed: true}), do: raw_claim?(block)
+  defp unread_declaration?(_block, _observation), do: false
 
   # An unfenced body is a contract only when it starts with the key (the same shape
   # the YAML decoder reads): a mention of the key in the middle of the body is prose,
@@ -480,13 +530,34 @@ defmodule SymphonyElixir.PipelineContract do
   end
 
   defp observed(documents) do
-    documents
-    |> Enum.flat_map(&mapping_pairs/1)
-    |> Enum.filter(fn {key, _value} -> key == @contract_field end)
-    |> Enum.reduce(%{contracts: 0, fields: []}, fn {_key, value}, acc ->
-      %{acc | contracts: acc.contracts + 1, fields: acc.fields ++ duplicated_fields(value)}
+    keys =
+      documents
+      |> Enum.flat_map(&mapping_pairs/1)
+      |> Enum.filter(fn {key, _value} -> key == @contract_field end)
+
+    %{
+      contracts: length(keys),
+      fields: Enum.flat_map(keys, fn {_key, value} -> duplicated_fields(value) end),
+      # A key the decoder read that *contains* the contract token instead of being it: the
+      # shape a malformed scalar leaves behind when it absorbs a declaration into a longer
+      # plain key. It is `false` for a block whose mention is inside a scalar, because a
+      # value holds no key at all.
+      absorbed: Enum.any?(documents, &key_containing(&1, @contract_field))
+    }
+  end
+
+  # Walks every key the decoder read, at any depth: a nested mapping is structure too, so a
+  # `pipeline_contract:` inside another mapping is accounted for like an absorbed token.
+  # The decoder returns keyword lists for mappings (`maps_as_keywords: true`), which is also
+  # all the rest of this module understands, so anything else is not a key carrier.
+  defp key_containing(value, token) when is_list(value) do
+    Enum.any?(value, fn
+      {key, nested} when is_binary(key) -> String.contains?(key, token) or key_containing(nested, token)
+      other -> key_containing(other, token)
     end)
   end
+
+  defp key_containing(_value, _token), do: false
 
   defp duplicated_fields(value) do
     counts = value |> mapping_pairs() |> Enum.frequencies_by(&elem(&1, 0))
@@ -500,13 +571,26 @@ defmodule SymphonyElixir.PipelineContract do
 
   defp mapping_pairs(_other), do: []
 
-  # The claim hint runs on the text with the **scalar content blanked** (comments, quoted
-  # values, block scalars), so a `pipeline_contract:` written inside a scalar cannot claim
-  # the contract or route the block to the anchor refusal. A quoted key in key position is
-  # unquoted first: `"pipeline_contract":` is a key, not a value, and stays visible.
+  # The claim over the text with the **scalar content blanked** (comments, quoted values,
+  # block scalars). It is only used where the block must not be parsed (a structural
+  # anchor, or a block above the size cap), so a `pipeline_contract:` written inside a
+  # scalar cannot claim the contract or route the block to the anchor refusal — while a
+  # quoted key in key position (`"pipeline_contract":`) is unquoted first and stays
+  # visible.
   defp claimed?(block), do: Regex.match?(@contract_key, claim_text(block))
 
   defp claimed_start?(block), do: Regex.match?(@contract_key_start, claim_text(block))
+
+  # The claim over the **raw** text, used for a block that cannot be read at all: nothing
+  # is blanked, so no heuristic about scalars can hide a declaration. A comment line does
+  # not match (the key shape is anchored at the start of a line or in a flow position), so
+  # prose and comments alone still leave the body unconfigured; the cost of the
+  # conservative reading is a scalar of an *unreadable* block that mentions the key in key
+  # position — an error instead of a silent absence (declared in
+  # `docs/fork/acceptance-contract.md`).
+  defp raw_claim?(block) do
+    block |> unquote_contract_key() |> then(&Regex.match?(@contract_key, &1))
+  end
 
   defp claim_text(block) do
     block
@@ -525,61 +609,100 @@ defmodule SymphonyElixir.PipelineContract do
     end
   end
 
-  # The block with every comment, quoted scalar and block-scalar content blanked out,
-  # so the text hints and the anchor scan only see what YAML reads as structure: inside
-  # a scalar or a comment an `&` or a `pipeline_contract:` is data
+  # The block with every comment, quoted scalar and block-scalar content blanked out, so
+  # the decisions that must not parse the block — refusing a structural anchor and the size
+  # cap — only see what YAML reads as structure: inside a scalar or a comment an `&` or a
+  # `pipeline_contract:` is data
   # (`- "docs/R&D &notes.md"`, `# see &notes`, `notes: |` with an indented example),
-  # never an indicator or a key. A scalar or a comment only begins where YAML allows it
-  # — after a blank, after `:`/`[`/`,`/`{` or at the start of a line —, so a quote
-  # inside a plain scalar (`it's`) stays data too. Blanking keeps the position of what
-  # is left, which is what the token class of `@anchor_token` needs around the `&`; it
-  # works on bytes, so a path that is not valid UTF-8 cannot make it crash either.
+  # never an indicator or a key. A comment is only a comment where YAML allows one
+  # (after a blank or at the start of a line) and a quoted scalar only begins where a
+  # node may begin (after a blank or after `[`/`{`/`,`), so no state is entered that the
+  # decoder would not enter — a state entered too eagerly is what could blank a line
+  # that declares the contract. Blanking keeps the position of what is left, which is
+  # what the token class of `@anchor_token` needs around the `&`; it works on bytes, so
+  # a path that is not valid UTF-8 cannot make it crash either.
   defp without_scalars(block) do
     block
     |> :binary.bin_to_list()
-    |> blank_scalars(:plain, ?\n, [])
+    |> scan_scalars()
     |> :binary.list_to_bin()
     |> blank_block_scalars()
   end
 
-  defp blank_scalars([], _state, _previous, acc), do: Enum.reverse(acc)
+  # The reach of a quoted scalar across physical lines (only a comment ends at the
+  # newline, so the quote state survives it) is what keeps the continuation of a
+  # **valid** scalar out of the scan — but it is only trusted while every quote of the
+  # block closes. A quote that never closes is not a scalar the decoder could read, so
+  # it may not blank the lines after it: the blanking is redone **line by line**, where
+  # no state survives a newline, and a declaration written after a malformed scalar
+  # stays visible. That is the fail-closed reading of `foo:'unterminated` (a plain
+  # scalar, not a quoted one) or of `foo: 'unterminated` (an unterminated quoted one):
+  # neither can hide a real `pipeline_contract:` in the same block.
+  defp scan_scalars(characters) do
+    case blank_scalars(characters, :document, :plain, ?\n, []) do
+      {_text, :open} ->
+        {text, _state} = blank_scalars(characters, :lines, :plain, ?\n, [])
+        text
 
-  defp blank_scalars([?\n | rest], :comment, _previous, acc), do: blank_scalars(rest, :plain, ?\n, [?\n | acc])
-
-  # A quoted scalar may span physical lines, so the quote state survives the newline
-  # (only a comment ends at it): the continuation of `key: "line one\n  line two"` is
-  # scalar content, never structure.
-  defp blank_scalars([?\n | rest], state, _previous, acc), do: blank_scalars(rest, state, ?\n, [?\n | acc])
-
-  defp blank_scalars([character | rest], :plain, previous, acc)
-       when previous in [?\s, ?\t, ?\n, ?:, ?[, ?,, ?{] do
-    case character do
-      ?" -> blank_scalars(rest, :double, ?", [" " | acc])
-      ?' -> blank_scalars(rest, :single, ?', [" " | acc])
-      ?# -> blank_scalars(rest, :comment, ?#, [" " | acc])
-      other -> blank_scalars(rest, :plain, other, [other | acc])
+      {text, :closed} ->
+        text
     end
   end
 
-  defp blank_scalars([character | rest], :plain, _previous, acc) do
-    blank_scalars(rest, :plain, character, [character | acc])
+  defp blank_scalars([], _mode, state, _previous, acc), do: {Enum.reverse(acc), closed(state)}
+
+  # In `:lines` mode nothing survives the end of the line: what comes before a line can
+  # never hide what that line declares.
+  defp blank_scalars([?\n | rest], :lines, _state, _previous, acc) do
+    blank_scalars(rest, :lines, :plain, ?\n, [?\n | acc])
   end
 
-  defp blank_scalars([?" | rest], :double, _previous, acc), do: blank_scalars(rest, :plain, ?", [" " | acc])
-  defp blank_scalars([?\\, _escaped | rest], :double, _previous, acc), do: blank_scalars(rest, :double, ?x, ["  " | acc])
-  defp blank_scalars([_character | rest], :double, previous, acc), do: blank_scalars(rest, :double, previous, [" " | acc])
-
-  defp blank_scalars([?', ?' | rest], :single, _previous, acc), do: blank_scalars(rest, :single, ?', ["  " | acc])
-  defp blank_scalars([?' | rest], :single, _previous, acc), do: blank_scalars(rest, :plain, ?', [" " | acc])
-  defp blank_scalars([_character | rest], :single, previous, acc), do: blank_scalars(rest, :single, previous, [" " | acc])
-
-  defp blank_scalars([_character | rest], :comment, previous, acc) do
-    blank_scalars(rest, :comment, previous, [" " | acc])
+  defp blank_scalars([?\n | rest], :document, :comment, _previous, acc) do
+    blank_scalars(rest, :document, :plain, ?\n, [?\n | acc])
   end
+
+  # A quoted scalar may span physical lines, so the quote state survives this one in
+  # `:document` mode: the continuation of `key: "line one\n  line two"` is scalar
+  # content, never structure.
+  defp blank_scalars([?\n | rest], :document, state, _previous, acc) do
+    blank_scalars(rest, :document, state, ?\n, [?\n | acc])
+  end
+
+  defp blank_scalars([?# | rest], mode, :plain, previous, acc) when previous in [?\s, ?\t, ?\n] do
+    blank_scalars(rest, mode, :comment, ?#, [" " | acc])
+  end
+
+  defp blank_scalars([character | rest], mode, :plain, previous, acc)
+       when previous in [?\s, ?\t, ?\n, ?[, ?,, ?{] do
+    case character do
+      ?" -> blank_scalars(rest, mode, :double, ?", [" " | acc])
+      ?' -> blank_scalars(rest, mode, :single, ?', [" " | acc])
+      other -> blank_scalars(rest, mode, :plain, other, [other | acc])
+    end
+  end
+
+  defp blank_scalars([character | rest], mode, :plain, _previous, acc) do
+    blank_scalars(rest, mode, :plain, character, [character | acc])
+  end
+
+  defp blank_scalars([?" | rest], mode, :double, _previous, acc), do: blank_scalars(rest, mode, :plain, ?", [" " | acc])
+  defp blank_scalars([?\\, _escaped | rest], mode, :double, _previous, acc), do: blank_scalars(rest, mode, :double, ?x, ["  " | acc])
+  defp blank_scalars([_character | rest], mode, :double, previous, acc), do: blank_scalars(rest, mode, :double, previous, [" " | acc])
 
   # In a single-quoted scalar the escaped quote is `''`, so a lone `'` is the only one
   # that closes it: `'docs/it''s &notes.md'` is one scalar, not a scalar plus a stray
   # `&notes`.
+  defp blank_scalars([?', ?' | rest], mode, :single, _previous, acc), do: blank_scalars(rest, mode, :single, ?', ["  " | acc])
+  defp blank_scalars([?' | rest], mode, :single, _previous, acc), do: blank_scalars(rest, mode, :plain, ?', [" " | acc])
+  defp blank_scalars([_character | rest], mode, :single, previous, acc), do: blank_scalars(rest, mode, :single, previous, [" " | acc])
+
+  defp blank_scalars([_character | rest], mode, :comment, previous, acc) do
+    blank_scalars(rest, mode, :comment, previous, [" " | acc])
+  end
+
+  defp closed(:single), do: :open
+  defp closed(:double), do: :open
+  defp closed(_state), do: :closed
 
   # The content of a block scalar (`key: |`, `key: >-`, `- |2`) is text, not structure:
   # it is blanked too, so an indented `pipeline_contract:` or `&example` inside it can

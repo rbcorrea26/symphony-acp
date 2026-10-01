@@ -10,7 +10,7 @@ defmodule SymphonyElixir.Delivery.Acceptance.Result do
       mode or an unenforceable contract), `:advisory` (findings reported without
       blocking), `:not_configured` (the issue declares no contract: the layer is
       not configured, which is the backward-compatible case) or
-      `:not_applicable` (there is no candidate change set to accept);
+      `:not_applicable` (the workspace sits on the base with nothing to promote);
     * `contract_version` / `mode` — which contract was in force (`nil` when there
       is none);
     * `findings` — deterministic `code`, `category`, human `message` and optional
@@ -64,7 +64,12 @@ defmodule SymphonyElixir.Delivery.Acceptance.Result do
   @spec not_configured() :: t()
   def not_configured, do: %__MODULE__{}
 
-  @doc "There is no candidate change set to accept (nothing new to publish)."
+  @doc """
+  There is no subject to accept: the workspace sits on the base with nothing the
+  promotion would carry. Note that this is **not** "the effective change set is empty":
+  a worktree that undoes the published candidate has an empty change set and still holds
+  a subject (the revert itself).
+  """
   @spec not_applicable(keyword()) :: t()
   def not_applicable(opts) do
     %__MODULE__{

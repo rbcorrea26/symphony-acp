@@ -368,10 +368,16 @@ pipeline_contract:
   gates only added a file still accepts the committed candidate, the added lines of that same
   diff feed the prohibition scan and the required evidence of the contract in force is executed
   again, so a contract tightened (or changed) after the publication is re-evaluated instead of
-  reusing the acceptance of the cycle that published it. `not_applicable` is reserved to a
-  workspace with nothing to promote (an empty effective change set, which includes sitting on the
-  base itself), and a base branch that cannot be resolved is an error
-  (`delivery_base_missing`), never an empty diff.
+  reusing the acceptance of the cycle that published it. `not_applicable` answers "is there a
+  **subject** to promote?", never "is the effective change set empty?": it is reserved to a
+  workspace that sits on the base itself (`HEAD` == the merge base with the base branch) with
+  nothing the promotion would carry. A worktree that undoes every change of the published
+  candidate has an empty change set and still holds a subject — the commit that reverts the
+  candidate is what would be published —, so the contract is evaluated over that final state
+  (the expected paths are missing, the required evidence runs) instead of the revert being
+  promoted as "nothing to accept"; nothing is invented to make the change set non-empty
+  either. Both phases ask the same question over the same read. A base branch that cannot be
+  resolved is an error (`delivery_base_missing`), never an empty diff.
   `../docs/fork/acceptance-contract.md` §6 describes the resume.
 - Candidate reads fail closed: a change set above 5 000 entries
   (`change_set_too_large`, the diff entries and the untracked files sharing the cap) or with a

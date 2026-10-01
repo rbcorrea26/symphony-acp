@@ -1442,6 +1442,42 @@ defmodule SymphonyElixir.DeliveryTest do
     assert Enum.count(FakeGitHub.state(fake).comments) == 1
   end
 
+  test "a worktree that undoes the whole candidate does not publish the revert", %{workspace: workspace} do
+    # The candidate modifies a base file and adds one; the worktree then undoes both, so the
+    # effective change set is empty while `HEAD` is not the base and the worktree is dirty:
+    # what the run would publish next is the commit that reverts the candidate. That is a
+    # subject — the contract in force is evaluated over the empty change set (the paths are
+    # missing and the evidence still runs) instead of the revert being promoted as "nothing
+    # to accept" with a brand new SHA.
+    configure!([])
+    fake = fake!()
+    issue = contract_issue(expected_paths: ["answer.sh", "docs/changes/42.md"])
+
+    change_answer!(workspace, "42")
+    File.mkdir_p!(Path.join(workspace, "docs/changes"))
+    File.write!(Path.join(workspace, "docs/changes/42.md"), "42\n")
+
+    assert {:ok, first} = Delivery.run(workspace, issue, github_opts(fake))
+    assert first.contract.status == :pass
+
+    change_answer!(workspace, "1")
+    File.rm!(Path.join(workspace, "docs/changes/42.md"))
+
+    assert {:error, {:delivery_acceptance_failed, result}} = Delivery.run(workspace, issue, github_opts(fake))
+
+    assert result.status == :fail
+    assert result.change_set.changed == []
+
+    assert Enum.map(result.findings, &{&1.code, &1.path}) == [
+             {:expected_path_missing, "answer.sh"},
+             {:expected_path_missing, "docs/changes/42.md"}
+           ]
+
+    # Nothing was published and the record of the accepted candidate is still the only one.
+    assert FakeGitHub.sha(fake, delivery_branch()) == first.candidate_sha
+    assert Enum.count(FakeGitHub.state(fake).comments) == 1
+  end
+
   test "an artifact the gates create is not published without acceptance", %{workspace: workspace} do
     # The gates run inside the workspace and write a file: the candidate that
     # would be published includes it, so it has to be accepted too.

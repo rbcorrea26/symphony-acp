@@ -213,10 +213,21 @@ ninguém aceitou. Na revisão do candidato `75791b4` esse era o achado 4.
 O veredicto anterior **nunca é reusado**: um contrato que ficou mais exigente (ou
 materialmente diferente) depois da publicação é reavaliado de forma determinística
 contra o candidato efetivo — ou ele satisfaz o contrato novo, ou o run falha sem promover
-nem comentar. `not_applicable` fica reservado ao workspace que **não tem nada a promover**
-(change set efetivo vazio, o que inclui estar na base sem mudanças), e uma branch base
-que não resolve é erro (`delivery_base_missing`), nunca um diff vazio lido como "o
-candidato não mudou nada".
+nem comentar.
+
+`not_applicable` responde a **"existe sujeito a promover?"** — nunca a "o change set
+efetivo está vazio?": fica reservado ao workspace que está na base (`HEAD` == merge base
+com a branch base) e não tem nada que a promoção carregaria, e uma branch base que não
+resolve é erro (`delivery_base_missing`), nunca um diff vazio lido como "o candidato não
+mudou nada". A separação dessas duas perguntas é uma correção de **fail-open** da revisão
+do candidato `e1b62c4`: um worktree que **desfaz por inteiro** o candidato publicado tem
+change set efetivo vazio e ainda assim é sujeito — o commit que desfaz o candidato é o que
+o run publicaria —, então o escopo é avaliado sobre esse estado final
+(`expected_path_missing` para o que o candidato entregava) e as evidências exigidas
+executam; nenhuma ausência de diff é lida como ausência de sujeito e nenhuma entrada é
+inventada para deixar o change set não vazio. O sujeito existe quando `HEAD` ≠ base **ou**
+o change set efetivo tem entradas — os dois fatos lidos no mesmo passo —, e as duas fases
+(escopo e evidência) usam essa mesma noção.
 
 Essa reavaliação é **verificada, não assumida**: o candidato do run reconciliado é o
 **HEAD local** do workspace (o conteúdo que este run tem em mãos) e o head observado
@@ -229,10 +240,12 @@ ser o aceito.
 Limite declarado: o sujeito do aceite é o que o run **vai promover**. Num ciclo de
 criação isso é o worktree contra a base; num ciclo de retomada é o candidato commitado
 **mais** o worktree atual. Nenhum caminho transforma ausência de execução de evidência em
-promoção: sem conteúdo a promover o status é `not_applicable`, e com conteúdo as
+promoção: sem **sujeito** a promover o status é `not_applicable`, e com sujeito as
 evidências exigidas rodam. A revisão da seção anterior veio do achado da review do
-candidato `ad10879` (ausência de execução virando promoção) e a do sujeito efetivo do
-achado 4 da review do candidato `75791b4`. Detalhe operacional em
+candidato `ad10879` (ausência de execução virando promoção), a do sujeito efetivo do
+achado 4 da review do candidato `75791b4` e a da separação entre "há sujeito" e "change
+set efetivo vazio" da review de aceite do candidato `e1b62c4` (um worktree que desfaz o
+candidato inteiro era lido como `not_applicable`). Detalhe operacional em
 `../acceptance-contract.md` §6.1.
 
 ### 6. O veredicto é dado estruturado, não booleano
@@ -244,7 +257,9 @@ O aceite devolve `SymphonyElixir.Delivery.Acceptance.Result`:
 ```
 
 - `status`: `:pass` | `:fail` | `:advisory` | `:not_configured` (issue sem
-  contrato) | `:not_applicable` (workspace limpo e sem candidato publicado);
+  contrato) | `:not_applicable` (na base, `HEAD` == merge base, sem nada que a promoção
+  carregaria — nunca "change set efetivo vazio", que também acontece com o worktree que
+  desfaz o candidato publicado);
 - `findings`: `SymphonyElixir.PipelineContract.Finding` com `code` estável
   (`invalid_contract`, `expected_path_missing`, `unexpected_path_changed`,
   `required_evidence_missing`, `required_evidence_failed`,
@@ -322,7 +337,8 @@ bloqueio fica no log; o estado persistido de bloqueio é escopo da #13).
   e de proibição (puros).
 - `elixir/lib/symphony_elixir/delivery/acceptance.ex` — gate impuro: deriva o sujeito
   (**candidato efetivo**: diff da base para o estado final do workspace, incluindo não
-  rastreados), roda as evidências exigidas sempre que há conteúdo a promover, decide por
+  rastreados), roda as evidências exigidas sempre que há **sujeito** a promover (`HEAD` ≠
+  base ou change set efetivo com entradas, os dois fatos numa leitura só), decide por
   modo, resume o relatório, calcula a impressão digital do payload e persiste o veredicto
   cortado por bytes (16 KiB, com `omitted`).
 - `elixir/lib/symphony_elixir/delivery/gates.ex` — runner único de comando com

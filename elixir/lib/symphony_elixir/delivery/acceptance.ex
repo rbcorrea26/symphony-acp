@@ -36,10 +36,18 @@ defmodule SymphonyElixir.Delivery.Acceptance do
       committed candidate + tracked worktree changes + untracked files — exactly what the
       commit the run is about to create would carry. A workspace that holds a candidate
       is never taken as "nothing changed" (that would skip the scope *and* the demanded
-      evidence of a resume, which is exactly the case that has to stay verified); only a
-      workspace that sits on the base itself has nothing to accept (`not_applicable`),
-      and the required evidence of the current contract is executed whenever there is
-      something to promote;
+      evidence of a resume, which is exactly the case that has to stay verified);
+    * `not_applicable` answers **"is there a subject to promote?"**, which is a different
+      question from "does the effective change set have entries?". A worktree that undoes
+      every change of the published candidate leaves an **empty** change set and still
+      holds a subject — the commit that reverts the candidate is what would be published
+      —, so the contract is still evaluated over that final state: an expected path the
+      candidate delivered is reported missing and the required evidence runs, instead of
+      the revert being promoted as "nothing to accept". Nothing is invented to make the
+      change set non-empty, either: the scope compares the paths the promotion really
+      carries. Only a workspace that sits on the base itself with nothing the promotion
+      would carry is `not_applicable`, and whenever there is something to promote the
+      required evidence of the contract in force is executed;
     * both phases derive that subject from git; the read is cheap, has no state and
       keeps the two phases independently testable, which is also why a retry over the
       same candidate produces the same verdict.
@@ -89,10 +97,11 @@ defmodule SymphonyElixir.Delivery.Acceptance do
 
   Only the names demanded by the issue are executed, and each one is resolved
   through the registry of the workflow (`delivery.evidence`) or the reserved
-  `repository-gates`. The evidence runs whenever there is a candidate to promote —
-  the worktree change set or the published candidate of a clean workspace — because
-  a resume that skipped it would be a promotion without the evidence the contract in
-  force demands.
+  `repository-gates`. The evidence runs whenever there is a subject to promote — the
+  content of the worktree, the published candidate, or a worktree that undoes every
+  change of that candidate (an empty effective change set is **not** an absent
+  subject) — because a resume that skipped it would be a promotion without the
+  evidence the contract in force demands.
   """
   @spec evidence(Path.t(), Issue.t(), map(), String.t()) :: {:ok, Result.t()} | {:error, term()}
   def evidence(workspace, %Issue{} = issue, delivery, base_branch) do
@@ -106,7 +115,9 @@ defmodule SymphonyElixir.Delivery.Acceptance do
   @doc "One-line, human-readable acceptance summary (log and handoff comment)."
   @spec describe(Result.t()) :: String.t()
   def describe(%Result{status: :not_configured}), do: "not declared in the issue body (acceptance not configured)"
-  def describe(%Result{status: :not_applicable}), do: "not applicable (no candidate change set to accept)"
+
+  def describe(%Result{status: :not_applicable}),
+    do: "not applicable (the workspace sits on the base with nothing to promote)"
 
   def describe(%Result{status: :pass} = result) do
     "`#{result.mode}` passed (#{length(result.change_set.delivered)}/#{length(result.change_set.expected)} expected path(s) delivered, " <>
@@ -249,31 +260,52 @@ defmodule SymphonyElixir.Delivery.Acceptance do
   # merge base with the base branch: committed candidate + tracked changes of the
   # worktree + untracked files. Modelling "worktree" and "candidate" as alternatives
   # would forget the committed part of a resume whose gates only added a file, and would
-  # promote content nobody accepted. An empty change set means the workspace sits on the
-  # base itself and has nothing to promote (`not_applicable`) — never "the read found
-  # nothing" about a workspace that does hold a candidate.
+  # promote content nobody accepted.
   defp scope_phase(workspace, contract, base_branch) do
     with {:ok, base} <- Git.merge_base(workspace, base_branch),
+         {:ok, head} <- Git.head_sha(workspace),
          {:ok, changed} <- Git.effective_change_set(workspace, base),
          {:ok, %{lines: lines, truncated: truncated}} <- Git.added_lines(workspace, base) do
-      case changed do
-        [] -> {:ok, result_not_applicable(contract)}
-        changed -> scope_result(contract, changed, lines, truncated) |> decide(:scope)
+      if has_acceptance_subject?(head, base, changed) do
+        scope_result(contract, changed, lines, truncated) |> decide(:scope)
+      else
+        {:ok, result_not_applicable(contract)}
       end
     end
   end
 
-  # The evidence module runs for the same subject: the demanded evidence is executed
-  # whenever there is something to promote (never on a workspace that sits on the base).
+  # The evidence phase asks the **same** question with the same facts: a resume never
+  # runs the evidence of one phase and skips the other, and the demanded evidence is
+  # executed whenever there is a subject to promote (never on a workspace that sits on
+  # the base with nothing to promote).
   defp evidence_phase(workspace, contract, delivery, base_branch) do
     with {:ok, base} <- Git.merge_base(workspace, base_branch),
+         {:ok, head} <- Git.head_sha(workspace),
          {:ok, changed} <- Git.effective_change_set(workspace, base) do
-      case changed do
-        [] -> {:ok, result_not_applicable(contract)}
-        _changed -> evidence_result(contract, workspace, delivery) |> decide(:evidence)
+      if has_acceptance_subject?(head, base, changed) do
+        evidence_result(contract, workspace, delivery) |> decide(:evidence)
+      else
+        {:ok, result_not_applicable(contract)}
       end
     end
   end
+
+  # "Is there a subject to promote?" — the question `not_applicable` answers, and **not**
+  # "does the effective change set have entries?". Conflating the two is a fail-open: a
+  # workspace whose worktree undoes every change of the published candidate has an empty
+  # effective change set (`git diff` of the base against the final state reports nothing)
+  # while it still holds a candidate and the worktree is dirty, so the run **would**
+  # publish a commit — the revert of the candidate —. Reporting `not_applicable` there
+  # skipped the scope (no `expected_path_missing`), skipped the required evidence and let
+  # that new SHA be published without the contract in force being enforced.
+  #
+  # A subject exists when `HEAD` is not `base` (a candidate is published, whether the
+  # worktree is clean or not) or when the effective change set has entries (the worktree
+  # holds content, which is also the case of the very first cycle on the base). Both are
+  # facts of git and of the worktree, read in the same snapshot as the change set: no
+  # text is guessed and no entry is invented. `false` therefore means: on the base, with
+  # nothing the promotion would carry.
+  defp has_acceptance_subject?(head, base, changed), do: head != base or changed != []
 
   defp result_not_applicable(contract) do
     Result.not_applicable(mode: contract.scope_mode, contract_version: contract.version)

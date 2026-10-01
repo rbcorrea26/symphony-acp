@@ -233,7 +233,8 @@ apenas "este contrato não proíbe". Quem autoriza deploy é a política da plat
 |---|---|---|
 | contrato ausente | `:not_configured` | nenhum (comportamento anterior, ADR-0005) |
 | workspace com o candidato publicado (HEAD ≠ base) | `:pass` / `:fail` (recalculado do Git, com o worktree incluído) | o conteúdo efetivo é reavaliado antes de promover (seção 6.1) |
-| workspace sem nada a promover (HEAD na base e worktree limpo) | `:not_applicable` | nenhum: não há conteúdo a aceitar |
+| workspace cujo worktree **desfaz por inteiro** o candidato (HEAD ≠ base, change set efetivo vazio) | `:pass` / `:fail` em `strict`, `:advisory` em `advisory` | é **sujeito**: o run publicaria o commit que desfaz o candidato, então o contrato em vigor é avaliado sobre o change set vazio (`expected_path_missing`, evidências executando) |
+| workspace sem sujeito a promover (HEAD na base **e** change set efetivo vazio) | `:not_applicable` | nenhum: o run não publicaria nada |
 | `strict`, sem achados | `:pass` | segue: gates → evidências → publicação |
 | `strict`, com achados | `:fail` | run falha **sem publicar** (nada de branch/PR/rótulo/comentário) |
 | `strict`, varredura de proibição **truncada** | `:fail` (`prohibition_scan_truncated`) | run falha sem publicar: um scan parcial não certifica ausência de proibição |
@@ -271,18 +272,31 @@ Git, e o veredicto anterior **nunca é reusado**:
   proibição nova, uma evidência nova) é reavaliada de forma determinística contra o
   candidato efetivo: ou ele satisfaz o contrato novo, ou o run falha sem promover nem
   comentar;
-- `not_applicable` fica reservado ao workspace que **não tem nada a promover** (o diff
-  base → estado final é vazio, o que inclui o caso de estar na base sem mudanças), e uma
-  branch base que não resolve é erro (`delivery_base_missing`) — nunca um diff vazio lido
-  como "o candidato não mudou nada";
+- `not_applicable` responde a **"existe sujeito a promover?"**, não a "o change set efetivo
+  está vazio?": ele fica reservado ao workspace que está na base (`HEAD` == merge base) e
+  não tem nada que a promoção carregaria. Um worktree que **desfaz por inteiro** o
+  candidato publicado deixa o change set efetivo vazio e ainda assim é sujeito — o commit
+  que desfaz o candidato é o que o run publicaria —, então o escopo é avaliado sobre esse
+  estado final (`expected_path_missing` para o que o candidato entregava, evidências
+  exigidas executando) em vez de o revert ser promovido como "nada a aceitar"; nenhuma
+  entrada é inventada para deixar o change set não vazio. Os quatro casos: (A) `HEAD` ==
+  base e change set vazio → `not_applicable`; (B) `HEAD` ≠ base → sujeito, com worktree
+  limpo ou sujo; (C) `HEAD` == base com change set não vazio → sujeito (o primeiro ciclo);
+  (D) `HEAD` ≠ base com o worktree desfazendo o candidato por inteiro → sujeito, com change
+  set efetivo vazio;
+- as duas fases (escopo e evidência) usam a **mesma** noção de sujeito — `HEAD` ≠ base **ou**
+  change set efetivo com entradas, lidos no mesmo passo —, então nenhum estado roda uma fase
+  e pula a outra;
+- uma branch base que não resolve é erro (`delivery_base_missing`) — nunca um diff vazio
+  lido como "o candidato não mudou nada";
 - a promoção do run de retomada (reconciliar o candidato já publicado) continua amarrada
   ao SHA: um head de branch diferente do HEAD local falha com `delivery_candidate_replaced`.
 
 Limite declarado: o sujeito do aceite é o que o run **vai promover**. Num ciclo de
 criação (sem candidato publicado) isso é o worktree contra a base; num ciclo de retomada
 é o candidato commitado **mais** o worktree atual. Nenhum caminho de retomada transforma
-ausência de execução de evidência em `PASS`: sem conteúdo a promover o status é
-`not_applicable`, e com conteúdo as evidências exigidas rodam (falha continua fail-closed
+ausência de execução de evidência em `PASS`: sem sujeito a promover o status é
+`not_applicable`, e com sujeito as evidências exigidas rodam (falha continua fail-closed
 em `strict` e advisory em `advisory`).
 
 ## 7. Códigos de finding

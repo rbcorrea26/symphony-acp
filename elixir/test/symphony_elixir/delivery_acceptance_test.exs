@@ -733,6 +733,129 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
     end
   end
 
+  # The two questions of the acceptance are separate and both phases use the same one:
+  # "is there a subject to promote?" decides `not_applicable`, and it is **not** "does the
+  # effective change set have entries?".
+  describe "the subject of the acceptance" do
+    test "on the base with a clean worktree, both phases say there is nothing to promote", %{workspace: workspace} do
+      assert {"", 0} = System.cmd("git", ["status", "--porcelain"], cd: workspace)
+
+      issue = issue(contract_body(expected_paths: ["answer.sh"], required_evidence: ["agent-tests"]))
+      delivery = %{@delivery | evidence: %{"agent-tests" => "echo ran > side-effect.txt"}}
+
+      assert {:ok, scoped} = Acceptance.scope(workspace, issue, @base_branch)
+      assert scoped.status == :not_applicable
+      assert scoped.change_set == %{expected: [], delivered: [], changed: [], unexpected: []}
+
+      assert Acceptance.describe(scoped) ==
+               "not applicable (the workspace sits on the base with nothing to promote)"
+
+      assert {:ok, ran} = Acceptance.evidence(workspace, issue, delivery, @base_branch)
+      assert ran.status == :not_applicable
+      assert ran.evidence == []
+      refute File.exists?(Path.join(workspace, "side-effect.txt"))
+    end
+
+    test "a published candidate with a clean worktree is a subject of both phases", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+
+      issue = issue(contract_body(expected_paths: ["answer.sh"], required_evidence: ["agent-tests"]))
+      delivery = %{@delivery | evidence: %{"agent-tests" => "echo ran > side-effect.txt"}}
+
+      assert {:ok, scoped} = Acceptance.scope(workspace, issue, @base_branch)
+      assert scoped.status == :pass
+      assert scoped.change_set.delivered == ["answer.sh"]
+
+      assert {:ok, ran} = Acceptance.evidence(workspace, issue, delivery, @base_branch)
+      assert ran.status == :pass
+      assert File.exists?(Path.join(workspace, "side-effect.txt"))
+    end
+
+    test "a dirty worktree on the base is a subject (the first cycle)", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+
+      issue = issue(contract_body(expected_paths: ["answer.sh"], required_evidence: ["agent-tests"]))
+      delivery = %{@delivery | evidence: %{"agent-tests" => "echo ran > side-effect.txt"}}
+
+      assert {:ok, %Result{status: :pass}} = Acceptance.scope(workspace, issue, @base_branch)
+      assert {:ok, %Result{status: :pass}} = Acceptance.evidence(workspace, issue, delivery, @base_branch)
+      assert File.exists?(Path.join(workspace, "side-effect.txt"))
+    end
+
+    test "a worktree that undoes the whole candidate is still a subject", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+
+      # The worktree puts the workspace back to the base: `git diff` of the base against the
+      # final state reports nothing, while `HEAD` still holds the candidate and the worktree
+      # is dirty. The commit the run would publish is the revert of the candidate.
+      File.rm!(Path.join(workspace, "answer.sh"))
+
+      assert {:ok, base} = Git.merge_base(workspace, @base_branch)
+      assert {:ok, []} = Git.effective_change_set(workspace, base)
+      assert {:ok, head} = Git.head_sha(workspace)
+      refute head == base
+
+      issue = issue(contract_body(expected_paths: ["answer.sh"]))
+
+      assert {:error, {:delivery_acceptance_failed, result}} = Acceptance.scope(workspace, issue, @base_branch)
+
+      assert result.status == :fail
+      assert result.change_set.expected == ["answer.sh"]
+      assert result.change_set.delivered == []
+      assert result.change_set.changed == []
+      assert result.change_set.unexpected == []
+      assert Enum.map(result.findings, &{&1.code, &1.path}) == [{:expected_path_missing, "answer.sh"}]
+    end
+
+    test "the required evidence runs when the worktree undoes the whole candidate", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+      File.rm!(Path.join(workspace, "answer.sh"))
+
+      issue = issue(contract_body(expected_paths: ["answer.sh"], required_evidence: ["agent-tests"]))
+      delivery = %{@delivery | evidence: %{"agent-tests" => "echo ran > side-effect.txt"}}
+
+      assert {:ok, result} = Acceptance.evidence(workspace, issue, delivery, @base_branch)
+
+      assert result.status == :pass
+      assert [%{name: "agent-tests", status: :passed}] = result.evidence
+      assert File.exists?(Path.join(workspace, "side-effect.txt"))
+    end
+
+    test "a required evidence that fails there blocks the delivery in strict", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+      File.rm!(Path.join(workspace, "answer.sh"))
+
+      issue = issue(contract_body(expected_paths: ["answer.sh"], required_evidence: ["agent-tests"]))
+      delivery = %{@delivery | evidence: %{"agent-tests" => "exit 1"}}
+
+      assert {:error, {:delivery_acceptance_failed, result}} =
+               Acceptance.evidence(workspace, issue, delivery, @base_branch)
+
+      assert result.status == :fail
+      assert [%Finding{code: :required_evidence_failed, category: :evidence}] = result.findings
+      assert [%{name: "agent-tests", status: :failed}] = result.evidence
+    end
+
+    test "the same empty change set keeps the advisory semantics", %{workspace: workspace} do
+      write!(workspace, "answer.sh", "#!/bin/sh\necho 42\n")
+      publish_candidate!(workspace)
+      File.rm!(Path.join(workspace, "answer.sh"))
+
+      issue = issue(contract_body(scope_mode: "advisory", expected_paths: ["answer.sh"]))
+
+      assert {:ok, result} = Acceptance.scope(workspace, issue, @base_branch)
+
+      assert result.status == :advisory
+      assert result.change_set.changed == []
+      assert [%Finding{code: :expected_path_missing, path: "answer.sh"}] = result.findings
+      refute Result.blocking?(result)
+    end
+  end
+
   describe "evidence/4" do
     test "an issue without a contract demands no evidence", %{workspace: workspace} do
       assert {:ok, %Result{status: :not_configured}} = evidence(workspace, @issue, @delivery)

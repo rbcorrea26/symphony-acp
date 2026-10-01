@@ -45,7 +45,9 @@ defmodule SymphonyElixir.Delivery.Git do
   added-lines scan stops at its budgets (`@max_diff_bytes`, enforced while the
   `git diff` child is still running so the whole diff is never captured;
   `@max_scanned_files`, `@max_scanned_bytes`, `@max_scanned_lines`), declaring
-  `truncated` when a bound was reached. The declared residual: the capture of
+  `truncated` when content was left **uninspected** because of one of them — never merely
+  because a bound was reached, so a candidate that fits the budget exactly stays a
+  complete scan. The declared residual: the capture of
   `git ls-files` and of the `git diff` of the subject are proportional to the number of
   paths the candidate produced (the change set is capped at `@max_change_set`); the
   *parse* and the structures built here are limited.
@@ -248,8 +250,16 @@ defmodule SymphonyElixir.Delivery.Git do
   only, so an untouched line is never scanned. Every step is bounded
   (`@max_diff_bytes`, `@max_scanned_files`, `@max_scanned_bytes`, `@max_scanned_lines`)
   and the collection **stops at the budget it reached** instead of building everything
-  and truncating afterwards; `truncated: true` says a bound was reached, so the caller
-  can declare the scan incomplete instead of pretending it was exhaustive.
+  and truncating afterwards.
+
+  `truncated: true` means **content was left uninspected because of a bound** — never
+  that a bound was merely reached. A candidate whose added lines consume exactly
+  `@max_scanned_lines` with nothing else to read is a **complete** scan
+  (`truncated: false`): declaring it partial would add `prohibition_scan_truncated` and
+  fail a `strict` contract that has nothing left to hide. The bounds are properties of
+  the content, not of the command: the line budget is shared between the tracked diff and
+  the untracked files, and the untracked half is inspected (still bounded) even when the
+  budget is already exhausted, so the answer is computed from what exists.
 
   The list of untracked files is read the same way the change set is: **while it is
   read**, one NUL-delimited path at a time up to `@max_scanned_files`, so the whole
@@ -582,8 +592,14 @@ defmodule SymphonyElixir.Delivery.Git do
   defp diff_line("+" <> text, _state), do: {:added, text}
   defp diff_line(_line, _state), do: :skip
 
-  defp untracked_lines(_workspace, _untracked, budget) when budget <= 0, do: {[], false, true}
-
+  # The untracked half of the scan. `budget` is what is left of `@max_scanned_lines` after
+  # the tracked diff and it is **never negative** (`diff_added_lines/1` stops at the budget
+  # itself), but it can be **zero** — and zero is not an answer on its own: an exhausted
+  # budget with nothing left to inspect is a **complete** scan, so the decision comes from
+  # the content, never from the budget. A candidate with exactly the budget consumed and an
+  # empty file (or no untracked file at all) is complete; a candidate with one line beyond
+  # it is truncated. The read stops at the first file that carries a line past the budget,
+  # so an exhausted budget is not a reason to read every untracked file.
   defp untracked_lines(workspace, untracked, budget) do
     {paths, dropped} = untracked_paths(untracked, @max_scanned_files)
 

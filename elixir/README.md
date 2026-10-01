@@ -321,17 +321,23 @@ pipeline_contract:
   block) and the indentation is counted in spaces only — a tab-indented marker is content, the
   conservative reading, because the column a tab reaches depends on the tab stop. The block ends
   on a fence of the
-  **same marker**, at least as long as the opening one and with nothing but whitespace after the
+  **same marker**, at least as long as the opening one and with nothing but **spaces** after the
   marker: an info string is only valid on the opening line, so a line such as ` ```not-a-close `
-  inside the block is content and cannot truncate it to a readable prefix. Whether the body
+  inside the block is content and cannot truncate it to a readable prefix, and a trailing **tab**
+  is content too (the deliberate, fail-closed divergence from CommonMark). A block that declares
+  the contract and still holds a fence delimiter — the close the author wrote and the rule
+  rejected, or a nested fence — is **refused** (`fence_inside_block`) instead of parsed: the YAML
+  library would end the contract mapping at that line and move every field after it out of the
+  contract in silence. Whether the body
   *declares* the
   contract is read from the **YAML parser**, not from a regex: the key may be written plain,
   quoted (`"scope_mode":`, `'scope_mode':`), tagged or with the explicit-key indicator
   (`? key`), and duplicates are counted on the parser nodes, before the decoder collapses equal
   keys — so a declared contract is never classified as absent because of the key style and two
   equal keys are never silently one. The claim hint that **widens** the failure set has two
-  halves: a block that **cannot be read** is judged on its **raw** text (nothing is blanked, so
-  no heuristic about scalars can hide a declaration — an unreadable block that cites the key in
+  halves: a block that **cannot be read** (and a block above the size cap) is judged on its
+  **raw** text (nothing is blanked, so
+  no heuristic about scalars can hide a declaration — such a block that cites the key in
   key position is an error, never absence), and a **readable** block that reads no contract key
   is judged on what the **decoder read** (a key the decoder read that *contains* the token means
   a malformed scalar such as `foo:'unterminated` absorbed the following `pipeline_contract:`
@@ -353,14 +359,19 @@ pipeline_contract:
   come from the untrusted issue and multiplying a timeout per name would occupy the worker for
   hours.
 - Prohibitions are detected by scanning the **added lines** of the candidate (the tracked
-  `git diff` — read up to its cap, with the child closed at that point so a huge diff is never
+  `git diff` against the merge base with `delivery.base_branch` — read up to its cap, with the
+  child closed at that point so a huge diff is never
   captured in memory — plus untracked files, both bounded) with the fixed rules documented in
   `../docs/fork/adr/0006-acceptance-contract.md`. A match is a finding for the human, not a
   proof of intent; `remote_access: true`/`deploy: true` in the contract turns the
-  corresponding scan off. A scan that reaches its cap (`change_scan_truncated`) is **never
+  corresponding scan off. A scan that reaches a cap **with content left uninspected**
+  (`change_scan_truncated`) is **never
   reported as complete**: it adds the `prohibition_scan_truncated` finding, so a `strict`
   contract fails closed instead of certifying the absence of a prohibition over a partial
-  read, while `advisory` reports the divergence and continues.
+  read, while `advisory` reports the divergence and continues. Reaching the line budget
+  **exactly** with nothing else to read (no untracked file, or only files without a line) is a
+  complete scan, not a truncation — the criterion is uninspected content, never the bound
+  itself, so a valid candidate at the limit is not blocked.
 - The subject of the acceptance is **what the run would promote**, in one read: the diff of the
   **final workspace state** against the merge base with `delivery.base_branch`
   (`Git.effective_change_set/2`: committed candidate + tracked changes of the worktree +

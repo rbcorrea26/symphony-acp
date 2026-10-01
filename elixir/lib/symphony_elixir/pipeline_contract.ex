@@ -76,12 +76,23 @@ defmodule SymphonyElixir.PipelineContract do
       another mapping, and both are refused; a token inside a *value* (a block scalar, a
       quoted string, a comment) is not a key at all and leaves the body unconfigured.
       Scalar blanking is used only where the block must **not** be parsed: refusing a
-      structural anchor (an alias graph is never expanded) and the size cap;
+      structural anchor (an alias graph is never expanded), refusing a block that still
+      holds a fence delimiter (see the fence rule below) and reading the start of an
+      unfenced body. A block above the size cap is judged on its **raw** text, like an
+      unreadable one;
     * the fences that delimit the block follow CommonMark's structural limit: a fence
       may be indented by **at most three spaces**, so a line with four or more is
       indented code and can neither open nor close the block. Indentation is counted in
       spaces only: a tab-indented marker is content (the conservative reading, since
-      the column a tab reaches depends on the tab stop);
+      the column a tab reaches depends on the tab stop). The closing fence carries
+      **spaces only** after the marker, so a trailing tab — or any other character — is
+      content and cannot end the block either. A block that claims the contract and
+      still holds a fence delimiter in its structure — the close the author wrote and
+      the rule rejected (a tab, a text suffix, a shorter marker, another marker kind)
+      or a nested fence — is **refused** instead of parsed: the YAML library ends the
+      `pipeline_contract` mapping at that line and would move every field written after
+      it out of the contract in silence, which is exactly the truncation the fence rule
+      exists to prevent;
     * patterns are never resolved against the filesystem: an absolute path, a `..`
       segment or a `\` separator is a schema error, and the match is a pure,
       anchored comparison against the candidate change set — a symlink cannot
@@ -146,11 +157,19 @@ defmodule SymphonyElixir.PipelineContract do
   # answer here would truncate the block silently; a tab-indented marker is content
   # (the conservative reading, declared in `docs/fork/acceptance-contract.md`).
   @fence ~r/^ {0,3}(`{3,}|~{3,})/
-  # The closing fence, the same marker with **nothing but whitespace after it**: an
-  # info string is allowed on the opening line only, so ` ```not-a-close ` inside a
-  # block is content and cannot end it (a pseudo-close would truncate the block to a
-  # readable prefix and hide every field after it).
-  @closing_fence ~r/^ {0,3}(`{3,}|~{3,})[ \t]*$/
+  # The same shape **anywhere** in the block (multiline): a block that claims the contract
+  # and still contains one of these lines was not closed by the line the author closed it
+  # with, so its boundary is not the one that was written — see `classify_fenced/1`.
+  @fence_line ~r/^ {0,3}(`{3,}|~{3,})/m
+  # The closing fence, the same marker with **nothing but spaces** after it: an info string
+  # is allowed on the opening line only, so ` ```not-a-close ` inside a block is content and
+  # cannot end it (a pseudo-close would truncate the block to a readable prefix and hide
+  # every field after it). The trailing whitespace is **spaces only**, for the same reason
+  # the indentation is counted in spaces only: a trailing tab is invisible in most editors
+  # and would close the block without being part of the documented contract, so it is
+  # content like any other suffix (the declared divergence from CommonMark is deliberate
+  # and fail-closed — a tab can only keep text inside the block, never truncate it).
+  @closing_fence ~r/^ {0,3}(`{3,}|~{3,}) *$/
   @evidence_name ~r/^[a-z0-9][a-z0-9._-]*$/
   @max_pattern_length 512
   @max_items 256
@@ -436,10 +455,39 @@ defmodule SymphonyElixir.PipelineContract do
   defp classify(block) do
     case anchor(block) do
       nil ->
-        classify_parsed(block)
+        classify_fenced(block)
 
       anchor ->
         if claimed?(block), do: {:error, {:anchors_not_supported, anchor}}, else: :absent
+    end
+  end
+
+  # A block that claims the contract key must not contain a fence delimiter in its
+  # **structure**: the line the author closed the block with was either accepted (and is
+  # not part of the block) or rejected by the documented rule (a tab after the marker, a
+  # text suffix, a shorter marker, another marker kind), and in that second case the YAML
+  # library ends the `pipeline_contract` mapping **at that line** and reads whatever comes
+  # after it as an unrelated top-level node — every field written there leaves the contract
+  # in silence. A nested fence (` ``` ` inside the block) lands in the same shape. The
+  # boundary of such a block is not the one that was written, so it cannot be the contract:
+  # the block is refused (fail closed) instead of being parsed as a valid prefix. A block
+  # that claims nothing is left alone — an unrelated code block may contain any fence.
+  #
+  # The decision is taken over the structure only (scalars and comments blanked), so a
+  # fence *inside a scalar* (`notes: |` with an indented ` ``` `) stays text and does not
+  # refuse the block. The marker reported is bounded to three characters: the answer is the
+  # kind of delimiter, and the reason travels to the finding message.
+  defp classify_fenced(block) do
+    case fence_inside?(block) do
+      nil -> classify_parsed(block)
+      delimiter -> if claimed?(block), do: {:error, {:fence_inside_block, delimiter}}, else: :absent
+    end
+  end
+
+  defp fence_inside?(block) do
+    case Regex.run(@fence_line, without_scalars(block)) do
+      [_line, delimiter] -> binary_part(delimiter, 0, 3)
+      _other -> nil
     end
   end
 
@@ -573,10 +621,12 @@ defmodule SymphonyElixir.PipelineContract do
 
   # The claim over the text with the **scalar content blanked** (comments, quoted values,
   # block scalars). It is only used where the block must not be parsed (a structural
-  # anchor, or a block above the size cap), so a `pipeline_contract:` written inside a
-  # scalar cannot claim the contract or route the block to the anchor refusal — while a
-  # quoted key in key position (`"pipeline_contract":`) is unquoted first and stays
-  # visible.
+  # anchor, a block that still holds a fence delimiter) and for the start of an unfenced
+  # body, so a `pipeline_contract:` written inside a scalar cannot claim the contract or
+  # route the block to the anchor refusal — while a quoted key in key position
+  # (`"pipeline_contract":`) is unquoted first and stays visible. A block above the size
+  # cap does **not** use this reading: it is judged on the raw text, like an unreadable
+  # one, so a scalar cannot hide a declaration by making the block too big either.
   defp claimed?(block), do: Regex.match?(@contract_key, claim_text(block))
 
   defp claimed_start?(block), do: Regex.match?(@contract_key_start, claim_text(block))

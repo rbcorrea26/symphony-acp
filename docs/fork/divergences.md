@@ -278,6 +278,55 @@ Arquivos:
 | `docs/fork/README.md` | alterado | status da fase 7b (bloco D implementado; 7b **não** concluída) | não |
 | `docs/fork/adr/README.md` | alterado | índice do ADR `0006` | não |
 
+Sobre o mesmo bloco caíram **cinco achados** da review do architect no candidato `998b401`
+(fechamento aceitando tab, falso truncamento no orçamento exato e três documentos desatualizados),
+fechados nesta PR. (1) **HIGH — o fechamento aceitava tab**: `@closing_fence` era `[ \t]*$`, então
+` ``` ` seguido de tab fechava o bloco apesar de o contrato documentado dizer "somente espaços".
+Agora é ` *$`: tab, espaço+tab, texto, marcador menor e outro marcador são conteúdo, e o bloco
+segue aberto. (2) A revisão adjacente provou que isso **não bastava**: com a fence rejeitada dentro
+do bloco, a biblioteca YAML **encerra o mapeamento `pipeline_contract`** naquela linha e absorve o
+resto como nó de topo — um campo escrito depois era **descartado em silêncio** (medido:
+`deploy: true` depois de um fechamento com tab desaparecia do contrato), o que contradiz a promessa
+documentada de que uma pseudo-cerca "não esconde os campos que vêm depois". Agora um bloco que
+**declara** o contrato e cuja **estrutura** ainda contém uma cerca é recusado
+(`{:fence_inside_block, "```"}`): a fronteira do bloco não é a que o autor escreveu, então ele não é
+lido como prefixo válido. A decisão lê só a estrutura (scalar e comentário blankados), então uma
+cerca dentro de um scalar continua texto, e blocos que **não** declaram o contrato seguem ignorados
+— um bloco de código qualquer pode conter cercas. (3) **MEDIUM — falso truncamento no orçamento
+exato**: `untracked_lines/3` respondia `truncated: true` sempre que o orçamento de linhas chegava a
+zero (cláusula `budget <= 0`), então um candidato com **exatamente** as 2 000 linhas adicionadas e
+nada mais a ler era declarado parcial — `prohibition_scan_truncated` em `strict` **bloqueava um
+candidato válido**. A resposta passou a ser calculada do **conteúdo**: orçamento esgotado com nada
+restante (nenhum arquivo não rastreado, ou só arquivos sem linha) é varredura **completa**; uma
+linha além (rastreada ou não) é truncamento. (4) **LOW — doc**: a linha da tabela que descrevia
+"`pipeline_contract:` dentro de scalar + bloco indecodificável → scalar blankado / ausência" era da
+semântica antiga; o bloco ilegível (e o acima do cap) é julgado no texto **bruto**, então uma
+ocorrência em posição de chave **reprova**, mesmo dentro de um scalar. (5) **LOW — doc**: o ADR
+ainda dizia que a varredura de proibição usa `git diff HEAD` — hoje ela lê o **candidato efetivo**
+(diff da merge base com a branch base contra o estado final do workspace) — e
+`docs/fork/delivery-and-promotion.md` ainda citava `ensure_comment` em vez de
+`GitHub.upsert_comment/5`. Junto disso, a auditoria de referências encontrou o **mesmo** defeito de
+doc no módulo, no ADR e no documento operacional: o blanking de scalar era descrito como valendo
+para o **cap de tamanho**, que na verdade é julgado no texto bruto (medido). Testes: matriz de fence
+(espaços fecham; tab, espaço+tab, texto, marcador menor, outro marcador e cerca aninhada não fecham
+e são recusados; 0–3 espaços abrem e fecham; quatro espaços é conteúdo; scalar e bloco não
+declarante não recusam; declarante recusado — com a regressão de que o campo depois da pseudo-cerca
+**não** é descartado) e matriz de fronteira do orçamento (N−1, N, N+1, rastreado, não rastreado,
+combinado, arquivo vazio, orçamento exato e uma linha além).
+
+Arquivos:
+
+| Arquivo | Tipo | Motivo | Comportamento upstream afetado? |
+|---|---|---|---|
+| `elixir/lib/symphony_elixir/pipeline_contract.ex` | alterado | `@closing_fence` passa a aceitar **só espaços** depois do marcador (tab, texto, marcador menor e outro marcador são conteúdo) e o bloco que **declara** o contrato e ainda contém uma cerca na **estrutura** é recusado (`{:fence_inside_block, marker}`), em vez de o YAML encerrar o mapeamento ali e descartar os campos seguintes em silêncio; a doc do módulo e os comentários de `claimed?`/`classify` deixam de atribuir o blanking de scalar ao cap de tamanho (o cap é julgado no texto bruto) | não (só existe com `delivery.enabled`) |
+| `elixir/lib/symphony_elixir/delivery/git.ex` | alterado | `added_lines/2`/`untracked_lines/3`: `truncated` passa a significar **conteúdo não inspecionado por causa de um limite**, nunca "um limite foi alcançado" — orçamento esgotado com nada restante é varredura completa, e a decisão é calculada do conteúdo (o read para no primeiro arquivo com linha além do orçamento) | não |
+| `elixir/test/symphony_elixir/pipeline_contract_test.exs` | alterado | matriz de cerca de fechamento (espaços fecham; tab, espaço+tab, texto, marcador menor, outro marcador e cerca aninhada **não** fecham e o bloco é recusado; 0–3 espaços abrem/fecham; quatro espaços é conteúdo; fence dentro de scalar e em bloco não declarante não recusa; pseudo-cerca não deixa o campo seguinte ser descartado); os três testes antigos que afirmavam o tab como fechamento foram reescritos | não |
+| `elixir/test/symphony_elixir/delivery_acceptance_test.exs` | alterado | matriz de fronteira do orçamento de linhas (N−1, N, N+1 com rastreado, não rastreado, combinado, arquivo vazio, orçamento exato com nada restante e uma linha além) e o caso ponta a ponta em que um candidato com **exatamente** 2 000 linhas passa em `strict` sem `change_scan_truncated` | não |
+| `docs/fork/acceptance-contract.md` | alterado | tabela: fechamento com **espaços apenas** (tab é conteúdo), nova linha da recusa `fence_inside_block` e a linha do scalar em bloco indecodificável passa a descrever o texto **bruto**; §5 declara o critério de varredura parcial (**conteúdo não inspecionado**, nunca o limite alcançado) e o blanking de scalar deixa de ser atribuído ao cap de tamanho | não |
+| `docs/fork/adr/0006-acceptance-contract.md` | alterado | §4 deixa de citar `git diff HEAD`: a varredura lê o **candidato efetivo** (merge base da branch base → estado final do workspace, rastreado + não rastreado, com o diff lido até o cap); revisão do achado 1 (fechamento só com espaços + recusa do bloco que ainda contém cerca); cap de tamanho julgado no texto bruto; critério de truncamento | não |
+| `docs/fork/delivery-and-promotion.md` | alterado | `ensure_comment` → `GitHub.upsert_comment/5`, mantendo o invariante de o veredicto legível por máquina ser persistido antes dos rótulos | não |
+| `elixir/README.md` | alterado | cerca de fechamento com **espaços apenas** (tab é conteúdo, divergência deliberada do CommonMark), a recusa `fence_inside_block`, o bloco acima do cap julgado no texto bruto e o critério de truncamento por conteúdo não inspecionado | não |
+
 ## Regras do registro
 
 - Toda alteração em arquivo existente do upstream entra aqui **no mesmo PR**,

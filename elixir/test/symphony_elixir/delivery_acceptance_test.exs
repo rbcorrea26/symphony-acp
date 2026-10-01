@@ -397,6 +397,67 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
       assert :change_scan_truncated in result.limits
     end
 
+    test "the line budget bounds uninspected content, not the size of the scan", %{workspace: workspace} do
+      # N = 2 000 added lines is the documented budget. Consuming it **exactly** with
+      # nothing else to inspect is a complete scan: answering "a bound was reached" there
+      # reported `change_scan_truncated` and failed a `strict` contract that had nothing
+      # left to hide.
+      for count <- [1_999, 2_000] do
+        write!(workspace, "README.md", String.duplicate("line\n", count))
+
+        assert {:ok, %{lines: lines, truncated: false}} = Git.added_lines(workspace, "HEAD")
+        assert length(lines) == count
+      end
+
+      # An untracked file with content is content to inspect: with the budget consumed by
+      # the tracked diff, the scan stops instead of reading it.
+      write!(workspace, "untracked.txt", "ssh prod\n")
+
+      assert {:ok, %{truncated: true}} = Git.added_lines(workspace, "HEAD")
+
+      # An untracked file that holds no line is nothing to inspect: the same workspace is
+      # complete again (a file without content cannot hide a prohibition).
+      File.write!(Path.join(workspace, "untracked.txt"), "")
+
+      assert {:ok, %{truncated: false}} = Git.added_lines(workspace, "HEAD")
+
+      # One line above the budget is content left over, untracked or not.
+      File.rm!(Path.join(workspace, "untracked.txt"))
+      write!(workspace, "README.md", String.duplicate("line\n", 2_001))
+
+      assert {:ok, %{lines: lines, truncated: true}} = Git.added_lines(workspace, "HEAD")
+      assert length(lines) == 2_000
+
+      # Below the budget the untracked half still uses what is left of it...
+      write!(workspace, "README.md", String.duplicate("line\n", 1_999))
+      write!(workspace, "untracked.txt", "line\n")
+
+      assert {:ok, %{lines: lines, truncated: false}} = Git.added_lines(workspace, "HEAD")
+      assert length(lines) == 2_000
+      assert List.last(lines).path == "untracked.txt"
+
+      # ...and one line more than what is left is truncated.
+      write!(workspace, "untracked.txt", "line\nline\n")
+
+      assert {:ok, %{lines: lines, truncated: true}} = Git.added_lines(workspace, "HEAD")
+      assert length(lines) == 2_000
+    end
+
+    test "a candidate at the exact line budget passes instead of failing closed", %{workspace: workspace} do
+      write!(workspace, "README.md", String.duplicate("line\n", 2_000))
+
+      assert {:ok, %Result{status: :pass, findings: []} = result} = scope(workspace, issue(contract_body([])))
+      refute :change_scan_truncated in result.limits
+
+      # An untracked file with no content is not content left over either.
+      File.write!(Path.join(workspace, "empty.txt"), "")
+
+      assert {:ok, %Result{status: :pass, findings: []} = result} =
+               scope(workspace, issue(contract_body(allowed_extra_paths: ["empty.txt"])))
+
+      refute :change_scan_truncated in result.limits
+    end
+
     test "a tracked diff above the byte budget is read bounded, not captured whole", %{workspace: workspace} do
       write!(workspace, "big.txt", "base\n")
       git!(workspace, ["add", "-A"])
@@ -421,6 +482,71 @@ defmodule SymphonyElixir.Delivery.AcceptanceTest do
 
       assert length(lines) < 500
       assert Enum.all?(lines, &(&1.path == "big.txt"))
+    end
+
+    test "the file and per-file byte caps are bounds on uninspected content too", %{workspace: workspace} do
+      # Exactly the file cap is complete; one file more is content the scan did not read.
+      Enum.each(1..200, fn index -> write!(workspace, "many/file-#{index}.js", "x\n") end)
+
+      assert {:ok, %{truncated: false}} = Git.added_lines(workspace, "HEAD")
+
+      write!(workspace, "many/file-201.js", "x\n")
+
+      assert {:ok, %{truncated: true}} = Git.added_lines(workspace, "HEAD")
+
+      # Exactly the per-file byte cap is complete; one byte more is truncated.
+      File.rm_rf!(Path.join(workspace, "many"))
+      write!(workspace, "big.txt", String.duplicate("y", 262_143) <> "\n")
+
+      assert {:ok, %{truncated: false}} = Git.added_lines(workspace, "HEAD")
+
+      write!(workspace, "big.txt", String.duplicate("y", 262_144) <> "\n")
+
+      assert {:ok, %{truncated: true}} = Git.added_lines(workspace, "HEAD")
+    end
+
+    test "the byte budget is a bound on unread content too", %{workspace: workspace} do
+      # `@max_diff_bytes` is enforced **while** the child is read: exactly the cap is a
+      # complete read and one byte more is truncated. The size is measured with the same
+      # command the read uses instead of assumed, so the test does not encode git's
+      # formatting (headers, index line, hunk header).
+      write!(workspace, "big.txt", "base\n")
+      git!(workspace, ["add", "-A"])
+
+      git!(workspace, [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.org",
+        "commit",
+        "-q",
+        "-m",
+        "base big"
+      ])
+
+      cap = 1_048_576
+
+      diff_size = fn content ->
+        write!(workspace, "big.txt", content)
+        {diff, 0} = System.cmd("git", ["-c", "core.quotePath=false", "diff", "HEAD", "--no-color", "--unified=0"], cd: workspace)
+
+        byte_size(diff)
+      end
+
+      # One added line of `n` bytes: the diff is linear in `n`, so one measurement tells
+      # the padding needed for the exact size (and the second one confirms it).
+      guess = cap - 60
+      exact = guess + (cap - diff_size.(String.duplicate("x", guess) <> "\n"))
+      content = String.duplicate("x", exact) <> "\n"
+
+      assert diff_size.(content) == cap
+      assert {:ok, %{lines: [%{path: "big.txt"}], truncated: false}} = Git.added_lines(workspace, "HEAD")
+
+      # A single byte above the cap is content the read did not see (the same line, one
+      # byte longer).
+      assert diff_size.(String.duplicate("x", exact + 1) <> "\n") == cap + 1
+      assert {:ok, %{lines: lines, truncated: true}} = Git.added_lines(workspace, "HEAD")
+      assert length(lines) == 1
     end
 
     test "markup in a path is escaped in the prose and kept literal for machines", %{workspace: workspace} do

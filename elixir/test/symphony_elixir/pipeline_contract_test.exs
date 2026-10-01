@@ -170,19 +170,75 @@ defmodule SymphonyElixir.PipelineContractTest do
                Contract.parse(issue_body(@strict) <> issue_body(@advisory))
     end
 
-    test "a closing fence may carry trailing whitespace" do
-      body = """
-      ```yaml
-      pipeline_contract:
-        version: 1
-        scope_mode: advisory
-        expected_paths:
-          - docs/x.md
-      ```   \t
-      The prose after the block is not YAML.
-      """
+    test "a closing fence carries trailing spaces only, never a tab" do
+      # The contract says the closing fence is the marker with nothing but **spaces**
+      # after it. A tab is invisible in most editors and is not part of that contract,
+      # so a tab-terminated marker does not close the block: the prose after it stays
+      # inside, and the block is refused (it still holds a fence delimiter) instead of
+      # the prefix being read as the whole contract.
+      tabbed = "```yaml\npipeline_contract:\n  version: 1\n  scope_mode: advisory\n```\t\nThe prose after the block is not YAML.\n"
 
-      assert {:ok, contract} = Contract.parse(body)
+      assert {:error, {:pipeline_contract_invalid, {:fence_inside_block, "```"}}} = Contract.parse(tabbed)
+
+      # The same body with **spaces** after the marker closes the block.
+      spaced = "```yaml\npipeline_contract:\n  version: 1\n  scope_mode: advisory\n```   \nThe prose after the block is not YAML.\n"
+
+      assert {:ok, contract} = Contract.parse(spaced)
+      assert contract.scope_mode == :advisory
+    end
+
+    test "a closing fence is spaces only: tab, text and a shorter marker stay content" do
+      # Every rejected closing shape stays **inside** the block, so a field written
+      # after it is observed instead of being silently moved out of the contract by the
+      # YAML library — and a block that still holds a fence delimiter is refused
+      # (fail closed) instead of being parsed as a valid prefix.
+      contract = "pipeline_contract:\n  version: 1\n  scope_mode: strict\n  expected_paths: [docs/a.md]"
+
+      for suffix <- ["```\t", "``` \t", "```not-a-close", "```   \t   ", "```\t\t"] do
+        body = "```yaml\n#{contract}\n#{suffix}\n  deploy: true\n```\n"
+
+        assert {:error, {:pipeline_contract_invalid, {:fence_inside_block, "```"}}} = Contract.parse(body),
+               "the pseudo-close #{inspect(suffix)} ended the block"
+      end
+
+      # The control: with spaces the block really ends there, so the line after it is
+      # prose of the body and the contract itself is read.
+      closed = "```yaml\n#{contract}\n```   \n  deploy: true\n"
+
+      assert {:ok, parsed} = Contract.parse(closed)
+      assert parsed.scope_mode == :strict
+    end
+
+    test "the closing marker is the same kind and at least as long as the opening one" do
+      contract = "pipeline_contract:\n  version: 1\n  scope_mode: advisory"
+      field = "  deploy: true"
+
+      # A shorter marker does not close the block: the field after it stays inside and
+      # the block is refused instead of the field being dropped in silence.
+      assert {:error, {:pipeline_contract_invalid, {:fence_inside_block, "```"}}} =
+               Contract.parse("````yaml\n#{contract}\n```\n#{field}\n````\n")
+
+      # Another marker kind does not close it either, and the kind is reported.
+      assert {:error, {:pipeline_contract_invalid, {:fence_inside_block, "~~~"}}} =
+               Contract.parse("```yaml\n#{contract}\n~~~\n#{field}\n```\n")
+
+      # The same kind, at least as long, does close it (CommonMark).
+      assert {:ok, parsed} = Contract.parse("```yaml\n#{contract}\n````\n#{field}\n")
+      assert parsed.scope_mode == :advisory
+    end
+
+    test "a fence inside a scalar or in another block does not refuse the body" do
+      # The refusal is about the block that **claims** the contract, and it reads the
+      # structure only: a fence written inside a scalar of that block, or in an
+      # unrelated block, is content and stays out of the decision.
+      scalar = "```yaml\npipeline_contract:\n  version: 1\n  scope_mode: advisory\nnotes: |\n  ```\n  ~~~\n```\n"
+
+      assert {:ok, contract} = Contract.parse(scalar)
+      assert contract.scope_mode == :advisory
+
+      unrelated = "```sh\necho x\n~~~\n```\n\n```yaml\n#{@advisory}\n```\n"
+
+      assert {:ok, contract} = Contract.parse(unrelated)
       assert contract.scope_mode == :advisory
     end
 
@@ -225,7 +281,11 @@ defmodule SymphonyElixir.PipelineContractTest do
       assert {:error, {:pipeline_contract_invalid, _reason}} = Contract.parse(body)
     end
 
-    test "a declaration after a pseudo-close is observed as a second contract" do
+    test "a declaration after a pseudo-close is never silently dropped" do
+      # The pseudo-close does not end the block, so the second declaration stays inside
+      # it — and a block that still holds a fence delimiter was not closed by the line
+      # the author closed it with: it is refused instead of being parsed as a readable
+      # prefix (a prefix read would leave the declaration outside the contract).
       body = """
       ```yaml
       pipeline_contract:
@@ -242,7 +302,7 @@ defmodule SymphonyElixir.PipelineContractTest do
       ```
       """
 
-      assert {:error, {:pipeline_contract_invalid, {:ambiguous_contracts, 2}}} = Contract.parse(body)
+      assert {:error, {:pipeline_contract_invalid, {:fence_inside_block, "```"}}} = Contract.parse(body)
     end
 
     test "a fence is structural only up to three spaces of indentation" do
@@ -283,22 +343,22 @@ defmodule SymphonyElixir.PipelineContractTest do
     test "a tab is not indentation: it cannot open or close the block" do
       # The column a tab reaches depends on the tab stop, so the conservative reading is
       # that a tab-indented marker is content: it cannot truncate the block either — the
-      # second key stays inside it and the document is refused, never read as two blocks.
+      # second key stays inside it and the block is refused (it still holds a fence
+      # delimiter), never read as two blocks.
       tabbed =
         "```yaml\npipeline_contract:\n  version: 1\n  scope_mode: advisory\n\t```\n```yaml\npipeline_contract:\n  version: 1\n  scope_mode: strict\n```\n"
 
-      assert {:error, {:pipeline_contract_invalid, {:invalid_yaml, _reason}}} = Contract.parse(tabbed)
+      assert {:error, {:pipeline_contract_invalid, {:fence_inside_block, "```"}}} = Contract.parse(tabbed)
 
       # A tab-indented opener opens nothing either: the block is never read.
       tabbed_open = "## Notes\n\n\t```yaml\n\tpipeline_contract:\n\t  version: 1\n\t```\n"
 
       assert Contract.parse(tabbed_open) == :absent
 
-      # Trailing whitespace after the marker is still allowed, tab included (CommonMark).
-      assert {:ok, contract} =
+      # Trailing whitespace after the marker is **spaces only**: the tab shape leaves the
+      # block open (the closing-fence tests cover it in full).
+      assert {:error, {:pipeline_contract_invalid, {:fence_inside_block, "```"}}} =
                Contract.parse("```yaml\npipeline_contract:\n  version: 1\n  scope_mode: advisory\n```\t\n")
-
-      assert contract.scope_mode == :advisory
     end
 
     test "a valid contract with a normal close keeps being accepted" do

@@ -75,6 +75,17 @@ Revisão de 2026-09-30 (achados 1 e 2 da review do candidato `75791b4`), sobre a
   que um tab alcança depende do tab stop; a leitura conservadora é declarada em
   `../acceptance-contract.md`). Sem isso, uma linha indentada que *parece* fechamento
   truncava o YAML e escondia os campos seguintes;
+- revisão do mesmo ciclo (achado 1 da review do candidato `998b401`): o **fechamento**
+  aceita **espaços apenas** depois do marcador. Um tab ali (ou texto, ou um marcador
+  menor, ou de outra espécie) é conteúdo — e um bloco que **declara** o contrato e
+  continua contendo uma cerca é **recusado** (`fence_inside_block`), porque a biblioteca
+  YAML encerra o mapeamento `pipeline_contract` nessa linha e moveria todo campo escrito
+  depois dela para fora do contrato sem avisar: a fronteira do bloco não é a que o autor
+  escreveu. A divergência deliberada do CommonMark (que aceita tab depois do fechamento)
+  é fail-closed: um tab só pode manter texto dentro do bloco, nunca truncá-lo. A recusa
+  lê a **estrutura** (scalar blankado), então uma cerca dentro de um scalar é texto, e só
+  o bloco que declara o contrato é analisado — um bloco de código qualquer pode conter
+  cercas;
 - a dica textual é, e continua sendo, só um **ampliador do conjunto de falhas**: quem
   decide presença/duplicidade é o parser. Ela passou a valer também quando o documento
   **é decodificável e não lê a chave**: um scalar malformado (`foo:'unterminated`) faz o
@@ -82,12 +93,14 @@ Revisão de 2026-09-30 (achados 1 e 2 da review do candidato `75791b4`), sobre a
   (ou a declaração está aninhada em outro mapeamento), o que transformava uma declaração
   real em ausência silenciosa;
 - para não esconder nada, a dica **não usa heurística de scalar** onde ela decide: um
-  bloco **ilegível** é julgado no texto **bruto** (nada blankado, então nada pode ser
-  escondido — o preço declarado é conservador: um scalar de um bloco ilegível que cite a
-  chave é reprovado) e um bloco **legível sem a chave** é julgado no que o **decoder
+  bloco **ilegível** — e também um bloco **acima do cap de tamanho** — é julgado no texto
+  **bruto** (nada blankado, então nada pode ser escondido: um scalar desses blocos que
+  cite a chave em posição de chave é reprovado, o preço conservador declarado) e um bloco
+  **legível sem a chave** é julgado no que o **decoder
   leu** (uma chave lida que contém o token reprova; um token dentro de um valor não é
   chave e deixa o corpo `:absent`). O blanking de scalar sobrevive só para as decisões
-  que **não** parseiam o bloco (a recusa de âncora e o cap de tamanho), e ali ele usa as
+  que **não** parseiam o bloco (a recusa de âncora, a recusa do bloco que ainda contém uma
+  cerca e a leitura do início de um corpo sem cerca), e ali ele usa as
   mesmas separações que o decoder exige (um scalar com aspas ou um comentário só começa
   onde um nó pode começar, nunca colado a um `:`) e não deixa uma citação que não fecha
   blankar as linhas seguintes (o blanking é refeito linha a linha).
@@ -130,10 +143,15 @@ declarado, e um nome sem provider é reprovação, não execução implícita.
 ### 4. Proibição é heurística declarada, não prova de intenção
 
 `remote_access: false` e `deploy: false` são proibições explícitas do default. A
-detecção é uma **varredura das linhas adicionadas pelo candidato** (`git diff HEAD`
-de arquivos rastreados — o processo filho é lido até o cap e encerrado nele, o diff
-inteiro nunca é capturado — + conteúdo de arquivos não rastreados, ambos limitados), com
-regras fixas e versionadas neste fork: `kubectl apply/create/...`, `terraform
+detecção é uma **varredura das linhas adicionadas do candidato efetivo** — o **mesmo
+sujeito** que o escopo avalia: o diff da **merge base com a branch base**
+(`delivery.base_branch`) contra o **estado final do workspace** (o candidato já commitado
+por uma retomada + as alterações do worktree + os arquivos não rastreados que o
+`git add -A` publicaria) —, com o `git diff` lido do processo filho **até o cap** (o diff
+inteiro nunca é capturado na memória e o filho é encerrado no cap) e o conteúdo dos
+arquivos não rastreados lido do disco, ambos limitados. Ler contra a **merge base**, e
+não contra o `HEAD` local, é o que faz o candidato já publicado entrar na varredura numa
+retomada cujo worktree está limpo; com regras fixas e versionadas neste fork: `kubectl apply/create/...`, `terraform
 apply/destroy`, `helm upgrade/install/...`, `ansible-playbook`, `docker push`,
 `npm/yarn/pnpm publish`, `gh release create/upload`, `aws deploy|cloudformation
 deploy|s3 sync`; e `ssh/scp/sftp`, `rsync` para host remoto, `ssh://`, `git clone
@@ -163,11 +181,16 @@ aceite nunca libera o que o projeto não tem.
 
 A distinção é declarada na resposta (`limits`) e no comentário de handoff, e não
 convertida em `PASS` silencioso. O mesmo vale para o **scan parcial**: quando a
-varredura atinge o cap declarado (1 MiB de diff, 200 arquivos não rastreados,
-262 144 bytes por arquivo, 2 000 linhas), o veredicto carrega
-`prohibition_scan_truncated` — em `strict` o run falha (não se certifica ausência de
-proibição sobre leitura parcial) e em `advisory` a divergência é reportada — além
-do limite `change_scan_truncated`.
+varredura atinge um cap declarado (1 MiB de diff, 200 arquivos não rastreados,
+262 144 bytes por arquivo, 2 000 linhas) **deixando conteúdo sem inspecionar**, o
+veredicto carrega `prohibition_scan_truncated` — em `strict` o run falha (não se
+certifica ausência de proibição sobre leitura parcial) e em `advisory` a divergência é
+reportada — além do limite `change_scan_truncated`. O critério é conteúdo não
+inspecionado, nunca o limite meramente alcançado: um candidato que consome exatamente as
+2 000 linhas do orçamento e não tem mais nada a ler (nenhum arquivo não rastreado, ou só
+arquivos sem linha) é uma varredura **completa** (`truncated: false`) — a correção veio
+do achado 2 da review do candidato `998b401`, em que o orçamento esgotado respondia
+`truncated` por si só e bloqueava em `strict` um candidato válido.
 
 ### Segurança da entrada não confiável
 

@@ -65,9 +65,10 @@ Regras do parser (`SymphonyElixir.PipelineContract`):
 | bloco **decodificável** que não lê a chave mas cujo texto a declara em posição de chave | o token foi absorvido por um scalar malformado (`foo:'unterminated` transforma o `pipeline_contract:` seguinte em parte de uma chave plana multi-linha) ou é uma declaração aninhada em outro mapeamento: o bloco é candidato a contrato e o decode reporta `:missing_pipeline_contract_key` → reprova, nunca ausência |
 | bloco **ilegível** cujo texto cita a chave em posição de chave (mesmo dentro de um scalar) | a decisão é sobre o texto bruto, então a chave é observada: reprova, nunca ausência (o preço conservador de não deixar nenhuma heurística esconder uma declaração) |
 | cerca de abertura/fechamento com **mais de três espaços** de indentação (ou com tab) | é código indentado, não cerca: não abre nem fecha o bloco, então o conteúdo depois dela continua sendo observado (uma pseudo-cerca não pode truncar o YAML) |
-| cerca de fechamento | mesmo marcador da abertura, comprimento ≥ o da abertura e **nada além de espaços** depois do marcador: uma linha como ` ```not-a-close ` é conteúdo do bloco (não trunca o YAML nem esconde os campos que vêm depois) e uma linha de abertura com info string (` ```yaml `) nunca fecha |
+| cerca de fechamento | mesmo marcador da abertura, comprimento ≥ o da abertura e **nada além de espaços** depois do marcador: uma linha como ` ```not-a-close ` é conteúdo do bloco (não trunca o YAML nem esconde os campos que vêm depois) e uma linha de abertura com info string (` ```yaml `) nunca fecha. Um **tab** (ou qualquer outro caractere) depois do marcador é conteúdo também: a cerca documentada é a de espaços, e um tab é invisível na maioria dos editores — a divergência do CommonMark aqui é deliberada e falha fechada (um tab só pode manter texto **dentro** do bloco, nunca truncá-lo) |
 | cerca de fechamento com o mesmo marcador e mais caracteres que a abertura | fecha o bloco (CommonMark): a prosa seguinte não é lida como YAML |
-| `pipeline_contract:` dentro de um scalar **e** bloco que não pode ser decodificado | a dica de chave roda no texto com o scalar blankado: um scalar não declara o contrato (nem sequer para reprovar), mas um bloco que cita a chave fora de scalar segue falhando fechado |
+| bloco que **declara** o contrato e cuja estrutura ainda contém uma cerca (a cerca que o autor escreveu e a regra recusou — tab/texto/marcador menor/outro marcador —, ou uma cerca aninhada) | `{:fence_inside_block, "```"}` → reprova: a biblioteca YAML termina o mapeamento `pipeline_contract` nessa linha e moveria todo campo escrito depois dela **para fora do contrato em silêncio**. A fronteira do bloco não é a que foi escrita, então ele não é lido como um prefixo válido. Blocos que **não** declaram o contrato são ignorados (um bloco de código qualquer pode conter cercas), e a decisão lê só a **estrutura** (scalar blankado), então uma cerca dentro de um scalar é texto e não recusa o bloco |
+| `pipeline_contract:` dentro de um scalar **e** bloco que não pode ser decodificado | a dica roda no texto **bruto** (nada blankado): a ocorrência em posição de chave é observada e o bloco **reprova** — mesmo dentro de um scalar. É o preço conservador declarado de nunca deixar uma heurística de scalar esconder uma declaração; o mesmo vale para o bloco **acima do cap de tamanho** |
 | aspas simples escapada (`''`) dentro de scalar | continua sendo **um** scalar (`'docs/it''s &notes.md'` não é scalar + âncora) |
 | padrão que não é UTF-8 (ex.: um `!!binary`) | `{:invalid_pattern, _, :not_utf8}` → reprova (a comparação de paths é sobre UTF-8) |
 | tag YAML (`!foo`, `!ruby/object`, `!!python/...`) | `{:invalid_yaml, %{type: :unrecognized_node}}` → reprova |
@@ -104,11 +105,14 @@ lugares em que o parser não consegue responder:
 
 O blanking de scalar (comentário, string com aspas, block scalar) continua existindo
 para as decisões que **não** parseiam o bloco: a recusa de âncora estrutural (o grafo
-de alias nunca é expandido) e o cap de tamanho. Ele usa as mesmas separações que o
-decoder exige — um scalar com aspas ou um comentário só começa onde um nó pode
-começar, nunca colado a um `:` — e uma citação que não fecha em nenhuma linha do bloco
-não blanka as linhas seguintes (o blanking é refeito linha a linha, onde nenhum estado
-sobrevive ao `\n`).
+de alias nunca é expandido), a recusa do bloco que ainda contém uma cerca e a leitura
+do início de um corpo sem cerca. Ele usa as mesmas separações que o decoder exige — um
+scalar com aspas ou um comentário só começa onde um nó pode começar, nunca colado a um
+`:` — e uma citação que não fecha em nenhuma linha do bloco não blanka as linhas
+seguintes (o blanking é refeito linha a linha, onde nenhum estado sobrevive ao `\n`). O
+bloco **acima do cap de tamanho** não usa essa leitura: como o bloco ilegível, ele é
+julgado no texto bruto, então um scalar não pode esconder uma declaração nem fazendo o
+bloco crescer.
 
 ## 3. Semântica de escopo
 
@@ -213,11 +217,17 @@ Consequência declarada dessa leitura incremental: um input enorme cujo *tail* n
 UTF-8 devolve `change_set_too_large` (o tail não chega a ser lido), enquanto um path não
 UTF-8 **dentro** do cap devolve `change_set_not_utf8` — as duas falham fechado.
 
-**Varredura parcial não passa por completa**: quando o cap é atingido (no diff lido,
-nos arquivos ou nas linhas), o veredicto ganha o finding
+**Varredura parcial não passa por completa**: quando um limite é atingido **com
+conteúdo ainda não inspecionado**, o veredicto ganha o finding
 `prohibition_scan_truncated` — em `strict` o run **falha** (nada é publicado) e em
 `advisory` a divergência é reportada e o handoff continua — além do limite
-`change_scan_truncated`, sempre declarado. Um contrato que desligou as duas
+`change_scan_truncated`, sempre declarado. O critério é **conteúdo não inspecionado**,
+nunca o limite meramente alcançado: um candidato cujas linhas adicionadas consomem
+**exatamente** as 2 000 linhas do orçamento e não têm mais nada a ler (nenhum arquivo não
+rastreado, ou só arquivos sem linha) é uma varredura **completa** (`truncated: false`),
+porque declarar ali um truncamento bloquearia em `strict` um candidato que não tem o que
+esconder. Um arquivo não rastreado **vazio** não é conteúdo restante; uma linha além do
+orçamento (rastreada ou não) é. Um contrato que desligou as duas
 proibições (`remote_access: true` e `deploy: true`) não tem o que certificar: aí o
 cap é só um limite, sem finding. O teto de **achados** por tipo (`truncated` da
 varredura de regras) é outro caso: ele nunca esconde uma proibição encontrada, só
@@ -303,7 +313,7 @@ em `strict` e advisory em `advisory`).
 
 | Código | Categoria | Significado |
 |---|---|---|
-| `invalid_contract` | `contract` | o contrato existe e não é fiscalizável (versão/campo/tipo/duplicidade/âncora/YAML) |
+| `invalid_contract` | `contract` | o contrato existe e não é fiscalizável (versão/campo/tipo/duplicidade/âncora/cerca dentro do bloco/YAML) |
 | `expected_path_missing` | `scope` | path esperado não faz parte do change set do candidato |
 | `unexpected_path_changed` | `scope` | path alterado fora de `expected_paths` ∪ `allowed_extra_paths` (inclui a origem de um rename, que é uma deleção) |
 | `required_evidence_missing` | `evidence` | nome exigido sem provider no registry |

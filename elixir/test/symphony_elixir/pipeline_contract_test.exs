@@ -1117,6 +1117,104 @@ defmodule SymphonyElixir.PipelineContractTest do
       assert {:error, {:pipeline_contract_invalid, {:contract_too_large, size}}} = Contract.parse(huge)
       assert size > 65_536
     end
+
+    # The size cap is decided **first**, on the raw text: an oversized block is never
+    # classified through the scalar-blanking heuristic, so an anchor or a fence outside a
+    # scalar cannot turn a possible declaration into `:absent`. These tests cross the two
+    # dimensions (declaration position × block structure) instead of one happy path.
+
+    test "an oversized block without a declaration is absent" do
+      prose = "notes: |\n  " <> String.duplicate("just text\n  ", 8_000)
+
+      assert byte_size(prose) > 65_536
+      assert Contract.parse(fenced(prose)) == :absent
+    end
+
+    test "an oversized block that declares the contract fails closed on size" do
+      declared = "pipeline_contract:\n  version: 1\n  scope_mode: advisory\n  " <> String.duplicate("x", 70_000)
+
+      assert {:error, {:pipeline_contract_invalid, {:contract_too_large, size}}} =
+               Contract.parse(fenced(declared))
+
+      assert size > 65_536
+    end
+
+    test "an oversized block whose only declaration is inside a scalar fails closed" do
+      scalar = "notes: |\n  pipeline_contract:\n  " <> String.duplicate("x", 70_000)
+
+      assert {:error, {:pipeline_contract_invalid, {:contract_too_large, _size}}} =
+               Contract.parse(fenced(scalar))
+    end
+
+    test "an oversized scalar declaration with a structural anchor stays fail-closed" do
+      # The anchor is structural, but once the block is above the cap the raw text decides:
+      # the block can be neither `:absent` nor `anchors_not_supported`.
+      anchored = "defaults: &d\n  timeout: 5\nnotes: |\n  pipeline_contract:\n  " <> String.duplicate("x", 70_000)
+
+      assert {:error, {:pipeline_contract_invalid, {:contract_too_large, _size}}} =
+               Contract.parse(fenced(anchored))
+    end
+
+    test "an oversized scalar declaration with a pseudo-fence stays fail-closed" do
+      body = fenced("notes: |\n  pipeline_contract:\n  " <> String.duplicate("x", 70_000) <> "\n```not-a-close")
+
+      assert {:error, {:pipeline_contract_invalid, {:contract_too_large, _size}}} = Contract.parse(body)
+    end
+
+    test "an oversized scalar declaration with comments and quoted scalars stays fail-closed" do
+      noisy =
+        "notes: |\n  pipeline_contract:\n  " <>
+          String.duplicate("x", 70_000) <>
+          "\n# a comment that mentions pipeline_contract: here" <>
+          "\nquoted: \"pipeline_contract: not a key\""
+
+      assert {:error, {:pipeline_contract_invalid, {:contract_too_large, _size}}} = Contract.parse(fenced(noisy))
+    end
+
+    test "an oversized block is never handed to the YAML parser" do
+      # Broken YAML that still *claims* the key: if the block reached the decoder the
+      # answer would be `invalid_yaml`; the cap decides first, so it is `contract_too_large`.
+      # `observe/1` is only reachable through `classify_parsed/1`, which the size guard of
+      # `classify/1` already excludes for an oversized block.
+      broken = "pipeline_contract:\n  version: 1\n  scope_mode: advisory\n  [unclosed\n  " <> String.duplicate("x", 70_000)
+
+      assert {:error, {:pipeline_contract_invalid, {:contract_too_large, _size}}} =
+               Contract.parse(fenced(broken))
+    end
+
+    test "an oversized block with invalid UTF-8 fails closed, never crashes" do
+      # The contract is a binary: the cap is decided on bytes, so an input that is not
+      # valid UTF-8 is never handed to the scalar scan or to the YAML parser.
+      invalid_utf8 = "pipeline_contract:\n  version: 1\n" <> <<0xFF, 0xFE>> <> String.duplicate("x", 70_000)
+
+      assert {:error, {:pipeline_contract_invalid, {:contract_too_large, _size}}} =
+               Contract.parse(fenced(invalid_utf8))
+    end
+
+    test "a declaration inside a scalar within the cap is still absent" do
+      # The conservative reading is limited to oversized blocks: below the cap the scalar
+      # heuristic still decides, so a mention inside a scalar is data.
+      assert Contract.parse(fenced("notes: |\n  pipeline_contract:\n  version: 1")) == :absent
+    end
+
+    test "a structural anchor in a contract within the cap is still refused" do
+      assert {:error, {:pipeline_contract_invalid, {:anchors_not_supported, "&k"}}} =
+               Contract.parse(fenced("pipeline_contract: &k\n  version: 1\n  scope_mode: advisory"))
+    end
+
+    test "a pseudo-fence in a contract within the cap is still refused" do
+      body = fenced("pipeline_contract:\n  version: 1\n  scope_mode: advisory\n```not-a-close")
+
+      assert {:error, {:pipeline_contract_invalid, {:fence_inside_block, "```"}}} = Contract.parse(body)
+    end
+
+    test "the size cap is exclusive at its boundary: size == cap is still parsed" do
+      assert {:ok, _contract} = Contract.parse(fenced(contract_block(65_535)))
+      assert {:ok, _contract} = Contract.parse(fenced(contract_block(65_536)))
+
+      assert {:error, {:pipeline_contract_invalid, {:contract_too_large, 65_537}}} =
+               Contract.parse(fenced(contract_block(65_537)))
+    end
   end
 
   describe "path_match?/2" do
@@ -1336,6 +1434,19 @@ defmodule SymphonyElixir.PipelineContractTest do
 
   defp contract(yaml) do
     "```yaml\npipeline_contract:\n" <> indent(yaml) <> "\n```"
+  end
+
+  # A fenced block around arbitrary YAML, so a test can build a block that is not the
+  # `pipeline_contract` mapping (the shape `contract/1` cannot express).
+  defp fenced(yaml) do
+    "```yaml\n" <> yaml <> "\n```"
+  end
+
+  # A contract whose YAML block is **exactly** `size` bytes: a valid `advisory` mapping
+  # padded with a single comment line. Used to pin the exclusive boundary of the size cap.
+  defp contract_block(size) do
+    base = "pipeline_contract:\n  version: 1\n  scope_mode: advisory"
+    base <> "\n# " <> String.duplicate("x", size - byte_size(base) - 3)
   end
 
   defp indent(yaml) do

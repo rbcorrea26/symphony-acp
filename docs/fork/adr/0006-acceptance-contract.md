@@ -95,7 +95,11 @@ Revisão de 2026-09-30 (achados 1 e 2 da review do candidato `75791b4`), sobre a
 - para não esconder nada, a dica **não usa heurística de scalar** onde ela decide: um
   bloco **ilegível** — e também um bloco **acima do cap de tamanho** — é julgado no texto
   **bruto** (nada blankado, então nada pode ser escondido: um scalar desses blocos que
-  cite a chave em posição de chave é reprovado, o preço conservador declarado) e um bloco
+  cite a chave em posição de chave é reprovado, o preço conservador declarado). O cap de
+  tamanho tem **precedência**: o bloco oversized é decidido no texto bruto **antes** da
+  varredura de âncora, da cerca e do parser — o oversized nunca é parseado e uma âncora ou
+  uma pseudo-cerca estrutural não pode transformá-lo em ausência (revisão de 2026-10-01,
+  candidato `3bb6e0e`). Um bloco
   **legível sem a chave** é julgado no que o **decoder
   leu** (uma chave lida que contém o token reprova; um token dentro de um valor não é
   chave e deixa o corpo `:absent`). O blanking de scalar sobrevive só para as decisões

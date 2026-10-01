@@ -79,7 +79,8 @@ defmodule SymphonyElixir.PipelineContract do
       structural anchor (an alias graph is never expanded), refusing a block that still
       holds a fence delimiter (see the fence rule below) and reading the start of an
       unfenced body. A block above the size cap is judged on its **raw** text, like an
-      unreadable one;
+      unreadable one, and it is judged **first**: the cap has precedence, so a structural
+      anchor or a leftover fence cannot turn an oversized declaration into `absent`;
     * the fences that delimit the block follow CommonMark's structural limit: a fence
       may be indented by **at most three spaces**, so a line with four or more is
       indented code and can neither open nor close the block. Indentation is counted in
@@ -433,9 +434,10 @@ defmodule SymphonyElixir.PipelineContract do
     end
   end
 
-  # Which fenced blocks declare the contract. The answer comes from the YAML parser
-  # (see `observe/1`), so the style of the key cannot change it, and two keys —
-  # in one block or in two — are ambiguity instead of a silent choice.
+  # Which fenced blocks declare the contract. For a block within the size cap the answer
+  # comes from the YAML parser (see `observe/1`), so the style of the key cannot change it,
+  # and two keys — in one block or in two — are ambiguity instead of a silent choice. A block
+  # above the size cap is not parsed: `classify/1` decides it on the raw text before this.
   defp declared(blocks) do
     Enum.reduce_while(blocks, {:ok, []}, fn block, {:ok, acc} ->
       case classify(block) do
@@ -446,12 +448,18 @@ defmodule SymphonyElixir.PipelineContract do
     end)
   end
 
-  # A block is classified on its text **before** it is parsed when it carries a
-  # structural anchor, because parsing it would expand the alias graph: an anchored
-  # key is refused (the hint says the block claims the key) and an anchored block
-  # that claims nothing is simply not the contract, as before. A block above the size
-  # cap is not parsed either — the claim decides, and the size error comes from
-  # `decode/1`.
+  # The **order of the policies is the contract of this function**: the size cap is decided
+  # first, over the raw text, so no later scan can turn an oversized block into `:absent` —
+  # an anchor or a pseudo-fence outside a scalar makes no difference once the block is above
+  # the cap (the block is not parsed and the size error comes from `decode/1`). Below the
+  # cap, a block that carries a structural anchor is classified on its text **before** it is
+  # parsed, because parsing it would expand the alias graph: an anchored key is refused (the
+  # hint says the block claims the key) and an anchored block that claims nothing is simply
+  # not the contract, as before.
+  defp classify(block) when byte_size(block) > @max_contract_bytes do
+    if raw_claim?(block), do: {:contract, {block, nil}}, else: :absent
+  end
+
   defp classify(block) do
     case anchor(block) do
       nil ->
@@ -491,13 +499,9 @@ defmodule SymphonyElixir.PipelineContract do
     end
   end
 
-  # The block is above the size cap: it is not parsed either, and the claim decides (a
-  # block whose text declares the key fails closed; an unrelated one is absent).
-  defp classify_parsed(block) when byte_size(block) > @max_contract_bytes do
-    if raw_claim?(block), do: {:contract, {block, nil}}, else: :absent
-  end
-
-  # The **parser is the source of truth** for what the block declares: its count of
+  # The block is below the size cap: the oversized case was decided by `classify/1` on the
+  # raw text, before any scan that reads the block through the scalar-blanking heuristic.
+  # Here the **parser is the source of truth** for what the block declares: its count of
   # `pipeline_contract` keys decides presence and duplication, and a mention inside a
   # scalar or a comment is data, not a declaration. The text only **widens the failure
   # set**, in the two directions where the parser alone would report absence:

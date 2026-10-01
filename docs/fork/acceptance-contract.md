@@ -68,7 +68,7 @@ Regras do parser (`SymphonyElixir.PipelineContract`):
 | cerca de fechamento | mesmo marcador da abertura, comprimento ≥ o da abertura e **nada além de espaços** depois do marcador: uma linha como ` ```not-a-close ` é conteúdo do bloco (não trunca o YAML nem esconde os campos que vêm depois) e uma linha de abertura com info string (` ```yaml `) nunca fecha. Um **tab** (ou qualquer outro caractere) depois do marcador é conteúdo também: a cerca documentada é a de espaços, e um tab é invisível na maioria dos editores — a divergência do CommonMark aqui é deliberada e falha fechada (um tab só pode manter texto **dentro** do bloco, nunca truncá-lo) |
 | cerca de fechamento com o mesmo marcador e mais caracteres que a abertura | fecha o bloco (CommonMark): a prosa seguinte não é lida como YAML |
 | bloco que **declara** o contrato e cuja estrutura ainda contém uma cerca (a cerca que o autor escreveu e a regra recusou — tab/texto/marcador menor/outro marcador —, ou uma cerca aninhada) | `{:fence_inside_block, "```"}` → reprova: a biblioteca YAML termina o mapeamento `pipeline_contract` nessa linha e moveria todo campo escrito depois dela **para fora do contrato em silêncio**. A fronteira do bloco não é a que foi escrita, então ele não é lido como um prefixo válido. Blocos que **não** declaram o contrato são ignorados (um bloco de código qualquer pode conter cercas), e a decisão lê só a **estrutura** (scalar blankado), então uma cerca dentro de um scalar é texto e não recusa o bloco |
-| `pipeline_contract:` dentro de um scalar **e** bloco que não pode ser decodificado | a dica roda no texto **bruto** (nada blankado): a ocorrência em posição de chave é observada e o bloco **reprova** — mesmo dentro de um scalar. É o preço conservador declarado de nunca deixar uma heurística de scalar esconder uma declaração; o mesmo vale para o bloco **acima do cap de tamanho** |
+| `pipeline_contract:` dentro de um scalar **e** bloco que não pode ser decodificado | a dica roda no texto **bruto** (nada blankado): a ocorrência em posição de chave é observada e o bloco **reprova** — mesmo dentro de um scalar. É o preço conservador declarado de nunca deixar uma heurística de scalar esconder uma declaração; o mesmo vale para o bloco **acima do cap de tamanho**, que é julgado no texto **bruto** com **precedência**: o cap é decidido **antes** da varredura de âncora, da cerca e do parser, então uma âncora ou uma pseudo-cerca estrutural **fora** do scalar não pode transformá-lo em ausência |
 | aspas simples escapada (`''`) dentro de scalar | continua sendo **um** scalar (`'docs/it''s &notes.md'` não é scalar + âncora) |
 | padrão que não é UTF-8 (ex.: um `!!binary`) | `{:invalid_pattern, _, :not_utf8}` → reprova (a comparação de paths é sobre UTF-8) |
 | tag YAML (`!foo`, `!ruby/object`, `!!python/...`) | `{:invalid_yaml, %{type: :unrecognized_node}}` → reprova |
@@ -112,7 +112,10 @@ scalar com aspas ou um comentário só começa onde um nó pode começar, nunca 
 seguintes (o blanking é refeito linha a linha, onde nenhum estado sobrevive ao `\n`). O
 bloco **acima do cap de tamanho** não usa essa leitura: como o bloco ilegível, ele é
 julgado no texto bruto, então um scalar não pode esconder uma declaração nem fazendo o
-bloco crescer.
+bloco crescer. O cap de tamanho ainda tem **precedência**: ele é decidido **antes** de
+qualquer uma dessas decisões, então uma âncora ou uma pseudo-cerca estrutural fora de um
+scalar não pode transformar um bloco oversized em ausência — o bloco acima do cap nunca
+passa pela varredura de âncora, pela varredura de cerca nem pelo parser YAML.
 
 ## 3. Semântica de escopo
 

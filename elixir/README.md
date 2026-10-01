@@ -334,7 +334,10 @@ pipeline_contract:
   quoted (`"scope_mode":`, `'scope_mode':`), tagged or with the explicit-key indicator
   (`? key`), and duplicates are counted on the parser nodes, before the decoder collapses equal
   keys — so a declared contract is never classified as absent because of the key style and two
-  equal keys are never silently one. The claim hint that **widens** the failure set has two
+  equal keys are never silently one. The size cap is decided **first**: an oversized block is
+  judged on its raw text **before** any anchor scan, fence scan or parse, so an oversized block
+  is never parsed and a structural anchor or a leftover fence cannot turn it into absence. The
+  claim hint that **widens** the failure set has two
   halves: a block that **cannot be read** (and a block above the size cap) is judged on its
   **raw** text (nothing is blanked, so
   no heuristic about scalars can hide a declaration — such a block that cites the key in

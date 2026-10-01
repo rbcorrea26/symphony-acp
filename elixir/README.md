@@ -284,21 +284,187 @@ delivery:
   ci_timeout_ms: 1800000
   ci_poll_interval_ms: 15000
   request_review: true             # one-shot request, only after a stable candidate
+  evidence:                        # named evidences the issue's acceptance contract may require
+    agent-tests: "tests/agent/run-tests.sh"
+    wordpress-tests: "tests/wordpress/run-tests.sh"
 ```
 
 - A non-zero exit from `delivery.gates` fails the run: nothing is published.
+- **Three independent layers decide before a candidate is promoted**: the issue's
+  **acceptance contract** ("was the issue satisfied?"), the repository gates ("is the
+  repository still valid?") and the CI ("did the published candidate pass?"). Green gates do
+  not replace acceptance. The contract is declarative data in the **issue body**:
+
+```yaml
+pipeline_contract:
+  version: 1
+  scope_mode: strict               # strict | advisory
+  expected_paths:                  # glob patterns; each one must be delivered
+    - docs/changes/2026-09-30-pipeline-e2e-smoke.md
+    - tests/agent/run-tests.sh
+  allowed_extra_paths: []          # glob patterns authorized beyond the expected set
+  required_evidence:               # names the candidate must prove
+    - agent-tests
+    - repository-gates
+  remote_access: false             # absent = false (explicit prohibition)
+  deploy: false
+```
+
+- `strict`: an expected path that was not delivered, a changed path nobody authorized, a
+  detected prohibition or a required evidence that did not pass **fails the acceptance**, so
+  nothing is published. `advisory` reports the divergence (log and handoff comment) and the
+  delivery continues; the architectural review decides.
+- The parser extracts the fenced `pipeline_contract:` block (or an unfenced body that starts
+  with the key) and validates version, types and field names: content of the issue is **never
+  executed** (`eval`/`source`/shell are prohibited by design). A fence may be indented by at
+  most **three spaces** (four or more is indented code, so it can neither open nor close the
+  block) and the indentation is counted in spaces only — a tab-indented marker is content, the
+  conservative reading, because the column a tab reaches depends on the tab stop. The block ends
+  on a fence of the
+  **same marker**, at least as long as the opening one and with nothing but **spaces** after the
+  marker: an info string is only valid on the opening line, so a line such as ` ```not-a-close `
+  inside the block is content and cannot truncate it to a readable prefix, and a trailing **tab**
+  is content too (the deliberate, fail-closed divergence from CommonMark). A block that declares
+  the contract and still holds a fence delimiter — the close the author wrote and the rule
+  rejected, or a nested fence — is **refused** (`fence_inside_block`) instead of parsed: the YAML
+  library would end the contract mapping at that line and move every field after it out of the
+  contract in silence. Whether the body
+  *declares* the
+  contract is read from the **YAML parser**, not from a regex: the key may be written plain,
+  quoted (`"scope_mode":`, `'scope_mode':`), tagged or with the explicit-key indicator
+  (`? key`), and duplicates are counted on the parser nodes, before the decoder collapses equal
+  keys — so a declared contract is never classified as absent because of the key style and two
+  equal keys are never silently one. The size cap is decided **first**: an oversized block is
+  judged on its raw text **before** any anchor scan, fence scan or parse, so an oversized block
+  is never parsed and a structural anchor or a leftover fence cannot turn it into absence. The
+  claim hint that **widens** the failure set has two
+  halves: a block that **cannot be read** (and a block above the size cap) is judged on its
+  **raw** text (nothing is blanked, so
+  no heuristic about scalars can hide a declaration — such a block that cites the key in
+  key position is an error, never absence), and a **readable** block that reads no contract key
+  is judged on what the **decoder read** (a key the decoder read that *contains* the token means
+  a malformed scalar such as `foo:'unterminated` absorbed the following `pipeline_contract:`
+  into a longer plain key, or that the declaration is nested in another mapping: both are
+  refused; a token inside a *value* — a block scalar, a quoted string, a comment — is not a key
+  at all and leaves the body unconfigured, which is what keeps examples and prose out of the
+  contract). A quoted key in key position
+  (`"pipeline_contract":`) is unquoted first and stays visible. An unenforceable contract
+  (unknown version or field,
+  invalid pattern, a pattern that is not valid UTF-8, broken YAML, two contracts, a repeated
+  key, an anchor) fails the run instead of being ignored; an issue without a contract is simply
+  not subject to this layer. Declared residual: a scalar of an *unreadable* block, or a
+  declaration nested in another mapping, that cites the key in key position is refused instead
+  of being read as prose — an explicit error is preferred over a silent absence.
+- Evidence is named: `required_evidence` demands names, `delivery.evidence` supplies the
+  command. The reserved name `repository-gates` is satisfied by the gates stage itself. A
+  demanded name without a provider is a finding, never a silent pass, and the phase has **one
+  budget** (`delivery.gates_timeout_ms` shared by every command), because the demanded names
+  come from the untrusted issue and multiplying a timeout per name would occupy the worker for
+  hours.
+- Prohibitions are detected by scanning the **added lines** of the candidate (the tracked
+  `git diff` against the merge base with `delivery.base_branch` — read up to its cap, with the
+  child closed at that point so a huge diff is never
+  captured in memory — plus untracked files, both bounded) with the fixed rules documented in
+  `../docs/fork/adr/0006-acceptance-contract.md`. A match is a finding for the human, not a
+  proof of intent; `remote_access: true`/`deploy: true` in the contract turns the
+  corresponding scan off. A scan that reaches a cap **with content left uninspected**
+  (`change_scan_truncated`) is **never
+  reported as complete**: it adds the `prohibition_scan_truncated` finding, so a `strict`
+  contract fails closed instead of certifying the absence of a prohibition over a partial
+  read, while `advisory` reports the divergence and continues. Reaching the line budget
+  **exactly** with nothing else to read (no untracked file, or only files without a line) is a
+  complete scan, not a truncation — the criterion is uninspected content, never the bound
+  itself, so a valid candidate at the limit is not blocked.
+- The subject of the acceptance is **what the run would promote**, in one read: the diff of the
+  **final workspace state** against the merge base with `delivery.base_branch`
+  (`Git.effective_change_set/2`: committed candidate + tracked changes of the worktree +
+  untracked files), never a choice between "worktree" and "candidate". A resumed cycle whose
+  gates only added a file still accepts the committed candidate, the added lines of that same
+  diff feed the prohibition scan and the required evidence of the contract in force is executed
+  again, so a contract tightened (or changed) after the publication is re-evaluated instead of
+  reusing the acceptance of the cycle that published it. `not_applicable` answers "is there a
+  **subject** to promote?", never "is the effective change set empty?": it is reserved to a
+  workspace that sits on the base itself (`HEAD` == the merge base with the base branch) with
+  nothing the promotion would carry. A worktree that undoes every change of the published
+  candidate has an empty change set and still holds a subject — the commit that reverts the
+  candidate is what would be published —, so the contract is evaluated over that final state
+  (the expected paths are missing, the required evidence runs) instead of the revert being
+  promoted as "nothing to accept"; nothing is invented to make the change set non-empty
+  either. Both phases ask the same question over the same read. A base branch that cannot be
+  resolved is an error (`delivery_base_missing`), never an empty diff.
+  `../docs/fork/acceptance-contract.md` §6 describes the resume.
+- Candidate reads fail closed: a change set above 5 000 entries
+  (`change_set_too_large`, the diff entries and the untracked files sharing the cap) or with a
+  non-UTF-8 path (`change_set_not_utf8`) is an error
+  instead of a partial verdict, and every scan bound reached is declared
+  (`change_scan_truncated`) — including an untracked regular file that could not be
+  read, which is a hole in the scan rather than a file "without findings". The
+  `--name-status` change set is parsed **while it is read**: one
+  NUL-delimited field at a time, stopping at the first entry above the cap, so a candidate with
+  millions of paths never materialises a list of millions of entries before the bound applies. A
+  rename
+  counts as two changes — the destination and the origin
+  as a deletion, because the rename removed it — so authorizing only the new path does not
+  authorize deleting the old one; a copy is only the destination. A path reported by the diff is
+  not repeated as an untracked file.
+- The scope is evaluated again **after** the gates and the evidence commands, because they run
+  inside the workspace and may create files: what is published is the final change set, so the
+  final one is what gets accepted (a gate artifact has to be authorized in
+  `allowed_extra_paths`).
+- The verdict is **structured data**, not a boolean: `status` (`:pass`, `:fail`,
+  `:advisory`, `:not_configured` for an issue without a contract, `:not_applicable` when the
+  workspace has nothing to promote), `contract_version`, `mode`,
+  `findings`, `evidence`,
+  `change_set` and `limits`. Each finding carries a deterministic `code`
+  (`invalid_contract`, `expected_path_missing`, `unexpected_path_changed`,
+  `required_evidence_missing`, `required_evidence_failed`, `prohibition_scan_truncated`,
+  `forbidden_deploy_detected`,
+  `forbidden_remote_access_detected`), a `category`, a human `message` and an optional `path`.
+  There is no score and no ranking: the contract `mode` decides whether a finding blocks.
+- `limits` says what the layer did **not** verify — the forbidden-operation check is a pattern
+  scan of the added lines, so "no finding" is not a proof that the agent did not reach a remote
+  host or deploy, and the contents/quality of what was delivered belong to the gates, the
+  review and the architect. A pass is never reported as a proof of absence.
+- The verdict is in the result of `Delivery.run/3`, in the log
+  (`Delivery acceptance passed|diverged|failed`) and in the handoff comment as a
+  `<!-- acceptance:result:<sha>:<fingerprint> -->` marker plus JSON, which is the stable
+  interface for the review state machine and the architect runner (next increments). The
+  persisted JSON is
+  **bounded by construction** (16 KiB): above the cap the evidence commands are dropped and
+  the arrays are cut to fit, with `omitted` saying how much was left out, and the comment is
+  written **before** the labels — so a failed write cannot leave an issue promoted without its
+  verdict. The comment is the **authoritative artifact of the verdict of that candidate**: its
+  identity is the candidate marker and its content is checked by the fingerprint of the payload,
+  so a retry with the same verdict writes nothing and the same candidate re-evaluated with
+  another verdict (a contract corrected, an evidence that now fails) **replaces** the comment
+  instead of leaving a stale one behind. A rejected candidate is not published and not
+  commented: the evidence of the block
+  lives in the run log. `../docs/fork/acceptance-contract.md` documents the schema, the
+  semantics per diff case, the codes and every declared limit.
 - The candidate is the head SHA of the delivery branch that passed the local gates **and**
   whose check runs all concluded successfully **and** that was still the branch head when
-  the observation finished. A push that lands during the observation invalidates it and
-  the observation restarts on the new SHA; no CI at all, a failing check or a timeout
-  blocks the promotion.
+  the observation finished. A push that lands during the observation invalidates it: the new
+  head is not the commit the acceptance and the local gates validated, so the run fails
+  (`delivery_candidate_replaced`) instead of promoting it with another candidate's verdict.
+  A **reconciled** run (a retry of an already published candidate, with no new change set)
+  binds the same way: its candidate is the local HEAD of the workspace — accepted again from
+  git, with the evidence of the contract in force — so a branch that
+  moved (a push from outside) is refused instead of being labeled with this run's verdict.
+  No CI at all, a failing check or a timeout blocks the promotion.
 - State comes from GitHub (open pull request, ref, check runs, labels, comments), so a
   retry reconciles the existing candidate: no second branch, no second pull request, no
   second handoff comment, no repeated push. A reconciled candidate does not request a new
-  review either (the review is one-shot).
+  review either (the review is one-shot). The decision between **creating** a candidate and
+  **reconciling** the published one is read from git itself (`Git.status/1`,
+  `git status --porcelain --untracked-files=all`): reconcile only when nothing in the
+  worktree is content `git add -A` would publish. The read is explicit on purpose, so a
+  personal `status.showUntrackedFiles=no` cannot hide an untracked file from the decision
+  while the acceptance (which reads untracked files explicitly) accepts it — that would
+  promote an older candidate with a verdict about content it never carried.
 - The entry labels (`tracker.required_labels`) are removed at the handoff, which is what
   stops the next poll from dispatching an issue that was already delivered; the handoff
-  comment carries the candidate SHA, the gates command, the CI result and the review state.
+  comment carries the candidate SHA, the acceptance verdict, the gates command, the CI result
+  and the review state.
 - The credential is never written to `argv`, to the workspace or to a log: the push uses a
   throwaway `GIT_ASKPASS` helper (it holds no secret and is removed even on failure) and
   the REST calls reuse the tracker authentication.

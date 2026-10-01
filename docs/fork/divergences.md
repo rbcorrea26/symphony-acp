@@ -182,6 +182,170 @@ flag sob demanda não há registro e o mapeamento residente do upstream continua
 é um prazo: o ciclo seguinte é agendado no vencimento dele, um ciclo que já venceu não despacha
 trabalho novo e um ciclo comprovadamente idle encerra com `0` (não `3`).
 
+O **bloco D da fase 7b** (contrato de aceite legível por máquina, issue
+[#12](https://github.com/rbcorrea26/symphony-acp/issues/12), ADR-0009 §4–§5 da plataforma) entra
+pela branch `feat/phase7b-acceptance-contract` e é a primeira extensão do fork que acrescenta
+uma **camada de verificação** ao estágio de entrega: o aceite da issue
+(`pipeline_contract` v1: escopo `strict`/`advisory`, evidências nomeadas e proibições) passa a
+rodar antes de qualquer publicação, **separado** dos gates do repositório e do CI, com
+veredicto estruturado (findings de código estável) persistido no comentário de handoff. A
+**fase 7b continua incompleta**: a review (`waiting-review`/`rework`, #13) e o architect runner
+(#14) não existem ainda. Sobre esse bloco caíram três achados da review do candidato
+`ad10879`, fechados no mesmo PR: (1) a retomada de um candidato publicado passou a
+**recalcular o aceite sobre o candidato lido do Git** — change set contra a merge base com a
+branch base, linhas adicionadas do mesmo diff e evidências do contrato **em vigor** — em vez
+de tratar workspace limpo como `not_applicable`; (2) o parser de fence passou a exigir cerca
+de fechamento do mesmo marcador, com comprimento ≥ o da abertura e **nada além de espaços**
+depois do marcador, para uma pseudo-cerca (` ```not-a-close `) não truncar o YAML; (3) o parse
+do change set passou a ser **incremental e bounded enquanto lê** (um campo NUL-delimited por
+vez, parando na primeira entrada acima do cap de 5 000), sem materializar a lista inteira
+antes do limite.
+
+Sobre o mesmo bloco caíram **quatro achados materiais** da review independente do candidato
+`75791b4`, fechados nesta PR: (1) a **cerca** do bloco passou a respeitar o limite estrutural
+do CommonMark — no máximo três espaços de indentação (quatro ou mais é código indentado e não
+abre nem fecha), contados **só em espaços**, então um marcador com tab é conteúdo e não
+trunca o YAML; (2) a **dica textual** do parser deixou de poder apagar uma declaração real:
+um bloco **ilegível** passou a ser julgado no texto **bruto** (nada blankado, então nenhuma
+heurística de scalar pode esconder nada) e um bloco **legível que não lê a chave** passou a
+ser julgado no que o **decoder leu** (uma chave lida que contém o token — um scalar
+malformado que absorveu a declaração seguinte, ou uma declaração aninhada — reprova, e um
+token dentro de um valor segue sendo dado, não declaração; o blanking de scalar sobrevive
+só para a recusa de âncora e o cap, com aspas/comentário começando onde um nó pode começar
+e uma citação que não fecha não blankando as linhas seguintes); (3) o **veredicto** persistido
+deixou de ser idempotente só pelo SHA do candidato: o comentário autoritativo agora leva a
+impressão digital do payload (`<!-- acceptance:result:<sha>:<fingerprint> -->`), o mesmo
+candidato com veredicto diferente **substitui** o comentário
+(`GitHub.upsert_comment/5`/`update_comment/3`) e falha de escrita continua impedindo os
+rótulos; (4) o **sujeito do aceite passou a ser o candidato efetivo** — o diff da base para o
+**estado final do workspace** (`Git.effective_change_set/2`: candidato commitado + alterações
+do worktree + não rastreados), nunca a escolha entre "worktree" e "candidato", que esquecia
+a parte já commitada numa retomada cujo gates só acrescentou um arquivo.
+
+Sobre o mesmo bloco caiu um achado de **fail-open** da revisão de aceite do architect no
+candidato `e1b62c4`, fechado nesta PR: `not_applicable` era decidido pelo **change set efetivo
+vazio**, o que confundia duas perguntas — "existe sujeito a promover?" e "o change set efetivo
+está vazio?". Num workspace com candidato publicado cujo worktree **desfaz por inteiro** o
+candidato, o change set efetivo é vazio (a árvore final coincide com a base) e o worktree está
+sujo com `HEAD` ≠ base: o run publicaria um novo commit (o revert) e o aceite era declarado
+`not_applicable`, deixando de produzir `expected_path_missing`, de executar as evidências
+exigidas e de bloquear em `strict`. O sujeito passou a ser decidido por **fatos do git e do
+worktree** — `HEAD` ≠ base (merge base com a branch base) **ou** change set efetivo com
+entradas, os dois lidos no mesmo passo —, então o escopo e a evidência usam a mesma noção, o
+change set final vazio continua vazio (nenhuma entrada é inventada) e o commit que desfaz o
+candidato é avaliado pelo contrato em vigor.
+
+Sobre o mesmo bloco caiu um segundo achado de **fail-open** da revisão de aceite do architect no
+candidato `376830d`, fechado nesta PR: a decisão entre **criar** e **reconciliar** o candidato era
+lida de `git status --porcelain`, que obedece à configuração pessoal `status.showUntrackedFiles=no`.
+Com essa configuração, o worktree de um candidato já publicado que ganhou um path **não rastreado** —
+exatamente o que o aceite lê de forma explícita (`ls-files --others`, que a configuração não afeta) —
+aparecia **limpo**: o aceite podia `PASS` sobre o path, a promoção reconciliava o candidato antigo e o
+veredicto ficava associado a um SHA que **não continha o conteúdo aceito**, violando o invariante
+central do bloco (o conteúdo aceito é o conteúdo promovido). `Git.status/1` passou a ler
+`git status --porcelain --untracked-files=all` — explícito, então independe da configuração pessoal, e
+com os arquivos ignorados continuando invisíveis exatamente como `git add -A` os pula —, e a saída
+passou a ser lida **crua**: `changed_paths/1` parseia `XY PATH`, cujo campo de status começa com
+espaço numa alteração só do worktree (` D answer.sh`), então o `trim` da saída inteira comia o
+primeiro caractere do primeiro path. A revisão adversarial do mesmo ciclo mediu ainda aliases
+(`alias.status` não sobrepõe o builtin), `diff.ignoreSubmodules` e `submodule.<name>.ignore`
+(coerentes com `git add -A`, inclusive os ignores), arquivos ignorados, `core.quotePath` (afeta o
+**texto** dos paths do porcelain v1, nunca a detecção), repositório aninhado sem commit
+(`git add -A` falha → run falha fechado) e `add.ignoreErrors` (exit ≠ 0 → falha fechada) — nenhum
+outro produz divergência entre o que o aceite considera publicado e o que a promoção publica.
+
+Arquivos:
+
+| Arquivo | Tipo | Motivo | Comportamento upstream afetado? |
+|---|---|---|---|
+| `docs/fork/adr/0006-acceptance-contract.md` | novo | decisão durável: schema v1, política `strict`/`advisory`, veredicto estruturado, evidência nomeada, o que é verificável e o que não é, segurança; §1 revisado para a cerca (três espaços, só espaços) e para a dica textual que nunca esconde uma declaração; §5 revisado para o **candidato efetivo** (o que o run vai promover), para a separação entre "há sujeito" e "change set efetivo vazio" na semântica de `not_applicable` e §8 para o comentário autoritativo do veredicto com impressão digital | não |
+| `docs/fork/acceptance-contract.md` | novo | documento operacional do aceite: schema, semântica por caso de diff, semântica de `not_applicable` (sujeito a promover, não "change set efetivo vazio"), tabela de códigos, limites declarados (§6.1 descreve a retomada sobre o candidato efetivo e os quatro casos de sujeito, §8 o artefato autoritativo do veredicto), ponteiros para #13/#14 | não |
+| `elixir/lib/symphony_elixir/pipeline_contract.ex` | novo | parser/schema do `pipeline_contract` (data da issue, nunca código; presença/duplicidade da chave contadas nos **nós do parser** — com `maps_as_keywords`, antes do colapso de duplicatas —; a dica textual só **amplia o conjunto de falhas** e nunca esconde uma declaração: um bloco **ilegível** é julgado no texto **bruto** (nada blankado) e um bloco **legível sem a chave** é julgado no que o **decoder leu** (uma chave lida que contém o token — scalar malformado que absorveu a declaração, ou declaração aninhada — reprova; token dentro de um valor não é chave e segue ausente); o blanking de scalar sobrevive só para a recusa de âncora e a recusa da cerca (o cap de tamanho é julgado no texto **bruto**, com **precedência**), com aspas/comentário começando onde um nó pode começar (nunca colado a um `:`) e uma citação que não fecha não blankando as linhas seguintes; chave com aspas é desquotada antes; âncora de nome não-ASCII recusada sem parse; cerca exige **o mesmo marcador**, comprimento ≥ o da abertura, **nada além de espaços** depois do marcador e no máximo **três espaços** de indentação — só espaços, tab é conteúdo —, então ` ```not-a-close ` e uma cerca indentada por quatro espaços são conteúdo e não truncam o bloco; padrão não-UTF-8 recusado), globs compilados uma vez por avaliação com match Unicode, achados puros de escopo/proibição e o struct `Finding` | não (só existe com `delivery.enabled`) |
+| `elixir/lib/symphony_elixir/delivery/acceptance.ex` | novo | gate impuro do aceite: deriva o **sujeito** do ciclo como o **candidato efetivo** — o diff da merge base com `base_branch` para o **estado final do workspace** (candidato commitado + worktree + não rastreados), nunca a escolha entre worktree e candidato —, decide `not_applicable` por **existência de sujeito** (`HEAD` ≠ merge base **ou** change set efetivo com entradas, os dois fatos numa leitura só) e **não** por "change set efetivo vazio", roda as evidências exigidas sempre que há sujeito a promover (escopo e evidência usam a mesma noção), decide por modo, descreve/persiste o veredicto com payload limitado por construção (16 KiB, campo `omitted`), calcula a **impressão digital** do payload e monta a marcação `<!-- acceptance:result:<sha>:<fingerprint> -->` e o bloco JSON; varredura de proibição truncada vira o finding `prohibition_scan_truncated` (fail-closed em `strict`) além do limite declarado | não (só existe com `delivery.enabled`) |
+| `elixir/lib/symphony_elixir/delivery/acceptance/result.ex` | novo | `Result`: status, `contract_version`, `mode`, findings, evidências, change set e `limits` (serializável em JSON) | não |
+| `elixir/lib/symphony_elixir/delivery/gates.ex` | novo | runner único de comando com timeout, compartilhado por gates e evidências (extraído do `delivery.ex`) | não |
+| `elixir/lib/symphony_elixir/delivery.ex` | alterado (aditivo) | ordem das três camadas (aceite → gates → evidências), `contract` no resultado, linha + bloco JSON do aceite no comentário de handoff, `run_gates` delegando a `Delivery.Gates` e o candidato amarrado ao SHA aceito nos dois modos (`-created` e `-reconciliado`, cujo candidato é o HEAD local): `delivery_candidate_replaced` se o head da branch não for o aceito; o aceite recebe `delivery.base_branch` para derivar o candidato efetivo; o handoff **cria ou substitui** o comentário autoritativo do candidato (`GitHub.upsert_comment/5`, identidade pelo SHA + impressão digital do payload) antes de mover rótulo | não (sem o bloco `delivery` o caminho é o upstream) |
+| `elixir/lib/symphony_elixir/delivery/git.ex` | alterado (aditivo) | `effective_change_set/2` (o **candidato efetivo**: diff da base para o estado final do workspace, `--name-status -z` com rename = destino + origem como deleção, copy = só o destino — no formato da origem vem **antes** do destino —, mais os não rastreados de `ls-files`, sem repetir um path já reportado), `change_entries/1` (parse puro do formato, incremental: um campo NUL-delimited por vez, parada na primeira entrada acima do cap, sem materializar a lista inteira antes), `merge_base/2`, `added_lines/2` (leitura limitada do `git diff` de uma revisão, cujo filho é encerrado no cap, parse com estado de hunk — `+++ b/` só fora de hunk —, + não rastreados limitados: symlink/diretório/dispositivo são pulados por decisão, arquivo regular ilegível é buraco no scan e declara truncamento), `head_sha/1` e leitura crua de saída do git; `status/1` (a leitura que decide **criar vs reconciliar**) passou a rodar `git status --porcelain --untracked-files=all` com a saída **crua** — explícito para não depender de `status.showUntrackedFiles` pessoal e coerente com `git add -A` (ignorados continuam invisíveis), e sem `trim` porque `changed_paths/1` parseia `XY PATH`, cujo campo de status começa com espaço numa alteração só do worktree | não |
+| `elixir/lib/symphony_elixir/delivery/github.ex` | alterado (aditivo) | `upsert_comment/5` (identidade do artefato + marcador do payload corrente: cria, mantém quando a impressão digital confere e **substitui** quando o veredicto do mesmo candidato mudou) e `update_comment/3` (`PATCH /issues/comments/:id`), além da superfície REST do estágio | não |
+| `elixir/lib/symphony_elixir/config/schema.ex` | alterado (aditivo) | campo `delivery.evidence` (nome → comando) com validação de nome/comando não vazios | não (default `{}`) |
+| `elixir/test/symphony_elixir/pipeline_contract_test.exs` | novo | schema, estilo de chave (plana/aspas simples e duplas/tag/explícita) e duplicidade mista, menção da chave dentro de scalar, block scalar e aspas escapadas, âncora (nome não-ASCII incluso) antes da chave, padrão não-UTF-8, **fence** (pseudo-cerca e info string dentro do bloco não fecham, fechamento menor que a abertura não fecha, fechamento com espaços fecha, declaração depois da pseudo-cerca é ambígua, indentação de quatro espaços e tab não abrem nem fecham — com o par de controle de três espaços fechando), **dica textual** (`foo:'unterminated` e o equivalente com aspas duplas falham fechadas, citação válida multi-linha e comentário não declaram, bloco decodificável que não lê a chave declara `:missing_pipeline_contract_key`, prosa sem contrato segue ausente), glob em escala e proibições do parser | não |
+| `elixir/test/symphony_elixir/delivery_acceptance_test.exs` | novo | gate sobre git real (change set, rename como deleção, evidências, resume, limites, symlink/binário/arquivo ilegível, varredura truncada falhando fechada, linha que imita cabeçalho de diff, JSON), o **candidato efetivo** (candidato publicado com workspace limpo; retomada com worktree sujo: artefato do gates aceito junto do candidato, artefato não autorizado sem perder o candidato, arquivo alterado de novo reportado uma vez, alteração desfeita no worktree, rename do candidato + deleção posterior, evidência verde/vermelha, contrato endurecido depois da publicação, proibição no diff do candidato alterado; base ausente falhando fechada) e o **sujeito do aceite** (na base com worktree limpo → `not_applicable` nas duas fases; candidato publicado com worktree limpo → sujeito; worktree sujo na base → sujeito; worktree que desfaz o candidato por inteiro → não é `not_applicable`, com `expected_path_missing`, evidência executando, `strict` bloqueando, `advisory` preservado e change set efetivo continuando vazio) | não |
+| `elixir/test/symphony_elixir/delivery_test.exs` | alterado | casos ponta a ponta: bloqueio `strict`, regressão #64/#65, `advisory` persistido, evidência verde/vermelha, contrato inválido, segundo ciclo, comentário antes dos rótulos, falha de escrita do comentário que não promove a issue, candidato reconciliado com a branch movida e a **retomada** (aceite recalculado do Git, evidência verde e vermelha, evidência nova exigida depois da publicação, contrato materialmente alterado) e o **worktree que desfaz o candidato por inteiro** (o run não publica o revert: `strict` bloqueia com `expected_path_missing`, nada é publicado e o comentário aceito continua o único); o **artefato do veredicto** (retry com o mesmo veredicto não reescreve, mesmo SHA com veredicto diferente substitui o comentário, atualização antes dos rótulos, falha de atualização que não promove); no parser, change set abaixo/no/acima do cap, tail grande não lido e o candidato efetivo (rename, copy, deleção, non-UTF-8 rastreado e não rastreado, base ausente); a **decisão criar vs reconciliar** (não rastreado visível com `status.showUntrackedFiles=no` fazendo o run **criar** e o arquivo estar dentro do SHA promovido, com o `PASS` no SHA que contém o path, a leitura comparada path a path com o `git add -A` real rodado numa cópia do workspace, o arquivo ignorado que não publica nem cria candidato e o worktree realmente limpo reconciliando sob a mesma configuração) | não |
+| `elixir/README.md` | alterado | documenta `delivery.evidence`, os findings e os `limits` do aceite, a varredura truncada como falha fechada em `strict`, a contagem da chave no parser, a cerca (mesmo marcador, sem info string no fechamento, indentação máxima de três espaços, tab é conteúdo), a dica textual que só amplia falhas, o parse incremental do change set, o candidato efetivo do aceite, a semântica de `not_applicable` (sujeito a promover, não "change set efetivo vazio"), o comentário autoritativo do veredicto com impressão digital e a **decisão criar vs reconciliar** (leitura explícita do git, independente de configuração pessoal) | não |
+| `elixir/WORKFLOW.md` | alterado (aditivo, tudo comentado) | a política de docs de `elixir/AGENTS.md` exige documentar mudança de contrato do workflow: o bloco `delivery` (e o mapa `delivery.evidence` com `repository-gates` reservado) fica exemplificado como comentário, sem ativar nada | não (nenhuma chave é ativada) |
+| `docs/fork/delivery-and-promotion.md` | alterado | fluxo com as três camadas, o invariante *conteúdo aceito = conteúdo publicado* na decisão criar vs reconciliar e ponteiro para o documento do aceite | não |
+| `docs/fork/lifecycle.md` | alterado | o contrato de aceite deixa de ser pendência; #13/#14 seguem pendentes | não |
+| `docs/fork/README.md` | alterado | status da fase 7b (bloco D implementado; 7b **não** concluída) | não |
+| `docs/fork/adr/README.md` | alterado | índice do ADR `0006` | não |
+
+Sobre o mesmo bloco caíram **cinco achados** da review do architect no candidato `998b401`
+(fechamento aceitando tab, falso truncamento no orçamento exato e três documentos desatualizados),
+fechados nesta PR. (1) **HIGH — o fechamento aceitava tab**: `@closing_fence` era `[ \t]*$`, então
+` ``` ` seguido de tab fechava o bloco apesar de o contrato documentado dizer "somente espaços".
+Agora é ` *$`: tab, espaço+tab, texto, marcador menor e outro marcador são conteúdo, e o bloco
+segue aberto. (2) A revisão adjacente provou que isso **não bastava**: com a fence rejeitada dentro
+do bloco, a biblioteca YAML **encerra o mapeamento `pipeline_contract`** naquela linha e absorve o
+resto como nó de topo — um campo escrito depois era **descartado em silêncio** (medido:
+`deploy: true` depois de um fechamento com tab desaparecia do contrato), o que contradiz a promessa
+documentada de que uma pseudo-cerca "não esconde os campos que vêm depois". Agora um bloco que
+**declara** o contrato e cuja **estrutura** ainda contém uma cerca é recusado
+(`{:fence_inside_block, "```"}`): a fronteira do bloco não é a que o autor escreveu, então ele não é
+lido como prefixo válido. A decisão lê só a estrutura (scalar e comentário blankados), então uma
+cerca dentro de um scalar continua texto, e blocos que **não** declaram o contrato seguem ignorados
+— um bloco de código qualquer pode conter cercas. (3) **MEDIUM — falso truncamento no orçamento
+exato**: `untracked_lines/3` respondia `truncated: true` sempre que o orçamento de linhas chegava a
+zero (cláusula `budget <= 0`), então um candidato com **exatamente** as 2 000 linhas adicionadas e
+nada mais a ler era declarado parcial — `prohibition_scan_truncated` em `strict` **bloqueava um
+candidato válido**. A resposta passou a ser calculada do **conteúdo**: orçamento esgotado com nada
+restante (nenhum arquivo não rastreado, ou só arquivos sem linha) é varredura **completa**; uma
+linha além (rastreada ou não) é truncamento. (4) **LOW — doc**: a linha da tabela que descrevia
+"`pipeline_contract:` dentro de scalar + bloco indecodificável → scalar blankado / ausência" era da
+semântica antiga; o bloco ilegível (e o acima do cap) é julgado no texto **bruto**, então uma
+ocorrência em posição de chave **reprova**, mesmo dentro de um scalar. (5) **LOW — doc**: o ADR
+ainda dizia que a varredura de proibição usa `git diff HEAD` — hoje ela lê o **candidato efetivo**
+(diff da merge base com a branch base contra o estado final do workspace) — e
+`docs/fork/delivery-and-promotion.md` ainda citava `ensure_comment` em vez de
+`GitHub.upsert_comment/5`. Junto disso, a auditoria de referências encontrou o **mesmo** defeito de
+doc no módulo, no ADR e no documento operacional: o blanking de scalar era descrito como valendo
+para o **cap de tamanho**, que na verdade é julgado no texto bruto (medido). Testes: matriz de fence
+(espaços fecham; tab, espaço+tab, texto, marcador menor, outro marcador e cerca aninhada não fecham
+e são recusados; 0–3 espaços abrem e fecham; quatro espaços é conteúdo; scalar e bloco não
+declarante não recusam; declarante recusado — com a regressão de que o campo depois da pseudo-cerca
+**não** é descartado) e matriz de fronteira do orçamento (N−1, N, N+1, rastreado, não rastreado,
+combinado, arquivo vazio, orçamento exato e uma linha além).
+
+Uma **segunda review independente de aceite** do architect, no candidato `3bb6e0e`, encontrou um
+único achado arquitetural sobre o mesmo bloco: a **precedência do cap de tamanho**. A política
+documentada já dizia que um bloco **acima do cap** é julgado no texto **bruto**, mas a classificação
+testava a âncora e a cerca **antes** de chegar ao cap, e as duas leem o bloco pela visão com scalar
+blankado (`without_scalars/1`). Um bloco oversized cuja única ocorrência key-shaped de
+`pipeline_contract:` estava **dentro de um scalar**, mas que também tinha uma âncora estrutural **ou**
+uma pseudo-cerca estrutural **fora** do scalar, era decidido por `claimed?` (scalar blankado →
+`false`) e virava `:absent`, **contornando o cap** (medido: o mesmo bloco sem âncora/cerca falhava
+fechado com `contract_too_large`). Agora `classify/1` decide o oversized **primeiro** (guarda
+`byte_size(block) > @max_contract_bytes`), no texto bruto e sem tocar em âncora, cerca, `observe/1`
+nem no decoder YAML; só o bloco **dentro** do cap segue o fluxo âncora → cerca → parser. A cláusula
+oversized de `classify_parsed/1`, agora inalcançável, foi removida para deixar uma única fonte da
+política. Testes cruzados: oversized sem declaração (`:absent`), oversized estrutural, oversized com a
+chave só em scalar, oversized + âncora estrutural, oversized + pseudo-cerca, oversized + comentário e
+quoted scalar (todos `contract_too_large`), oversized com YAML quebrado e com UTF-8 inválido (nunca
+chegam ao parser) e a fronteira do cap N−1/N/N+1 (o cap é **exclusivo**: `size == cap` ainda é
+lido); a semântica **dentro** do cap permanece intacta (scalar → `:absent`; âncora →
+`anchors_not_supported`; pseudo-cerca → `fence_inside_block`).
+
+Arquivos:
+
+| Arquivo | Tipo | Motivo | Comportamento upstream afetado? |
+|---|---|---|---|
+| `elixir/lib/symphony_elixir/pipeline_contract.ex` | alterado | `@closing_fence` passa a aceitar **só espaços** depois do marcador (tab, texto, marcador menor e outro marcador são conteúdo) e o bloco que **declara** o contrato e ainda contém uma cerca na **estrutura** é recusado (`{:fence_inside_block, marker}`), em vez de o YAML encerrar o mapeamento ali e descartar os campos seguintes em silêncio; a doc do módulo e os comentários de `claimed?`/`classify` deixam de atribuir o blanking de scalar ao cap de tamanho (o cap é julgado no texto bruto) | não (só existe com `delivery.enabled`) |
+| `elixir/lib/symphony_elixir/delivery/git.ex` | alterado | `added_lines/2`/`untracked_lines/3`: `truncated` passa a significar **conteúdo não inspecionado por causa de um limite**, nunca "um limite foi alcançado" — orçamento esgotado com nada restante é varredura completa, e a decisão é calculada do conteúdo (o read para no primeiro arquivo com linha além do orçamento) | não |
+| `elixir/test/symphony_elixir/pipeline_contract_test.exs` | alterado | matriz de cerca de fechamento (espaços fecham; tab, espaço+tab, texto, marcador menor, outro marcador e cerca aninhada **não** fecham e o bloco é recusado; 0–3 espaços abrem/fecham; quatro espaços é conteúdo; fence dentro de scalar e em bloco não declarante não recusa; pseudo-cerca não deixa o campo seguinte ser descartado); os três testes antigos que afirmavam o tab como fechamento foram reescritos | não |
+| `elixir/test/symphony_elixir/delivery_acceptance_test.exs` | alterado | matriz de fronteira do orçamento de linhas (N−1, N, N+1 com rastreado, não rastreado, combinado, arquivo vazio, orçamento exato com nada restante e uma linha além) e o caso ponta a ponta em que um candidato com **exatamente** 2 000 linhas passa em `strict` sem `change_scan_truncated` | não |
+| `docs/fork/acceptance-contract.md` | alterado | tabela: fechamento com **espaços apenas** (tab é conteúdo), nova linha da recusa `fence_inside_block` e a linha do scalar em bloco indecodificável passa a descrever o texto **bruto**; §5 declara o critério de varredura parcial (**conteúdo não inspecionado**, nunca o limite alcançado) e o blanking de scalar deixa de ser atribuído ao cap de tamanho | não |
+| `docs/fork/adr/0006-acceptance-contract.md` | alterado | §4 deixa de citar `git diff HEAD`: a varredura lê o **candidato efetivo** (merge base da branch base → estado final do workspace, rastreado + não rastreado, com o diff lido até o cap); revisão do achado 1 (fechamento só com espaços + recusa do bloco que ainda contém cerca); cap de tamanho julgado no texto bruto; critério de truncamento | não |
+| `docs/fork/delivery-and-promotion.md` | alterado | `ensure_comment` → `GitHub.upsert_comment/5`, mantendo o invariante de o veredicto legível por máquina ser persistido antes dos rótulos | não |
+| `elixir/README.md` | alterado | cerca de fechamento com **espaços apenas** (tab é conteúdo, divergência deliberada do CommonMark), a recusa `fence_inside_block`, o bloco acima do cap julgado no texto bruto e o critério de truncamento por conteúdo não inspecionado | não |
+
 ## Regras do registro
 
 - Toda alteração em arquivo existente do upstream entra aqui **no mesmo PR**,

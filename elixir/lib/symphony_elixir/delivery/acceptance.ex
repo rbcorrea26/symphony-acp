@@ -1,0 +1,500 @@
+defmodule SymphonyElixir.Delivery.Acceptance do
+  @moduledoc """
+  Acceptance contract gate of the delivery stage (`pipeline_contract`).
+
+  This is the layer that answers **"was the issue satisfied?"**, and it is
+  independent from the two others: `delivery.gates` answers "is the repository
+  still valid?" and the GitHub check runs answer "did the published candidate
+  pass the CI?". All three run before a candidate is promoted, and green gates do
+  not replace acceptance.
+
+  This module is the impure side of the contract: `SymphonyElixir.PipelineContract`
+  parses the issue body and decides scope over data, while here the candidate
+  change set is read from the workspace, the required evidence is executed and the
+  verdict is logged, returned as `SymphonyElixir.Delivery.Acceptance.Result` and
+  persisted in the handoff comment.
+
+  Policy:
+
+    * the acceptance is checked **before** the gates and before anything is
+      published: a blocking finding (`strict` mode, or a contract that cannot be
+      enforced) fails the run, so no branch, no pull request and no label exist;
+    * `advisory` findings are reported and the delivery continues — the
+      architectural review decides (`ARCHITECT_PASS`/`REWORK`/`BLOCKED` belongs to
+      the next increment);
+    * evidence is **named**: the issue demands names (`required_evidence`), the
+      workflow provides the commands (`delivery.evidence`). The name
+      `repository-gates` is reserved and is satisfied by the gates stage itself,
+      which runs immediately before this phase; a demanded name without a provider
+      is a finding, never an invented pass;
+    * an issue without a contract is **not configured**, not implicitly strict;
+    * what is accepted is **the content this run would promote**, read in one go: the
+      diff of the final workspace state against the branch it forked from
+      (`delivery.base_branch`). A resumed cycle is not "the worktree or the candidate":
+      the candidate was committed by the cycle that published it and the gates and the
+      evidence commands may have written more into the same workspace, so the subject is
+      committed candidate + tracked worktree changes + untracked files — exactly what the
+      commit the run is about to create would carry. A workspace that holds a candidate
+      is never taken as "nothing changed" (that would skip the scope *and* the demanded
+      evidence of a resume, which is exactly the case that has to stay verified);
+    * `not_applicable` answers **"is there a subject to promote?"**, which is a different
+      question from "does the effective change set have entries?". A worktree that undoes
+      every change of the published candidate leaves an **empty** change set and still
+      holds a subject — the commit that reverts the candidate is what would be published
+      —, so the contract is still evaluated over that final state: an expected path the
+      candidate delivered is reported missing and the required evidence runs, instead of
+      the revert being promoted as "nothing to accept". Nothing is invented to make the
+      change set non-empty, either: the scope compares the paths the promotion really
+      carries. Only a workspace that sits on the base itself with nothing the promotion
+      would carry is `not_applicable`, and whenever there is something to promote the
+      required evidence of the contract in force is executed;
+    * both phases derive that subject from git; the read is cheap, has no state and
+      keeps the two phases independently testable, which is also why a retry over the
+      same candidate produces the same verdict.
+
+  What this layer does **not** verify is declared instead of assumed: the
+  forbidden-operation check is a pattern scan of the added lines of the candidate,
+  so "no finding" is not a proof of absence, and the contents/quality of what was
+  delivered belong to the gates, the review and the architect — see the `limits`
+  of the result and `docs/fork/acceptance-contract.md`.
+  """
+
+  require Logger
+
+  alias SymphonyElixir.Delivery.Acceptance.Result
+  alias SymphonyElixir.Delivery.{Gates, Git}
+  alias SymphonyElixir.PipelineContract
+  alias SymphonyElixir.PipelineContract.Finding
+  alias SymphonyElixir.Tracker.Issue
+
+  @reserved_evidence "repository-gates"
+  @max_summary_findings 3
+  @comment_text_limit 300
+  @max_persisted_bytes 16_384
+
+  @doc """
+  Scope, prohibition and contract findings of the effective candidate.
+
+  `base_branch` (the `delivery.base_branch`) is what the subject is read against: the
+  final workspace state against its merge base with that branch
+  (`Git.effective_change_set/2`), so a resume re-evaluates the scope of everything it
+  would promote — the committed candidate included — with the contract in force *now*.
+
+  Returns `{:error, {:delivery_acceptance_failed, result}}` when the verdict
+  blocks the delivery; `advisory` findings come back in `{:ok, result}`.
+  """
+  @spec scope(Path.t(), Issue.t(), String.t()) :: {:ok, Result.t()} | {:error, term()}
+  def scope(workspace, %Issue{} = issue, base_branch) do
+    case contract_of(issue) do
+      {:ok, :absent} -> {:ok, Result.not_configured()}
+      {:error, reason} -> Result.invalid_contract(reason) |> decide(:scope)
+      {:ok, contract} -> scope_phase(workspace, contract, base_branch)
+    end
+  end
+
+  @doc """
+  Evidence required by the contract for this candidate.
+
+  Only the names demanded by the issue are executed, and each one is resolved
+  through the registry of the workflow (`delivery.evidence`) or the reserved
+  `repository-gates`. The evidence runs whenever there is a subject to promote — the
+  content of the worktree, the published candidate, or a worktree that undoes every
+  change of that candidate (an empty effective change set is **not** an absent
+  subject) — because a resume that skipped it would be a promotion without the
+  evidence the contract in force demands.
+  """
+  @spec evidence(Path.t(), Issue.t(), map(), String.t()) :: {:ok, Result.t()} | {:error, term()}
+  def evidence(workspace, %Issue{} = issue, delivery, base_branch) do
+    case contract_of(issue) do
+      {:ok, :absent} -> {:ok, Result.not_configured()}
+      {:error, reason} -> Result.invalid_contract(reason) |> decide(:evidence)
+      {:ok, contract} -> evidence_phase(workspace, contract, delivery, base_branch)
+    end
+  end
+
+  @doc "One-line, human-readable acceptance summary (log and handoff comment)."
+  @spec describe(Result.t()) :: String.t()
+  def describe(%Result{status: :not_configured}), do: "not declared in the issue body (acceptance not configured)"
+
+  def describe(%Result{status: :not_applicable}),
+    do: "not applicable (the workspace sits on the base with nothing to promote)"
+
+  def describe(%Result{status: :pass} = result) do
+    "`#{result.mode}` passed (#{length(result.change_set.delivered)}/#{length(result.change_set.expected)} expected path(s) delivered, " <>
+      "#{length(result.evidence)} evidence)#{limits_note(result)}"
+  end
+
+  def describe(%Result{} = result) do
+    "`#{result.mode}` #{verdict_word(result.status)} (#{length(result.findings)} finding(s)): " <>
+      "#{findings_summary(result.findings)}#{limits_note(result)}"
+  end
+
+  @doc """
+  Machine-readable view of the verdict, persisted so the next stage can consume the
+  findings.
+
+  The payload is **bounded by construction** (`@max_persisted_bytes`): it goes into
+  a GitHub comment, which has a size limit, and the contract allows 256 evidence
+  names with commands the project declares. A verdict above the cap is compacted —
+  the evidence commands are dropped first, then the arrays are cut to what still
+  fits — and the omitted counts say what was left out, so a consumer can tell a
+  short verdict from a truncated one.
+  """
+  @spec summary_json(Result.t()) :: String.t()
+  def summary_json(%Result{} = result) do
+    json = Jason.encode!(result)
+
+    if byte_size(json) <= @max_persisted_bytes do
+      json
+    else
+      result |> compact_payload() |> Jason.encode!()
+    end
+  end
+
+  defp compact_payload(%Result{} = result) do
+    payload = %{
+      status: result.status,
+      contract_version: result.contract_version,
+      mode: result.mode,
+      findings: [],
+      evidence: [],
+      # The upper bounds are the totals on purpose: the payload measured while
+      # items are added is never smaller than the one written at the end, so the
+      # cap holds after the real counts replace them.
+      omitted: %{findings: length(result.findings), evidence: length(result.evidence)},
+      limits: result.limits,
+      persisted: "compact: the full verdict exceeded #{@max_persisted_bytes} bytes"
+    }
+
+    {findings, omitted_findings, payload} = fit(result.findings, :findings, payload)
+
+    # The evidence commands (project configuration, and the biggest part of the
+    # payload) are the first thing dropped: the name and the status of what was
+    # observed survive.
+    {evidence, omitted_evidence, payload} =
+      fit(Enum.map(result.evidence, &Map.take(&1, [:name, :status])), :evidence, payload)
+
+    %{
+      payload
+      | findings: findings,
+        evidence: evidence,
+        omitted: %{findings: omitted_findings, evidence: omitted_evidence}
+    }
+  end
+
+  # Items are added while the **encoded** payload still fits: the size is measured,
+  # not estimated, so the guarantee is the size of the JSON that is really
+  # persisted. The first item that does not fit and every item after it are counted
+  # as omitted.
+  defp fit(items, key, payload) do
+    {kept, payload} =
+      Enum.reduce_while(items, {[], payload}, fn item, {kept, payload} ->
+        attempt = %{payload | key => kept ++ [item]}
+
+        if byte_size(Jason.encode!(attempt)) <= @max_persisted_bytes do
+          {:cont, {kept ++ [item], attempt}}
+        else
+          {:halt, {kept, payload}}
+        end
+      end)
+
+    {kept, length(items) - length(kept), payload}
+  end
+
+  @doc """
+  Fingerprint of the verdict payload: the SHA-256 of the JSON that is persisted.
+
+  It is deterministic and derived from the canonical payload only (status, mode,
+  findings, evidence, limits), so it contains no secret and two equal verdicts always
+  carry the same fingerprint, while any material change — a different status, another
+  finding, an evidence that now fails, a mode that flipped — changes it.
+  """
+  @spec payload_fingerprint(Result.t()) :: String.t()
+  def payload_fingerprint(%Result{} = result) do
+    result |> summary_json() |> fingerprint()
+  end
+
+  @doc """
+  Marker of the persisted acceptance block of a candidate, carrying the fingerprint of
+  the payload it was written for.
+
+  The marker is the **identity** of the authoritative artifact of that verdict: a
+  comment whose body carries it is the record of *this* verdict, and the same candidate
+  re-evaluated with another verdict has to replace it (see
+  `SymphonyElixir.Delivery.GitHub.upsert_comment/5`) instead of leaving an old record
+  behind that still looks current.
+  """
+  @spec comment_marker(Result.t(), String.t()) :: String.t()
+  def comment_marker(%Result{} = result, candidate_sha) do
+    "<!-- acceptance:result:#{candidate_sha}:#{payload_fingerprint(result)} -->"
+  end
+
+  @doc """
+  The persisted acceptance block of the handoff comment: a marker plus the JSON
+  of the verdict, so the findings survive the process and a later stage can read
+  them without parsing prose.
+  """
+  @spec comment_block(Result.t(), String.t()) :: String.t()
+  def comment_block(%Result{} = result, candidate_sha) do
+    "#{comment_marker(result, candidate_sha)}\n```json\n#{summary_json(result)}\n```"
+  end
+
+  defp fingerprint(payload) do
+    :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower)
+  end
+
+  defp contract_of(%Issue{description: description}) do
+    case PipelineContract.parse(description) do
+      :absent -> {:ok, :absent}
+      {:ok, contract} -> {:ok, contract}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # What the acceptance is about in this cycle: **the content the run intends to
+  # promote**, which is one read and never a choice between two.
+  #
+  # A resumed cycle holds a candidate already committed by the cycle that published it,
+  # and the gates and the evidence commands may have written more into the same
+  # workspace, so the subject is the diff of the **final workspace state** against the
+  # merge base with the base branch: committed candidate + tracked changes of the
+  # worktree + untracked files. Modelling "worktree" and "candidate" as alternatives
+  # would forget the committed part of a resume whose gates only added a file, and would
+  # promote content nobody accepted.
+  defp scope_phase(workspace, contract, base_branch) do
+    with {:ok, base} <- Git.merge_base(workspace, base_branch),
+         {:ok, head} <- Git.head_sha(workspace),
+         {:ok, changed} <- Git.effective_change_set(workspace, base),
+         {:ok, %{lines: lines, truncated: truncated}} <- Git.added_lines(workspace, base) do
+      if has_acceptance_subject?(head, base, changed) do
+        scope_result(contract, changed, lines, truncated) |> decide(:scope)
+      else
+        {:ok, result_not_applicable(contract)}
+      end
+    end
+  end
+
+  # The evidence phase asks the **same** question with the same facts: a resume never
+  # runs the evidence of one phase and skips the other, and the demanded evidence is
+  # executed whenever there is a subject to promote (never on a workspace that sits on
+  # the base with nothing to promote).
+  defp evidence_phase(workspace, contract, delivery, base_branch) do
+    with {:ok, base} <- Git.merge_base(workspace, base_branch),
+         {:ok, head} <- Git.head_sha(workspace),
+         {:ok, changed} <- Git.effective_change_set(workspace, base) do
+      if has_acceptance_subject?(head, base, changed) do
+        evidence_result(contract, workspace, delivery) |> decide(:evidence)
+      else
+        {:ok, result_not_applicable(contract)}
+      end
+    end
+  end
+
+  # "Is there a subject to promote?" — the question `not_applicable` answers, and **not**
+  # "does the effective change set have entries?". Conflating the two is a fail-open: a
+  # workspace whose worktree undoes every change of the published candidate has an empty
+  # effective change set (`git diff` of the base against the final state reports nothing)
+  # while it still holds a candidate and the worktree is dirty, so the run **would**
+  # publish a commit — the revert of the candidate —. Reporting `not_applicable` there
+  # skipped the scope (no `expected_path_missing`), skipped the required evidence and let
+  # that new SHA be published without the contract in force being enforced.
+  #
+  # A subject exists when `HEAD` is not `base` (a candidate is published, whether the
+  # worktree is clean or not) or when the effective change set has entries (the worktree
+  # holds content, which is also the case of the very first cycle on the base). Both are
+  # facts of git and of the worktree, read in the same snapshot as the change set: no
+  # text is guessed and no entry is invented. `false` therefore means: on the base, with
+  # nothing the promotion would carry.
+  defp has_acceptance_subject?(head, base, changed), do: head != base or changed != []
+
+  defp result_not_applicable(contract) do
+    Result.not_applicable(mode: contract.scope_mode, contract_version: contract.version)
+  end
+
+  defp scope_result(contract, changed, lines, truncated) do
+    paths = PipelineContract.path_findings(contract, Enum.map(changed, & &1.path))
+    prohibitions = PipelineContract.prohibition_findings(contract, lines)
+
+    Result.evaluated(
+      mode: contract.scope_mode,
+      contract_version: contract.version,
+      findings: sanitize(paths.findings ++ prohibitions.findings ++ truncated_scan_findings(contract, truncated)),
+      change_set: %{
+        expected: paths.expected,
+        delivered: paths.delivered,
+        changed: paths.changed,
+        unexpected: paths.unexpected
+      },
+      limits: limits(contract, truncated or paths.truncated or prohibitions.truncated)
+    )
+  end
+
+  # A partial scan cannot certify the absence of a prohibition: with `strict` the
+  # delivery fails closed (the finding blocks) instead of passing on a read that
+  # stopped at its cap, and with `advisory` the divergence is reported and the
+  # delivery continues. The limit itself is declared either way, and a contract that
+  # switched both prohibitions off has nothing to certify (no scan ran).
+  defp truncated_scan_findings(contract, true) do
+    if PipelineContract.prohibition_scan?(contract) do
+      [
+        %Finding{
+          code: :prohibition_scan_truncated,
+          category: :forbidden_operation,
+          message: "the added-lines scan reached its documented cap: the absence of a prohibition cannot be certified over a partial scan"
+        }
+      ]
+    else
+      []
+    end
+  end
+
+  defp truncated_scan_findings(_contract, false), do: []
+
+  defp limits(contract, truncated) do
+    heuristic = if PipelineContract.prohibition_scan?(contract), do: [:prohibition_scan_is_heuristic], else: []
+    capped = if truncated, do: [:change_scan_truncated], else: []
+    heuristic ++ capped ++ [:content_not_verified]
+  end
+
+  defp evidence_result(contract, workspace, delivery) do
+    # The issue is untrusted input and may demand up to 256 evidences: the phase
+    # has ONE deadline (`delivery.gates_timeout_ms`), not one per command, so a
+    # contract cannot occupy a worker for hours by multiplying it.
+    deadline = System.monotonic_time(:millisecond) + delivery.gates_timeout_ms
+
+    {results, _deadline} =
+      Enum.map_reduce(contract.required_evidence, deadline, &run_evidence(&1, workspace, delivery, &2))
+
+    findings = results |> Enum.reject(&(&1.status == :passed)) |> Enum.map(&evidence_finding/1)
+
+    Result.evaluated(
+      mode: contract.scope_mode,
+      contract_version: contract.version,
+      findings: sanitize(findings),
+      evidence: results,
+      limits: [:content_not_verified]
+    )
+  end
+
+  # The gates stage runs immediately before this phase, and reaching it means the
+  # gates passed: the reserved name is the record of that layer, not a new command.
+  defp run_evidence(@reserved_evidence, _workspace, delivery, deadline) do
+    {%{name: @reserved_evidence, status: :passed, command: delivery.gates}, deadline}
+  end
+
+  defp run_evidence(name, workspace, delivery, deadline) do
+    case Map.get(delivery.evidence, name) do
+      nil -> {%{name: name, status: :missing_provider, command: nil}, deadline}
+      command -> run_evidence_command(name, workspace, command, deadline)
+    end
+  end
+
+  defp run_evidence_command(name, workspace, command, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      Logger.warning("Delivery evidence skipped name=#{name} reason=evidence_phase_deadline")
+      {%{name: name, status: :deadline_exceeded, command: command}, deadline}
+    else
+      run_with_budget(name, workspace, command, remaining, deadline)
+    end
+  end
+
+  defp run_with_budget(name, workspace, command, remaining, deadline) do
+    case Gates.run(workspace, command, remaining) do
+      {:ok, _output} ->
+        Logger.info("Delivery evidence passed name=#{name} command=#{inspect(command)}")
+        {%{name: name, status: :passed, command: command}, deadline}
+
+      {:error, {:command_failed, status, output}} ->
+        Logger.warning("Delivery evidence failed name=#{name} status=#{status} output=#{inspect(Git.sanitize(output))}")
+        {%{name: name, status: :failed, command: command}, deadline}
+
+      {:error, {:command_timeout, timeout_ms}} ->
+        Logger.warning("Delivery evidence timed out name=#{name} timeout_ms=#{timeout_ms}")
+        {%{name: name, status: :timeout, command: command}, deadline}
+    end
+  end
+
+  defp evidence_finding(%{name: name, status: :missing_provider}) do
+    %Finding{
+      code: :required_evidence_missing,
+      category: :evidence,
+      message: "required evidence `#{name}` has no provider in `delivery.evidence`"
+    }
+  end
+
+  defp evidence_finding(%{name: name, status: :deadline_exceeded}) do
+    %Finding{
+      code: :required_evidence_failed,
+      category: :evidence,
+      message: "required evidence `#{name}` was not executed: the evidence phase budget was already spent"
+    }
+  end
+
+  defp evidence_finding(%{name: name, status: status, command: command}) do
+    %Finding{
+      code: :required_evidence_failed,
+      category: :evidence,
+      message: "required evidence `#{name}` (`#{command}`) reported #{status}"
+    }
+  end
+
+  defp decide(result, stage) do
+    cond do
+      result.status == :pass ->
+        Logger.info("Delivery acceptance passed stage=#{stage} mode=#{result.mode} " <> verdict_log(result))
+        {:ok, result}
+
+      Result.blocking?(result) ->
+        Logger.error("Delivery acceptance failed stage=#{stage} mode=#{result.mode || :unknown} " <> verdict_log(result))
+        {:error, {:delivery_acceptance_failed, result}}
+
+      true ->
+        Logger.warning("Delivery acceptance diverged stage=#{stage} mode=advisory " <> verdict_log(result))
+        {:ok, result}
+    end
+  end
+
+  defp verdict_log(result) do
+    "findings=#{length(result.findings)}#{limits_note(result)}"
+  end
+
+  defp verdict_word(:fail), do: "failed"
+  defp verdict_word(_status), do: "diverged"
+
+  defp findings_summary(findings) do
+    details = findings |> Enum.take(@max_summary_findings) |> Enum.map_join("; ", &describe_finding/1)
+    extra = length(findings) - @max_summary_findings
+
+    if extra > 0, do: details <> " (+#{extra} more)", else: details
+  end
+
+  defp describe_finding(%Finding{message: message, path: nil}), do: message
+  defp describe_finding(%Finding{message: message, path: path}), do: "#{message} [#{safe_text(path)}]"
+
+  defp limits_note(%Result{limits: []}), do: ""
+
+  defp limits_note(%Result{limits: limits}) do
+    " [limits: #{Enum.map_join(limits, ", ", &limit_label/1)}]"
+  end
+
+  defp limit_label(:prohibition_scan_is_heuristic), do: "prohibition scan is heuristic, not a proof of absence"
+  defp limit_label(:change_scan_truncated), do: "change scan truncated at the documented cap"
+  defp limit_label(:content_not_verified), do: "content/quality not verified by this layer"
+
+  # Findings carry text taken from the candidate (paths and added lines) and end up
+  # in a log line and in a GitHub comment: credentials are masked, HTML is
+  # neutralized (a change cannot rewrite the comment) and whitespace collapsed (a
+  # newline cannot forge a log line). The `path` field stays literal for machine
+  # consumers; the prose is the escaped one.
+  defp sanitize(findings), do: Enum.map(findings, &%{&1 | message: safe_text(&1.message)})
+
+  defp safe_text(text) do
+    text
+    |> Git.sanitize()
+    |> String.replace("<", "&lt;")
+    |> String.replace(~r/\s+/, " ")
+    |> String.slice(0, @comment_text_limit)
+  end
+end

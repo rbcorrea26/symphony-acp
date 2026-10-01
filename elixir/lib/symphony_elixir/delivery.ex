@@ -11,18 +11,29 @@ defmodule SymphonyElixir.Delivery do
     * the **project** owns its gates: the command comes from the workflow
       (`delivery.gates`), never from the platform, and a non-zero exit fails the
       run instead of publishing a "almost ready" pull request;
+    * **three independent layers** run before a candidate is promoted: the
+      acceptance contract of the issue (`SymphonyElixir.Delivery.Acceptance`:
+      "was the issue satisfied?"), the repository gates ("is the repository still
+      valid?") and the CI ("did the published candidate pass?"). Green gates do
+      not replace acceptance;
     * the only write the pipeline makes towards the consumer repository is a
       branch plus a **draft** pull request on top of `delivery.base_branch`;
       never a push to the base branch, never a force push, never a merge;
     * **candidate stable** is derived, never invented: it is the head SHA of the
-      delivery branch whose local gates passed, whose CI check runs all
-      concluded successfully and which was still the branch head when the
-      observation finished. A push that lands during the observation invalidates
-      the candidate and the observation restarts on the new SHA;
+      delivery branch whose local gates passed, whose CI check runs all concluded
+      successfully and which was still the branch head when the observation
+      finished. A push that lands during the observation invalidates the candidate:
+      the new head is not the commit the acceptance and the local gates validated,
+      so the run fails (`delivery_candidate_replaced`) instead of attaching the
+      verdict of one candidate to another;
     * state is recovered from GitHub, which is what makes retry and
       reconciliation idempotent: a delivery that finds the open pull request of
       the branch reconciles it instead of creating a second one, and a second
-      run over the same candidate does not repeat the push or the handoff;
+      run over the same candidate does not repeat the push or the handoff. That
+      resumed candidate is **accepted again**, though: the acceptance reads it from
+      git (the branch head against the base branch) and executes the evidence of the
+      contract in force, so a contract that changed after the publication is
+      re-evaluated instead of being reused;
     * the one-shot review is requested **after** the candidate is stable and its
       unavailability is recorded, never fabricated and never a reason to block
       the handoff;
@@ -32,7 +43,12 @@ defmodule SymphonyElixir.Delivery do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, Delivery.Git, Delivery.GitHub}
+  alias SymphonyElixir.Config
+  alias SymphonyElixir.Delivery.Acceptance
+  alias SymphonyElixir.Delivery.Acceptance.Result
+  alias SymphonyElixir.Delivery.Gates
+  alias SymphonyElixir.Delivery.Git
+  alias SymphonyElixir.Delivery.GitHub
   alias SymphonyElixir.Tracker.Issue
 
   @type result :: %{
@@ -42,7 +58,8 @@ defmodule SymphonyElixir.Delivery do
           pull: GitHub.pull(),
           checks: map(),
           review: :requested | :unavailable | :disabled | :reconciled,
-          issue_number: integer()
+          issue_number: integer(),
+          contract: Result.t()
         }
 
   @spec run(Path.t(), Issue.t(), keyword()) :: :disabled | {:ok, result()} | {:error, term()}
@@ -112,13 +129,59 @@ defmodule SymphonyElixir.Delivery do
   defp deliver(workspace, issue, delivery, nil, github_opts) do
     settings = Config.settings!()
 
+    # Order matters and is deliberate: the acceptance contract decides scope over
+    # the candidate (cheap, and a blocking finding must not spend a gates run), the
+    # gates then say whether the repository is still valid, and only then the
+    # evidence required by the issue is executed (it uses the gates timeout).
+    # Green gates never rescue a failed acceptance: the failure comes from here.
+    #
+    # The scope is evaluated again at the end because the gates and the evidence
+    # commands run *inside* the workspace and may create or change files: what
+    # gets published is the final change set, so it is the final one that is
+    # accepted (a gate artifact has to be authorized in allowed_extra_paths, or
+    # the run fails).
+    #
+    # `delivery.base_branch` is what the acceptance uses to find the candidate of a
+    # **clean** workspace (a resume): it reads the published candidate from git
+    # instead of reading the empty worktree, and it still executes the evidence the
+    # contract in force requires.
     with {:ok, issue_number} <- issue_number(issue),
          {:ok, github} <- GitHub.context(settings.tracker, github_opts),
+         {:ok, _early} <- Acceptance.scope(workspace, issue, delivery.base_branch),
          :ok <- run_gates(workspace, delivery),
-         {:ok, prepared} <- prepare(workspace, issue, delivery, github),
+         {:ok, evidence} <- Acceptance.evidence(workspace, issue, delivery, delivery.base_branch),
+         {:ok, scope} <- Acceptance.scope(workspace, issue, delivery.base_branch) do
+      publish(
+        workspace,
+        issue,
+        delivery,
+        github,
+        issue_number,
+        settings,
+        Result.merge(scope, evidence)
+      )
+    end
+  end
+
+  # The candidate that gets promoted must be the commit this run accepted: the one
+  # `prepare/4` committed and pushed (`mode: :created`) or the local HEAD a reconciled
+  # run is resuming (`mode: :reconciled`). A branch head that moved — a push that landed
+  # before or during the observation, so nobody here accepted it — is never promoted
+  # with this verdict, and never labeled.
+  defp require_accepted_candidate(%{sha: sha}, %{sha: sha}), do: :ok
+
+  defp require_accepted_candidate(%{mode: mode, sha: accepted}, %{sha: observed}) do
+    Logger.error("Delivery candidate replaced mode=#{mode} accepted=#{accepted} observed=#{observed}")
+
+    {:error, {:delivery_candidate_replaced, accepted, observed}}
+  end
+
+  defp publish(workspace, issue, delivery, github, issue_number, settings, acceptance) do
+    with {:ok, prepared} <- prepare(workspace, issue, delivery, github),
          {:ok, candidate} <- GitHub.await_candidate(github, prepared.branch, delivery),
+         :ok <- require_accepted_candidate(prepared, candidate),
          {:ok, review} <- maybe_request_review(github, prepared, delivery),
-         :ok <- handoff(github, prepared, candidate, review, delivery, issue_number, settings) do
+         :ok <- handoff(github, prepared, candidate, review, delivery, issue_number, settings, acceptance) do
       result = %{
         status: :ready_for_human,
         branch: prepared.branch,
@@ -126,12 +189,14 @@ defmodule SymphonyElixir.Delivery do
         pull: prepared.pull,
         checks: candidate.checks,
         review: review,
-        issue_number: issue_number
+        issue_number: issue_number,
+        contract: acceptance
       }
 
       Logger.info(
         "Delivery ready-for-human branch=#{prepared.branch} candidate=#{candidate.sha} " <>
-          "pull=#{prepared.pull.number} mode=#{prepared.mode} review=#{review}"
+          "pull=#{prepared.pull.number} mode=#{prepared.mode} review=#{review} " <>
+          "contract=#{Acceptance.describe(acceptance)}"
       )
 
       {:ok, result}
@@ -141,28 +206,31 @@ defmodule SymphonyElixir.Delivery do
   # The consumer's gates. A non-zero exit means "the execution failed": nothing is
   # published and the issue goes back to the work cycle through the normal retry.
   defp run_gates(workspace, delivery) do
-    task = Task.async(fn -> System.cmd("sh", ["-lc", delivery.gates], cd: workspace, stderr_to_stdout: true) end)
-
-    case Task.yield(task, delivery.gates_timeout_ms) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {output, 0}} ->
+    case Gates.run(workspace, delivery.gates, delivery.gates_timeout_ms) do
+      {:ok, output} ->
         Logger.info("Delivery gates passed command=#{inspect(delivery.gates)} output=#{inspect(Git.sanitize(output))}")
         :ok
 
-      {:ok, {output, status}} ->
+      {:error, {:command_failed, status, output}} ->
         {:error, {:delivery_gates_failed, status, Git.sanitize(output)}}
 
-      nil ->
-        {:error, {:delivery_gates_timeout, delivery.gates_timeout_ms}}
+      {:error, {:command_timeout, timeout_ms}} ->
+        {:error, {:delivery_gates_timeout, timeout_ms}}
     end
   end
 
-  # Nothing to publish locally: either the issue was already delivered (the open
-  # pull request of the branch is the record) or the execution produced no change.
-  defp reconcile(branch, github) do
-    case GitHub.open_pull(github, branch) do
-      {:ok, nil} -> {:error, :delivery_no_changes}
-      {:ok, pull} -> {:ok, %{branch: branch, mode: :reconciled, pull: pull}}
-      {:error, reason} -> {:error, reason}
+  # Nothing to publish locally: the open pull request of the branch is the record of a
+  # previous cycle. The candidate of a reconciled run is the **local HEAD** — the
+  # content this workspace holds and this run accepts —, so a branch that moved (a push
+  # nobody accepted here) is refused by `require_accepted_candidate/2` instead of being
+  # promoted with this run's verdict.
+  defp reconcile(workspace, branch, github) do
+    with {:ok, head} <- Git.head_sha(workspace) do
+      case GitHub.open_pull(github, branch) do
+        {:ok, nil} -> {:error, :delivery_no_changes}
+        {:ok, pull} -> {:ok, %{branch: branch, mode: :reconciled, pull: pull, sha: head}}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
@@ -170,16 +238,16 @@ defmodule SymphonyElixir.Delivery do
     branch = branch_name(issue, delivery)
 
     case Git.status(workspace) do
-      {:ok, []} -> reconcile(branch, github)
+      {:ok, []} -> reconcile(workspace, branch, github)
       {:ok, _changed} -> create(workspace, issue, branch, delivery, github)
       {:error, reason} -> {:error, reason}
     end
   end
 
   defp create(workspace, issue, branch, delivery, github) do
-    with :ok <- create_candidate(workspace, issue, branch, delivery, github),
+    with {:ok, sha} <- create_candidate(workspace, issue, branch, delivery, github),
          {:ok, pull} <- ensure_pull(github, branch, delivery, issue) do
-      {:ok, %{branch: branch, mode: :created, pull: pull}}
+      {:ok, %{branch: branch, mode: :created, pull: pull, sha: sha}}
     end
   end
 
@@ -188,8 +256,9 @@ defmodule SymphonyElixir.Delivery do
 
     with :ok <- Git.checkout_branch(workspace, branch),
          :ok <- Git.add_all(workspace),
-         :ok <- Git.commit(workspace, commit_message(issue), identity) do
-      Git.push(workspace, branch, github.token)
+         :ok <- Git.commit(workspace, commit_message(issue), identity),
+         :ok <- Git.push(workspace, branch, github.token) do
+      Git.head_sha(workspace)
     end
   end
 
@@ -229,15 +298,24 @@ defmodule SymphonyElixir.Delivery do
     end
   end
 
-  defp handoff(github, prepared, candidate, review, delivery, issue_number, settings) do
-    with :ok <- GitHub.add_labels(github, issue_number, [delivery.handoff_label]),
-         :ok <- remove_entry_labels(github, issue_number, delivery, settings) do
-      GitHub.ensure_comment(
-        github,
-        issue_number,
-        marker(candidate.sha),
-        comment_body(prepared, candidate, review, delivery)
-      )
+  # The verdict is persisted *before* the promotion state changes: if writing the
+  # comment fails, the issue must not look promoted without its machine-readable
+  # verdict (the labels are the state the next poll cycle reads). The comment is the
+  # **authoritative artifact** of that verdict: it is created when it does not exist and
+  # replaced when the same candidate is re-evaluated with another payload (a contract
+  # that changed, an evidence that now fails), so an old record is never left looking
+  # current — see `GitHub.upsert_comment/5`.
+  defp handoff(github, prepared, candidate, review, delivery, issue_number, settings, acceptance) do
+    with :ok <-
+           GitHub.upsert_comment(
+             github,
+             issue_number,
+             marker(candidate.sha),
+             Acceptance.comment_marker(acceptance, candidate.sha),
+             comment_body(prepared, candidate, review, delivery, acceptance)
+           ),
+         :ok <- GitHub.add_labels(github, issue_number, [delivery.handoff_label]) do
+      remove_entry_labels(github, issue_number, delivery, settings)
     end
   end
 
@@ -281,7 +359,7 @@ defmodule SymphonyElixir.Delivery do
     """
   end
 
-  defp comment_body(prepared, candidate, review, delivery) do
+  defp comment_body(prepared, candidate, review, delivery, acceptance) do
     """
     #{marker(candidate.sha)}
     ## ready-for-human
@@ -289,10 +367,13 @@ defmodule SymphonyElixir.Delivery do
     - branch: `#{prepared.branch}` (mode: #{prepared.mode})
     - draft pull request: #{prepared.pull.url}
     - candidate stable: `#{candidate.sha}`
+    - acceptance contract: #{Acceptance.describe(acceptance)}
     - local gates: `#{delivery.gates}` exit 0
     - CI: #{candidate.checks.total} check run(s) concluded successfully
     - one-shot review: #{review}
     - merge: human decision (the pipeline never merges)
+
+    #{Acceptance.comment_block(acceptance, candidate.sha)}
     """
   end
 end

@@ -79,8 +79,24 @@ dispatcher local ([ADR-0009](https://github.com/rbcorrea26/agentic-dev-environme
 que inicia o Symphony **somente quando há trabalho** e espera que ele **encerre** o ciclo.
 Para isso o fork ganhou `--exit-when-idle`, `--issue <id>`, `--resume-only` e
 `--max-runtime-seconds` (encerramento gracioso, nunca `kill`) — contrato, códigos de saída,
-superfície alterada e o que **ainda falta** (contrato de aceite, máquina de estados da
-review, architect runner) em [lifecycle.md](lifecycle.md).
+superfície alterada e o que **ainda falta** (máquina de estados da review, architect runner)
+em [lifecycle.md](lifecycle.md).
+
+**Fase 7b, bloco D — contrato de aceite legível por máquina (implementado; a fase 7b
+**não** está concluída).** O terceiro estágio do fluxo aprovado deixou de ser implícito: o
+estágio de entrega passou a ler um `pipeline_contract` (schema v1) do **corpo da issue** e a
+decidir se a issue foi satisfeita — escopo esperado/extra (`strict`/`advisory`), evidências
+nomeadas e proibições (`remote_access`/`deploy`) por varredura limitada das linhas adicionadas.
+O veredicto é dado estruturado (findings com código estável + `limits` declarados), é
+persistido no comentário de handoff e é a interface para a máquina de estados da review (#13) e
+para o architect runner (#14) — as duas camadas que **ainda faltam** para fechar a 7b.
+
+É uma camada **separada** dos gates do repositório e do CI: gates verdes não substituem aceite,
+que foi exatamente a falha medida no primeiro ensaio real (issue #64 / PR #65 do site Estúdio
+Angel Lopes — a issue pedia dois arquivos, a implementação alterou outros e os gates ficaram
+verdes). Decisão em [adr/0006](adr/0006-acceptance-contract.md), operação em
+[acceptance-contract.md](acceptance-contract.md). O caminho Codex/Symphony residente não muda:
+sem `delivery.enabled` e sem contrato, nada disso existe.
 
 ## 2. Relação `origin` / `upstream`
 

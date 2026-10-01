@@ -316,6 +316,10 @@ defmodule SymphonyElixir.Config.Schema do
       field(:ci_poll_interval_ms, :integer, default: 10_000)
       # One-shot review request. Unavailable review is recorded, never faked.
       field(:request_review, :boolean, default: true)
+      # Named evidences of the acceptance contract: the issue demands a name
+      # (`required_evidence`), the project supplies the command. The reserved
+      # name `repository-gates` is satisfied by `gates` itself.
+      field(:evidence, :map, default: %{})
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -335,13 +339,15 @@ defmodule SymphonyElixir.Config.Schema do
           :commit_email,
           :ci_timeout_ms,
           :ci_poll_interval_ms,
-          :request_review
+          :request_review,
+          :evidence
         ],
         empty_values: []
       )
       |> validate_number(:gates_timeout_ms, greater_than: 0)
       |> validate_number(:ci_timeout_ms, greater_than: 0)
       |> validate_number(:ci_poll_interval_ms, greater_than: 0)
+      |> validate_change(:evidence, fn :evidence, evidence -> validate_evidence(evidence) end)
       |> validate_change(:gates, fn :gates, gates ->
         if is_binary(gates) and String.trim(gates) != "", do: [], else: [gates: "can't be blank"]
       end)
@@ -352,6 +358,23 @@ defmodule SymphonyElixir.Config.Schema do
         if is_binary(label) and String.trim(label) != "", do: [], else: [handoff_label: "can't be blank"]
       end)
     end
+
+    # A named evidence carries a command the pipeline will execute in the issue
+    # workspace: an empty name or an empty command would silently produce an
+    # evidence that can never pass, so both are refused at config time.
+    defp validate_evidence(evidence) when is_map(evidence) do
+      if Enum.all?(evidence, &valid_evidence_entry?/1) do
+        []
+      else
+        [evidence: "must map a non-empty evidence name to a non-empty command"]
+      end
+    end
+
+    defp valid_evidence_entry?({name, command}) when is_binary(name) and is_binary(command) do
+      String.trim(name) != "" and String.trim(command) != ""
+    end
+
+    defp valid_evidence_entry?(_entry), do: false
   end
 
   defmodule Observability do

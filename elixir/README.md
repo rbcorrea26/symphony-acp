@@ -440,7 +440,13 @@ pipeline_contract:
 - State comes from GitHub (open pull request, ref, check runs, labels, comments), so a
   retry reconciles the existing candidate: no second branch, no second pull request, no
   second handoff comment, no repeated push. A reconciled candidate does not request a new
-  review either (the review is one-shot).
+  review either (the review is one-shot). The decision between **creating** a candidate and
+  **reconciling** the published one is read from git itself (`Git.status/1`,
+  `git status --porcelain --untracked-files=all`): reconcile only when nothing in the
+  worktree is content `git add -A` would publish. The read is explicit on purpose, so a
+  personal `status.showUntrackedFiles=no` cannot hide an untracked file from the decision
+  while the acceptance (which reads untracked files explicitly) accepts it — that would
+  promote an older candidate with a verdict about content it never carried.
 - The entry labels (`tracker.required_labels`) are removed at the handoff, which is what
   stops the next poll from dispatching an issue that was already delivered; the handoff
   comment carries the candidate SHA, the acceptance verdict, the gates command, the CI result

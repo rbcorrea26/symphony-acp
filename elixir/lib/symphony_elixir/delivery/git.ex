@@ -29,6 +29,15 @@ defmodule SymphonyElixir.Delivery.Git do
   and a contract that became stricter after the publication is evaluated against the
   real content of what is about to be promoted.
 
+  `status/1` answers the other question the delivery asks — "is there anything
+  `git add -A` would publish here?" —, which is what decides between creating a candidate
+  and reconciling the published one. It reads with `--untracked-files=all` **explicitly**,
+  so the answer cannot depend on the personal `status.showUntrackedFiles` of the
+  environment: a hidden untracked file would otherwise be observed by the change set (and
+  published by `git add -A`) while the decision read a clean worktree and promoted the
+  older candidate — a verdict computed over content the promotion never carried. Ignored
+  files stay invisible, exactly as `git add -A` skips them.
+
   The reads are **bounded and fail closed**: the change set is capped
   (`@max_change_set` entries, non-UTF-8 paths refused), the **parse is bounded while it
   reads** — one NUL-delimited field at a time, so a candidate with millions of paths
@@ -65,9 +74,21 @@ defmodule SymphonyElixir.Delivery.Git do
   @type change :: %{path: String.t(), status: String.t()}
   @type added_line :: %{path: String.t(), text: String.t()}
 
+  # The create/reconcile decision reads this command, and it must observe the same
+  # universe the promotion does: `git add -A` stages every tracked change and every
+  # untracked file that is not ignored. `--untracked-files=all` is explicit because a
+  # personal `status.showUntrackedFiles=no` would otherwise report a clean worktree with
+  # an untracked file sitting in it — the acceptance would accept a path the promotion
+  # never carried. Ignored files remain invisible, exactly as `git add -A` skips them.
+  #
+  # The output is read **raw**: `changed_paths/1` parses `XY PATH`, whose status field
+  # starts with a space for a change that is only in the worktree (` D answer.sh`), so
+  # trimming the whole output would eat the first character of the first path.
+  @status_args ["status", "--porcelain", "--untracked-files=all"]
+
   @spec status(Path.t()) :: {:ok, [String.t()]} | {:error, term()}
   def status(workspace) do
-    case run(workspace, ["status", "--porcelain"]) do
+    case run_raw(workspace, @status_args) do
       {:ok, output} -> {:ok, changed_paths(output)}
       {:error, reason} -> {:error, reason}
     end

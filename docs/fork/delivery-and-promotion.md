@@ -44,6 +44,21 @@ mãos —, e o aceite é **recalculado** sobre ele, lido do Git contra a branch 
 andou (push de fora, antes ou durante a observação) é recusada com
 `delivery_candidate_replaced` em vez de receber os rótulos deste run.
 
+A **decisão entre criar e reconciliar** é lida do próprio Git (`Git.status/1`,
+`git status --porcelain --untracked-files=all`): `reconcile` só quando **nada** no worktree
+é conteúdo que `git add -A` publicaria — nenhuma alteração rastreada e nenhum arquivo não
+rastreado que não seja ignorado —, `create` em qualquer outro caso. É o **mesmo universo de
+conteúdo** que o aceite lê (`Git.effective_change_set/2` + `ls-files --others`) e que a
+promoção publica. A leitura é explícita de propósito: um `status.showUntrackedFiles=no`
+pessoal esconderia um arquivo não rastreado de um `git status` nu, e o aceite poderia `PASS`
+sobre um path que a promoção — reconciliando o candidato antigo — nunca publicaria.
+
+Invariante: *conteúdo aceito = conteúdo publicado*. Ele é executado nessa decisão (com a
+leitura explícita e coerente com `git add -A`) e no vínculo do candidato ao SHA aceito, e
+coberto por teste: um path esperado que existe apenas como não rastreado é promovido (o run
+`create`, o arquivo dentro do SHA) mesmo com a configuração pessoal escondendo-o, enquanto um
+worktree realmente limpo continua reconciliando.
+
 ## As três camadas de verificação
 
 | # | Camada | Pergunta | Onde |

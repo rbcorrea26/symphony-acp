@@ -421,12 +421,102 @@ defmodule SymphonyElixir.DeliveryTest do
     assert second.contract.status == :not_configured
   end
 
+  test "an untracked expected path is promoted even when the personal configuration hides it", %{
+    workspace: workspace,
+    origin: origin
+  } do
+    # The fail-open this pins: the acceptance includes untracked files explicitly
+    # (`ls-files --others`, which `status.showUntrackedFiles` does not touch), while a
+    # bare `git status` — the read that decided create vs reconcile — reported a clean
+    # worktree. The verdict would be calculated over content the promotion never carried.
+    configure!([])
+    fake = fake!()
+    change_answer!(workspace, "42")
+
+    assert {:ok, first} =
+             Delivery.run(workspace, contract_issue(expected_paths: ["answer.sh"]), github_opts(fake))
+
+    assert first.contract.status == :pass
+
+    File.mkdir_p!(Path.join(workspace, "docs/changes"))
+    File.write!(Path.join(workspace, "docs/changes/42.md"), "42\n")
+    git!(workspace, ["config", "status.showUntrackedFiles", "no"])
+
+    # The file is invisible to a bare `git status` and visible to the change set.
+    assert {"", 0} = System.cmd("git", ["status", "--porcelain"], cd: workspace)
+
+    assert {:ok, base} = Git.merge_base(workspace, "main")
+    assert {:ok, entries} = Git.effective_change_set(workspace, base)
+    assert %{status: "??", path: "docs/changes/42.md"} in entries
+
+    issue = contract_issue(expected_paths: ["answer.sh", "docs/changes/42.md"])
+    assert {:ok, second} = Delivery.run(workspace, issue, github_opts(fake))
+
+    # The run created a candidate instead of reconciling the older one, the PASS belongs
+    # to that SHA, and the promoted commit really carries the file that was accepted.
+    assert second.contract.status == :pass
+    assert second.candidate_sha != first.candidate_sha
+    assert FakeGitHub.sha(fake, delivery_branch()) == second.candidate_sha
+
+    assert {"42\n", 0} =
+             System.cmd("git", ["--git-dir", origin, "show", "#{second.candidate_sha}:docs/changes/42.md"], stderr_to_stdout: true)
+
+    # The candidate the first verdict was about never had that path.
+    assert {_missing, status} =
+             System.cmd(
+               "git",
+               ["--git-dir", origin, "cat-file", "-e", "#{first.candidate_sha}:docs/changes/42.md"],
+               stderr_to_stdout: true
+             )
+
+    refute status == 0
+  end
+
+  test "a truly clean worktree still reconciles under the same configuration", %{workspace: workspace} do
+    configure!([])
+    fake = fake!()
+    change_answer!(workspace, "42")
+
+    assert {:ok, first} = Delivery.run(workspace, @issue, github_opts(fake))
+
+    git!(workspace, ["config", "status.showUntrackedFiles", "no"])
+
+    # Nothing to publish, so the explicit read must not turn the reconcile into a
+    # create: no second commit, no second pull request, no second comment.
+    assert Git.status(workspace) == {:ok, []}
+    assert {:ok, second} = Delivery.run(workspace, @issue, github_opts(fake))
+
+    state = FakeGitHub.state(fake)
+
+    assert second.candidate_sha == first.candidate_sha
+    assert second.review == :reconciled
+    assert Enum.count(state.requests, &match?({:create_pull, _}, &1)) == 1
+    assert length(state.comments) == 1
+  end
+
   test "a clean workspace with nothing published is not a delivery", %{workspace: workspace} do
     configure!([])
     fake = fake!()
 
     assert {:error, :delivery_no_changes} = Delivery.run(workspace, @issue, github_opts(fake))
     assert FakeGitHub.state(fake).pulls == []
+  end
+
+  test "a workspace whose only change is an ignored file is not a delivery", %{workspace: workspace} do
+    configure!([])
+    fake = fake!()
+    File.write!(Path.join([workspace, ".git", "info", "exclude"]), "ignored.log\n", [:append])
+    File.write!(Path.join(workspace, "ignored.log"), "noise\n")
+    git!(workspace, ["config", "status.showUntrackedFiles", "no"])
+
+    # `git add -A` would publish nothing here, so neither the decision nor the
+    # acceptance may see a change: an ignored file is not content to promote.
+    assert {:ok, base} = Git.merge_base(workspace, "main")
+    assert Git.effective_change_set(workspace, base) == {:ok, []}
+
+    assert {:error, :delivery_no_changes} = Delivery.run(workspace, @issue, github_opts(fake))
+    assert FakeGitHub.state(fake).pulls == []
+    assert FakeGitHub.sha(fake, delivery_branch()) == nil
   end
 
   test "a corrected candidate after review gets its own comment", %{workspace: workspace} do
@@ -985,6 +1075,48 @@ defmodule SymphonyElixir.DeliveryTest do
     assert result.review == :unavailable
     assert result.pull.number == nil
     assert FakeGitHub.state(fake).comments != []
+  end
+
+  test "the create/reconcile read observes exactly what `git add -A` would publish", %{workspace: workspace} do
+    # An ignored file is not content to publish for either read: it stays invisible to
+    # the decision and `git add -A` also skips it.
+    File.write!(Path.join([workspace, ".git", "info", "exclude"]), "ignored.log\n", [:append])
+    File.write!(Path.join(workspace, "ignored.log"), "noise\n")
+
+    assert Git.status(workspace) == {:ok, []}
+    assert staged_by_add_all!(workspace) == []
+
+    File.mkdir_p!(Path.join(workspace, "docs"))
+    File.write!(Path.join(workspace, "docs/notes.md"), "notes\n")
+
+    # Default configuration: the untracked file is a change to publish, and the
+    # promotion read (`git add -A` on a copy of the workspace) agrees path by path.
+    assert Git.status(workspace) == {:ok, ["docs/notes.md"]}
+    assert staged_by_add_all!(workspace) == ["docs/notes.md"]
+
+    # A personal `status.showUntrackedFiles=no` makes a bare `git status` blind to it;
+    # the decision read is not, and neither is the promotion.
+    git!(workspace, ["config", "status.showUntrackedFiles", "no"])
+    assert {"", 0} = System.cmd("git", ["status", "--porcelain"], cd: workspace)
+    assert Git.status(workspace) == {:ok, ["docs/notes.md"]}
+    assert staged_by_add_all!(workspace) == ["docs/notes.md"]
+
+    # A tracked modification and a tracked deletion are changes to publish as well.
+    change_answer!(workspace, "42")
+    File.rm!(Path.join(workspace, "answer.sh"))
+
+    assert {:ok, changed} = Git.status(workspace)
+    assert Enum.sort(changed) == ["answer.sh", "docs/notes.md"]
+    assert staged_by_add_all!(workspace) == ["answer.sh", "docs/notes.md"]
+
+    # ...and a truly clean worktree keeps reading as clean under the same configuration:
+    # the explicit read cannot invent a change and turn a reconcile into a create.
+    File.rm_rf!(Path.join(workspace, "docs"))
+    git!(workspace, ["checkout", "-q", "--", "answer.sh"])
+
+    assert Git.status(workspace) == {:ok, []}
+    assert staged_by_add_all!(workspace) == []
+    assert Git.changed_paths("") == []
   end
 
   test "git reports a clean tree and a missing binary instead of crashing", %{workspace: workspace} do
@@ -1558,6 +1690,21 @@ defmodule SymphonyElixir.DeliveryTest do
   end
 
   defp in_progress(name), do: %{"name" => name, "status" => "in_progress", "conclusion" => nil}
+
+  # "What would the promotion publish?" — answered by running the real `git add -A` on a
+  # **copy** of the workspace, so the decision read and the promotion read are compared
+  # without one mutating the other.
+  defp staged_by_add_all!(workspace) do
+    copy = "#{workspace}-add-all-#{System.unique_integer([:positive])}"
+    File.cp_r!(workspace, copy)
+    on_exit(fn -> File.rm_rf(copy) end)
+    git!(copy, ["add", "-A"])
+
+    {output, 0} =
+      System.cmd("git", ["-C", copy, "diff", "--cached", "--name-only"], stderr_to_stdout: true)
+
+    output |> String.split("\n", trim: true) |> Enum.sort()
+  end
 
   defp change_answer!(workspace, content) do
     File.write!(Path.join(workspace, "answer.sh"), "#!/usr/bin/env bash\necho \"#{content}\"\n")
